@@ -1,0 +1,13 @@
+{
+  "domain": "shop2parcel",
+  "name": "Shop2Parcel",
+  "version": "0.1.0",
+  "documentation": "https://github.com/yourusername/shop2parcel",
+  "issue_tracker": "https://github.com/yourusername/shop2parcel/issues",
+  "codeowners": [],
+  "requirements": [],
+  "dependencies": [],
+  "iot_class": "cloud_polling",
+  "config_flow": true,
+  "homeassistant": "2024.1.0"
+}
