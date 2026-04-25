@@ -10,7 +10,6 @@ from custom_components.shop2parcel.api.parcelapp import VIEW_DELIVERIES_URL
 from custom_components.shop2parcel.const import DOMAIN
 
 
-@pytest.mark.xfail(strict=False, reason="__init__.py async_setup_entry not yet written")
 async def test_setup_entry_success(hass, mock_config_entry):
     """Successful setup stores placeholder in hass.data[DOMAIN][entry_id]."""
     mock_config_entry.add_to_hass(hass)
@@ -26,7 +25,6 @@ async def test_setup_entry_success(hass, mock_config_entry):
     assert mock_config_entry.entry_id in hass.data[DOMAIN]
 
 
-@pytest.mark.xfail(strict=False, reason="__init__.py async_setup_entry not yet written")
 async def test_setup_entry_auth_failure(hass, mock_config_entry):
     """ParcelApp 401 raises ConfigEntryAuthFailed (not UpdateFailed)."""
     mock_config_entry.add_to_hass(hass)
@@ -41,7 +39,6 @@ async def test_setup_entry_auth_failure(hass, mock_config_entry):
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
 
 
-@pytest.mark.xfail(strict=False, reason="__init__.py async_setup_entry not yet written")
 async def test_setup_entry_transient_failure(hass, mock_config_entry):
     """ParcelApp 503 raises ConfigEntryNotReady (retry later)."""
     mock_config_entry.add_to_hass(hass)
@@ -56,7 +53,6 @@ async def test_setup_entry_transient_failure(hass, mock_config_entry):
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
 
 
-@pytest.mark.xfail(strict=False, reason="__init__.py async_unload_entry not yet written")
 async def test_unload_entry_removes_data(hass, mock_config_entry):
     """async_unload_entry removes the entry from hass.data[DOMAIN]."""
     mock_config_entry.add_to_hass(hass)
