@@ -51,6 +51,7 @@ class GmailClient:
             return result.get("messages", [])
         except Exception as err:
             _classify_gmail_error(err)
+            raise  # unreachable, but prevents implicit None return
 
     async def async_get_message(
         self, access_token: str, message_id: str
@@ -67,6 +68,7 @@ class GmailClient:
             return await self._executor(request.execute)
         except Exception as err:
             _classify_gmail_error(err)
+            raise  # unreachable, but prevents implicit None return
 
 
 def build_incremental_query(base_query: str, last_timestamp: int | None) -> str:
