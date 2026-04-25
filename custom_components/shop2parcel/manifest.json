@@ -5,7 +5,7 @@
   "documentation": "https://github.com/yourusername/shop2parcel",
   "issue_tracker": "https://github.com/yourusername/shop2parcel/issues",
   "codeowners": [],
-  "requirements": [],
+  "requirements": ["google-api-python-client==2.194.0"],
   "dependencies": [],
   "iot_class": "cloud_polling",
   "config_flow": true,
