@@ -49,6 +49,10 @@ class _FakeAbstractOAuth2FlowHandler:
     hass: Any = None
     source: str = "user"
 
+    def __init_subclass__(cls, domain: str = "", **kwargs: Any) -> None:
+        """Accept domain keyword argument required by AbstractOAuth2FlowHandler."""
+        super().__init_subclass__(**kwargs)
+
     def __init__(self) -> None:
         self._data: dict = {}
         self._title: str = ""
