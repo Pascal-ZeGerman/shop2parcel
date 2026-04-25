@@ -179,10 +179,10 @@ async def test_add_delivery_request_body_shape(client):
     with aioresponses() as mock:
         mock.post(ADD_DELIVERY_URL, payload={"success": True}, status=200)
         await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
-        import json
         import yarl
         requests = mock.requests[("POST", yarl.URL(ADD_DELIVERY_URL))]
-        body = json.loads(requests[0].kwargs["data"])
+        # aioresponses captures json= kwarg in requests[0].kwargs["json"]
+        body = requests[0].kwargs["json"]
         assert body["tracking_number"] == "1Z999AA10123456784"
         assert body["carrier_code"] == "ups"
         assert body["description"] == "Order #1234"
