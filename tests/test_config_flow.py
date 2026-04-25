@@ -164,6 +164,7 @@ async def test_async_oauth_create_entry_calls_executor_job():
     """Gmail profile fetch (synchronous google-api call) must run in executor."""
     handler = _make_handler()
     handler.hass.async_add_executor_job = AsyncMock(return_value="user@gmail.com")
+    handler.async_set_unique_id = AsyncMock()
 
     # Patch async_step_finish to avoid further async logic
     handler.async_step_finish = AsyncMock(return_value={"type": "form", "step_id": "finish"})
