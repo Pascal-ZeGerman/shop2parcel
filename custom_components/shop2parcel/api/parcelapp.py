@@ -13,6 +13,8 @@ No HA imports (D-01/D-03).
 """
 from __future__ import annotations
 
+import asyncio
+
 import aiohttp
 
 from .exceptions import (
@@ -78,13 +80,20 @@ class ParcelAppClient:
                         "Daily quota (20/day) exhausted", reset_at=reset_at
                     )
                 if resp.status == 400:
-                    data = await resp.json(content_type=None)
-                    msg = data.get("error_message", "Bad request")
+                    try:
+                        data = await resp.json(content_type=None)
+                        msg = data.get("error_message", "Bad request")
+                    except Exception:
+                        msg = "Bad request (non-JSON body)"
                     raise ParcelAppInvalidTrackingError(msg)
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 resp.raise_for_status()
-        except (aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as err:
+        except (
+            aiohttp.ClientConnectionError,
+            aiohttp.ServerTimeoutError,
+            asyncio.TimeoutError,
+        ) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
 
     async def async_get_deliveries(
@@ -111,5 +120,9 @@ class ParcelAppClient:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 return data.get("deliveries", [])
-        except (aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as err:
+        except (
+            aiohttp.ClientConnectionError,
+            aiohttp.ServerTimeoutError,
+            asyncio.TimeoutError,
+        ) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
