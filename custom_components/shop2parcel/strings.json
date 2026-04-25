@@ -1,0 +1,50 @@
+{
+  "application_credentials": {
+    "description": "Follow the [instructions]({more_info_url}) to create OAuth2 credentials for Gmail API access:\n1. Go to [Credentials]({oauth_creds_url}) and create an **OAuth client ID**.\n2. Set Application Type to **Web application**.\n3. Configure the [OAuth consent screen]({oauth_consent_url}) with scope `gmail.readonly`."
+  },
+  "config": {
+    "step": {
+      "auth": {
+        "title": "Connect Gmail",
+        "description": "Authorize Shop2Parcel to read your Gmail inbox so it can detect Shopify shipping confirmation emails. Only read access is requested."
+      },
+      "finish": {
+        "title": "Configure Shop2Parcel",
+        "description": "Enter your parcelapp.net API key and choose a name for this integration entry.",
+        "data": {
+          "api_key": "parcelapp.net API Key",
+          "name": "Integration Name"
+        },
+        "data_description": {
+          "api_key": "Found in the parcelapp app under Settings > API.",
+          "name": "A name to identify this integration entry (e.g. \"Shop2Parcel (you@gmail.com)\")."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authorize Gmail",
+        "description": "Your Gmail authorization has expired or been revoked. Click below to re-authorize Shop2Parcel."
+      }
+    },
+    "error": {
+      "invalid_api_key": "Invalid parcelapp.net API key. Check the key in parcelapp Settings and try again.",
+      "cannot_connect": "Could not connect to parcelapp.net. Check your network connection and try again.",
+      "oauth_error": "Google authorization failed. Please try again."
+    },
+    "abort": {
+      "already_configured": "Shop2Parcel is already configured for this Gmail account.",
+      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+      "wrong_account": "Wrong account: please authenticate with the original Gmail account.",
+      "oauth_error": "[%key:common::config_flow::abort::oauth2_error%]",
+      "oauth_failed": "[%key:common::config_flow::abort::oauth2_failed%]",
+      "oauth_timeout": "[%key:common::config_flow::abort::oauth2_timeout%]",
+      "oauth_unauthorized": "[%key:common::config_flow::abort::oauth2_unauthorized%]",
+      "missing_configuration": "[%key:common::config_flow::abort::oauth2_missing_configuration%]"
+    }
+  },
+  "issues": {
+    "reauth_required": {
+      "title": "Shop2Parcel: Gmail access expired",
+      "description": "Shop2Parcel: Gmail access expired. Click to re-authorize."
+    }
+  }
+}
