@@ -18,6 +18,7 @@ sys.modules.setdefault("google.oauth2", _GOOGLE_MOCK)
 sys.modules.setdefault("google.oauth2.credentials", _GOOGLE_MOCK)
 sys.modules.setdefault("googleapiclient", _GOOGLE_MOCK)
 sys.modules.setdefault("googleapiclient.discovery", _GOOGLE_MOCK)
+sys.modules.setdefault("googleapiclient.errors", _GOOGLE_MOCK)
 
 
 @pytest.fixture(autouse=True)
