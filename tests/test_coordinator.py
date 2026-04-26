@@ -80,7 +80,7 @@ async def test_new_shipment_is_posted(hass, mock_config_entry):
         mock_parser_cls.return_value.parse.return_value = _make_shipment("msg1")
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         data = await coord._async_update_data()
         assert "msg1" in data
         assert "msg1" in coord._forwarded_ids
@@ -108,7 +108,7 @@ async def test_no_duplicate_post(hass, mock_config_entry):
         mock_gmail_cls.return_value.async_get_message = AsyncMock()
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         await coord._async_update_data()
         mock_gmail_cls.return_value.async_get_message.assert_not_called()
         mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
@@ -123,7 +123,7 @@ async def test_dedup_survives_restart(hass, mock_config_entry):
         )
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         assert coord._forwarded_ids == {"msg1", "msg2"}
         assert coord._quota_exhausted_until is None
 
@@ -132,7 +132,7 @@ async def test_dedup_survives_restart(hass, mock_config_entry):
 
 
 async def test_store_loaded_before_first_poll(hass, mock_config_entry):
-    """FWRD-03: _async_load_store called before _async_update_data on setup."""
+    """FWRD-03: async_load_store called before _async_update_data on setup."""
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
@@ -160,7 +160,7 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
         mock_parser_cls.return_value.parse.return_value = _make_shipment("sentinel_msg")
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         # Load store first — this is the contract
-        await coord._async_load_store()
+        await coord.async_load_store()
         assert "sentinel_msg" in coord._forwarded_ids
         # Now run the poll — sentinel_msg should be skipped because it was in store
         await coord._async_update_data()
@@ -197,7 +197,7 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         ]
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         await coord._async_update_data()
         assert save_mock.await_count >= 2  # one save per successful POST
 
@@ -231,7 +231,7 @@ async def test_quota_exhaustion(hass, mock_config_entry):
             side_effect=ParcelAppQuotaError("quota", reset_at=1234567890)
         )
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         # Should NOT raise — quota is handled gracefully
         data = await coord._async_update_data()
         assert coord._quota_exhausted_until == 1234567890
@@ -268,7 +268,7 @@ async def test_quota_exhausted_until_midnight(hass, mock_config_entry):
             side_effect=ParcelAppQuotaError("quota", reset_at=None)
         )
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         await coord._async_update_data()
         assert coord._quota_exhausted_until == expected
 
@@ -299,7 +299,7 @@ async def test_quota_exhausted_until_reset_at(hass, mock_config_entry):
             side_effect=ParcelAppQuotaError("quota", reset_at=9999)
         )
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         await coord._async_update_data()
         assert coord._quota_exhausted_until == 9999
 
@@ -328,7 +328,7 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
         mock_parser_cls.return_value.parse.return_value = _make_shipment("new_msg")
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         # Set quota as exhausted (in future)
         coord._quota_exhausted_until = int(time_module.time()) + 3600
         data = await coord._async_update_data()
@@ -370,7 +370,7 @@ async def test_parcelapp_transient_error_skipped(hass, mock_config_entry):
             side_effect=ParcelAppTransientError("network error")
         )
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         # Must NOT raise
         data = await coord._async_update_data()
         # msg1 NOT in forwarded_ids (transient error: will retry next cycle)
@@ -394,7 +394,7 @@ async def test_gmail_transient_raises_update_failed(hass, mock_config_entry):
             side_effect=GmailTransientError("network error")
         )
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         with pytest.raises(UpdateFailed):
             await coord._async_update_data()
 
@@ -414,7 +414,7 @@ async def test_gmail_auth_raises_config_entry_auth_failed(hass, mock_config_entr
             side_effect=GmailAuthError("token revoked")
         )
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         with pytest.raises(ConfigEntryAuthFailed):
             await coord._async_update_data()
 
@@ -446,7 +446,7 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
             side_effect=ParcelAppInvalidTrackingError("bad tracking")
         )
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
+        await coord.async_load_store()
         await coord._async_update_data()
         # msg1 NOT in forwarded_ids — invalid tracking is not a forwarding success
         assert "msg1" not in coord._forwarded_ids

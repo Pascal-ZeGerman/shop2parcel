@@ -84,8 +84,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._quota_exhausted_until: int | None = None
         self._last_email_timestamp: int | None = None
 
-    async def _async_load_store(self) -> None:
-        """Hydrate dedup + quota state from Store. Call before async_config_entry_first_refresh."""
+    async def async_load_store(self) -> None:
+        """Hydrate dedup + quota state from Store.
+
+        MUST be called before async_config_entry_first_refresh().  Failing to do so
+        leaves _forwarded_ids empty, causing every previously forwarded shipment to be
+        re-POSTed on startup (RESEARCH.md Pitfall 1).
+
+        async_setup_entry in __init__.py is the canonical caller; do not call this
+        method from any other site without careful thought about sequencing.
+        """
         stored = await self._store.async_load() or {}
         self._forwarded_ids = set(stored.get("forwarded_ids", []))
         self._quota_exhausted_until = stored.get("quota_exhausted_until")
