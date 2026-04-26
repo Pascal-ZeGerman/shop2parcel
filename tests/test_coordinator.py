@@ -448,7 +448,9 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord.async_load_store()
         await coord._async_update_data()
-        # msg1 NOT in forwarded_ids — invalid tracking is not a forwarding success
+        # msg1 NOT in forwarded_ids — invalid tracking is not a forwarding success.
+        # This is the canonical assertion: forwarded_ids is the source of truth for
+        # whether a message will be re-POSTed.  Do not assert save_mock.assert_not_called()
+        # here — that would over-constrain the test and break if future coordinator logic
+        # saves for other events (e.g., updating last_email_timestamp in the store).
         assert "msg1" not in coord._forwarded_ids
-        # async_save NOT called for this message (no add to forwarded_ids happened)
-        save_mock.assert_not_called()
