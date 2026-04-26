@@ -29,8 +29,9 @@ import voluptuous as vol
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlowResult
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigFlowResult
 from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN
+from homeassistant.core import callback
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -79,6 +80,18 @@ class OAuth2FlowHandler(
             "access_type": "offline",
             "prompt": "consent",
         }
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> "OptionsFlowHandler":
+        """Return options flow handler — registers the gear icon in HA UI.
+
+        Lazy import avoids circular dependency: options_flow.py imports from
+        const.py, which is also imported here. Direct import at module top
+        works today but the lazy form is the HA-idiomatic pattern.
+        """
+        from .options_flow import OptionsFlowHandler
+        return OptionsFlowHandler()
 
     async def async_oauth_create_entry(
         self, data: dict[str, Any]
