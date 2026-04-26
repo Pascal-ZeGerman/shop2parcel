@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -57,9 +57,10 @@ def _next_midnight_utc() -> int:
     Per CONTEXT.md D-06: when ParcelAppQuotaError.reset_at is None, fall back
     to the next UTC midnight so the backoff aligns with parcelapp's daily reset.
     """
+    today_utc = datetime.now(timezone.utc).date()
     return int(
         datetime.combine(
-            date.today() + timedelta(days=1),
+            today_utc + timedelta(days=1),
             dt_time.min,
             tzinfo=timezone.utc,
         ).timestamp()
