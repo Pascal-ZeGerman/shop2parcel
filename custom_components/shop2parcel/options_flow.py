@@ -53,7 +53,11 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                     default=self.config_entry.options.get(
                         CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY
                     ),
-                ): str,
+                # min=1 prevents an empty query which matches ALL Gmail messages,
+                # causing the coordinator to attempt parsing every email in the inbox
+                # (DoS against Gmail API quota and the HA event loop).
+                # max=500 mirrors Gmail's practical query length limit.
+                ): vol.All(str, vol.Length(min=1, max=500)),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
