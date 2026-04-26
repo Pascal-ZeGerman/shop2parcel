@@ -236,8 +236,9 @@ async def test_quota_exhaustion(hass, mock_config_entry):
         data = await coord._async_update_data()
         assert coord._quota_exhausted_until == 1234567890
         mock_store_cls.return_value.async_save.assert_called()
-        # Shipment still in data even though POST failed
-        assert "msg1" in data
+        # Shipment NOT in data when quota is blocked — withheld so it is re-fetched and
+        # POSTed correctly on the next cycle after quota resets (FWRD-02 fix, CR-02).
+        assert "msg1" not in data
 
 
 async def test_quota_exhausted_until_midnight(hass, mock_config_entry):
@@ -335,8 +336,9 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
         mock_gmail_cls.return_value.async_get_message.assert_called_once()
         # POST was NOT called
         mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
-        # But the shipment IS in data
-        assert "new_msg" in data
+        # Shipment NOT in data — withheld while quota is blocked so it is re-fetched
+        # and forwarded correctly on the next cycle after quota resets (CR-02 fix).
+        assert "new_msg" not in data
 
 
 # -------- FWRD-05: error translation taxonomy ---------------------------

@@ -160,13 +160,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if shipment is None:
                 continue
 
+            # 5. Quota guard (D-05): when quota is exhausted, do NOT add the shipment
+            # to current_data and do NOT advance max_email_date.  Keeping the message
+            # "unseen" ensures _last_email_timestamp is not advanced past it, so Gmail
+            # will return it again on the next poll cycle once quota has reset — at which
+            # point it will be properly POSTed and added to forwarded_ids.  Advancing
+            # current_data or max_email_date here would cause the message to be skipped
+            # by the after_timestamp filter and never forwarded (FWRD-02 violation).
+            if quota_blocked:
+                continue
+
             current_data[msg_id] = shipment
             if email_date > max_email_date:
                 max_email_date = email_date
-
-            # 5. Quota guard (D-05): keep accumulating shipments, skip POST.
-            if quota_blocked:
-                continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
             try:
@@ -203,5 +209,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         if max_email_date > (self._last_email_timestamp or 0):
             self._last_email_timestamp = max_email_date
+
+        # Clear stale quota block from Store once the window has expired.  Without
+        # this, a past-epoch timestamp would accumulate across restarts indefinitely.
+        # Also handles the case where the user resolves their quota via another
+        # mechanism before reset_at — clearing here ensures the next cycle posts freely.
+        if (
+            self._quota_exhausted_until is not None
+            and int(time.time()) >= self._quota_exhausted_until
+        ):
+            self._quota_exhausted_until = None
+            await self._async_save_store()
 
         return current_data
