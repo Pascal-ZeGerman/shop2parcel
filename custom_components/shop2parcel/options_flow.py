@@ -1,0 +1,59 @@
+"""Options flow for Shop2Parcel — poll interval + Gmail search query.
+
+Phase 4: subclasses OptionsFlowWithReload (HA 2024.9+) so saving the form
+automatically reloads the config entry — coordinator is re-instantiated with
+the new poll interval. No manual update listener required (CONTEXT.md D-07).
+
+Locked decisions:
+- D-07: OptionsFlowWithReload, NOT manual entry.add_update_listener.
+- D-08: CONF_POLL_INTERVAL int range 5..1440, default 30; CONF_GMAIL_QUERY str.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import voluptuous as vol
+
+from homeassistant.config_entries import OptionsFlowWithReload
+from homeassistant.data_entry_flow import FlowResult
+
+from .const import (
+    CONF_GMAIL_QUERY,
+    CONF_POLL_INTERVAL,
+    DEFAULT_GMAIL_QUERY,
+    DEFAULT_POLL_INTERVAL,
+)
+
+
+class OptionsFlowHandler(OptionsFlowWithReload):
+    """Handle Shop2Parcel options flow.
+
+    Subclassing OptionsFlowWithReload triggers automatic config entry reload
+    on save — HA calls async_unload_entry + async_setup_entry with the new
+    options dict, and the coordinator picks up the new poll interval.
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Show form with current values; save and reload on submit."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_POLL_INTERVAL,
+                    default=self.config_entry.options.get(
+                        CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
+                    ),
+                ): vol.All(int, vol.Range(min=5, max=1440)),
+                vol.Required(
+                    CONF_GMAIL_QUERY,
+                    default=self.config_entry.options.get(
+                        CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY
+                    ),
+                ): str,
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
