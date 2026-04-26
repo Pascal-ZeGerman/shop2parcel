@@ -1,65 +1,65 @@
 """The Shop2Parcel integration.
 
-Phase 3: Near-stub async_setup_entry — validates parcelapp API key and stores
-a placeholder in hass.data for Phase 4 to replace with a DataUpdateCoordinator.
+Phase 4: async_setup_entry instantiates Shop2ParcelCoordinator, hydrates the
+deduplication state from Store BEFORE the first refresh (RESEARCH.md Pitfall 1),
+and forwards to PLATFORMS (empty in Phase 4; Phase 5 adds 'sensor' + 'binary_sensor').
 
 Phase boundary:
-- Phase 3 owns: credential validation, hass.data placeholder, entry unload
-- Phase 4 owns: coordinator instantiation, platform forwarding, options flow
-- Phase 5 owns: sensor/binary_sensor platform setup
+- Phase 3 owned credential validation (replaced — coordinator's _async_update_data
+  handles all API errors and translates to ConfigEntryAuthFailed/UpdateFailed).
+- Phase 4 owns coordinator instantiation, Store hydration, platform forwarding stub,
+  and options flow registration (registered via config_flow.py).
+- Phase 5 will add 'sensor' and 'binary_sensor' to PLATFORMS — no other changes
+  to this file required.
 """
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api.exceptions import ParcelAppAuthError, ParcelAppTransientError
-from .api.parcelapp import ParcelAppClient
 from .const import DOMAIN
 
-# Phase 3: no platforms yet. Phase 4 adds coordinator; Phase 5 populates this list.
+# Phase 4: empty platform list. Phase 5 adds: ["sensor", "binary_sensor"]
+# CONTEXT.md D-09 — Phase 5 only modifies this list, no other setup changes needed.
 PLATFORMS: list[str] = []
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Shop2Parcel from a config entry.
 
-    Smoke-tests the parcelapp.net API key by calling the view-deliveries endpoint
-    (20/hour quota — does not consume the 20/day add-delivery quota).
+    Order of operations is critical:
+      1. Construct coordinator (no I/O)
+      2. _async_load_store() hydrates dedup set + quota state from disk
+      3. async_config_entry_first_refresh() runs first poll cycle
+      4. Store coordinator in hass.data and forward to platforms
 
-    Raises:
-        ConfigEntryAuthFailed: API key is invalid (HTTP 401/403). HA surfaces a
-            Repairs notification and offers to rerun the config flow.
-        ConfigEntryNotReady: API is unreachable (network error, HTTP 5xx). HA will
-            retry setup after a delay without user intervention.
+    Step 2 MUST precede step 3 — RESEARCH.md Pitfall 1: an empty forwarded_ids
+    set on first poll re-POSTs every previously forwarded shipment, wasting quota.
     """
-    api_key: str = entry.data["api_key"]
-    session = async_get_clientsession(hass)
-    client = ParcelAppClient(session=session, api_key=api_key)
+    # Lazy import: coordinator.py depends on gmail_client.py which requires
+    # google/googleapiclient stubs to be in sys.modules. Deferring to function scope
+    # ensures the test harness (conftest.py) has registered the mocks before this
+    # import runs. At production runtime there is no difference.
+    from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
 
-    try:
-        await client.async_get_deliveries()
-    except ParcelAppAuthError as err:
-        raise ConfigEntryAuthFailed(
-            "Invalid parcelapp.net API key — reconfigure the integration"
-        ) from err
-    except ParcelAppTransientError as err:
-        raise ConfigEntryNotReady(
-            "Cannot connect to parcelapp.net — will retry"
-        ) from err
+    coordinator = Shop2ParcelCoordinator(hass, entry)
+    await coordinator._async_load_store()
+    await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = {}  # Phase 4 replaces with coordinator instance
+    hass.data[DOMAIN][entry.entry_id] = coordinator
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry.
 
-    Phase 3: removes hass.data placeholder only. No platform unloads needed
-    (PLATFORMS is empty). Phase 4 extends this to unload coordinator + platforms.
+    Symmetric with async_setup_entry: unload platforms first, then drop coordinator
+    from hass.data only if the platform unload succeeded. Phase 5 benefits
+    automatically when it populates PLATFORMS.
     """
-    hass.data[DOMAIN].pop(entry.entry_id, None)
-    return True
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+    return unload_ok

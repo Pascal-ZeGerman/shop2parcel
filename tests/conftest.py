@@ -4,14 +4,12 @@ from __future__ import annotations
 import sys
 from unittest.mock import MagicMock
 
-import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-
-from custom_components.shop2parcel.const import DOMAIN
-
-# NOTE: `hass` fixture is provided automatically by pytest-homeassistant-custom-component
-
-# Mock google/googleapiclient so config_flow.py can be loaded without real packages
+# IMPORTANT: Mock google/googleapiclient BEFORE importing any custom_components.shop2parcel
+# module. Phase 4 __init__.py imports coordinator.py at module level, which imports
+# gmail_client.py, which imports from google.oauth2.credentials and googleapiclient.
+# Python executes __init__.py when first accessing the shop2parcel package, so the mocks
+# MUST be in sys.modules before `from custom_components.shop2parcel.const import DOMAIN`
+# runs below (that import triggers the package __init__.py).
 _GOOGLE_MOCK = MagicMock()
 sys.modules.setdefault("google", _GOOGLE_MOCK)
 sys.modules.setdefault("google.oauth2", _GOOGLE_MOCK)
@@ -25,6 +23,13 @@ sys.modules.setdefault("googleapiclient.discovery", _GOOGLE_MOCK)
 # becomes a no-op and isinstance() checks in gmail_client._classify_gmail_error break.
 # coordinator.py tests mock GmailClient directly so gmail_client.py's module-level
 # import of HttpError is not exercised at coordinator test runtime.
+
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.shop2parcel.const import DOMAIN
+
+# NOTE: `hass` fixture is provided automatically by pytest-homeassistant-custom-component
 
 
 @pytest.fixture(autouse=True)
