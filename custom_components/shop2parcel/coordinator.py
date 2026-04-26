@@ -191,6 +191,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     description=shipment.order_name,
                 )
             except ParcelAppAuthError as err:
+                # Raising ConfigEntryAuthFailed mid-loop is safe: messages that were
+                # successfully forwarded before this point already had their msg_ids
+                # added to _forwarded_ids and persisted to Store (line ~210 below).
+                # _last_email_timestamp is NOT yet advanced (that happens after the
+                # loop), so after the user re-authenticates the next poll re-fetches
+                # all messages from the last known timestamp.  Those already in
+                # forwarded_ids are skipped; unforwarded ones are retried cleanly.
                 raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
             except ParcelAppQuotaError as err:
                 # D-06: prefer reset_at, else next midnight UTC.
