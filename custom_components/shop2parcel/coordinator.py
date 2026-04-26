@@ -107,7 +107,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             await oauth_session.async_ensure_token_valid()
         except Exception as err:  # noqa: BLE001 — translate to HA exception
             raise ConfigEntryAuthFailed("Gmail token refresh failed") from err
-        access_token: str = self._entry.data["token"]["access_token"]
+        # Read token from the session object, not entry.data — async_ensure_token_valid
+        # may create a new data dict on the config entry (HA 2024.x+), so self._entry.data
+        # could still hold the pre-refresh snapshot.  The OAuth2Session already holds the
+        # refreshed token after the await above.
+        access_token: str = oauth_session.token["access_token"]
 
         # 2. List Gmail messages matching the configured query.
         gmail = GmailClient(self.hass.async_add_executor_job)
