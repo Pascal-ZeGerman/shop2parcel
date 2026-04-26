@@ -179,10 +179,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if quota_blocked:
                 continue
 
-            current_data[msg_id] = shipment
-            if email_date > max_email_date:
-                max_email_date = email_date
-
             carrier_code = normalize_carrier(shipment.carrier_name)
             try:
                 await parcel_client.async_add_delivery(
@@ -219,8 +215,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 _LOGGER.warning("parcelapp.net transient error for %s: %s", msg_id, err)
                 continue
 
-            # 6. Success — persist immediately (Pitfall 2 in RESEARCH.md).
+            # 6. Success — update data and persist (current_data deferred to here so
+            # quota/error paths cannot produce a stale entry, satisfying FWRD-02).
             self._forwarded_ids.add(msg_id)
+            current_data[msg_id] = shipment
+            if email_date > max_email_date:
+                max_email_date = email_date
             await self._async_save_store()
 
         if max_email_date > (self._last_email_timestamp or 0):
@@ -228,10 +228,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         # Clear stale quota block from Store once the window has expired.  Without
         # this, a past-epoch timestamp would accumulate across restarts indefinitely.
-        # Also handles the case where the user resolves their quota via another
-        # mechanism before reset_at — clearing here ensures the next cycle posts freely.
+        # Skip when quota_blocked=True: the timestamp was just set this cycle and must
+        # not be cleared in the same pass (even if reset_at is already in the past).
         if (
-            self._quota_exhausted_until is not None
+            not quota_blocked
+            and self._quota_exhausted_until is not None
             and int(time.time()) >= self._quota_exhausted_until
         ):
             self._quota_exhausted_until = None
