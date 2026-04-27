@@ -90,12 +90,20 @@ class ShipmentSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
             identifiers={(DOMAIN, entry.entry_id)},
             name="Shop2Parcel",
         )
-        # Human-readable name relative to device (per has_entity_name=True).
-        # Falls back to message_id if order_name not available at construction.
-        shipment = coordinator.data.get(message_id) if coordinator.data else None
-        self._attr_name = (
-            f"Shipment {shipment.order_name}" if shipment is not None else f"Shipment {message_id}"
-        )
+
+    @property
+    def name(self) -> str:
+        """Human-readable name relative to device (per has_entity_name=True).
+
+        Re-evaluated on each state write so updates if order_name becomes
+        available after construction.  Falls back to message_id if not yet
+        present in coordinator.data.
+        """
+        if self.coordinator.data:
+            shipment = self.coordinator.data.get(self._message_id)
+            if shipment is not None:
+                return f"Shipment {shipment.order_name}"
+        return f"Shipment {self._message_id}"
 
     @property
     def native_value(self) -> str:
