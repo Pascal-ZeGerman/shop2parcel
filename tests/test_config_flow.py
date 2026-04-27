@@ -295,6 +295,46 @@ async def test_reauth_confirm_with_input_calls_async_step_user():
 
 
 # ---------------------------------------------------------------------------
+# Test: reauth completion path — async_oauth_create_entry under SOURCE_REAUTH
+# (Phase 6 D-01 gap fill: reauth path)
+# ---------------------------------------------------------------------------
+
+
+async def test_reauth_oauth_create_entry_calls_update_reload_and_abort():
+    """SOURCE_REAUTH branch calls async_update_reload_and_abort with reauth_entry and data.
+
+    Covers Phase 6 D-01 gap 1: existing reauth tests stop at the dialog; this exercises
+    the OAuth-completed path that hands tokens back to HA and triggers entry reload.
+    """
+    handler = _make_handler()
+    # source is a property reading from self.context["source"]; set context directly
+    handler.context = {"source": _mock_ha_config_entries.SOURCE_REAUTH}  # "reauth"
+    fake_reauth_entry = MagicMock()
+    handler._get_reauth_entry = MagicMock(return_value=fake_reauth_entry)
+    handler._abort_if_unique_id_mismatch = MagicMock()
+    handler.async_update_reload_and_abort = MagicMock(
+        return_value={"type": "abort", "reason": "reauth_successful"}
+    )
+    handler.async_set_unique_id = AsyncMock()
+
+    result = await handler.async_oauth_create_entry(FAKE_TOKEN_DATA)
+
+    # Profile fetch happened
+    handler.hass.async_add_executor_job.assert_called_once()
+    # Unique ID was set to the email returned by the executor mock
+    handler.async_set_unique_id.assert_awaited_once_with("user@gmail.com")
+    # Mismatch guard was invoked with the documented reason
+    handler._abort_if_unique_id_mismatch.assert_called_once_with(reason="wrong_account")
+    # Reauth entry was looked up and used
+    handler._get_reauth_entry.assert_called_once()
+    handler.async_update_reload_and_abort.assert_called_once_with(
+        fake_reauth_entry, data=FAKE_TOKEN_DATA
+    )
+    # Result is the abort dict (does NOT proceed to async_step_finish)
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+
+
+# ---------------------------------------------------------------------------
 # Test: class structure requirements
 # ---------------------------------------------------------------------------
 
