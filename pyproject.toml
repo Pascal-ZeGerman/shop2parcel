@@ -2,7 +2,7 @@
 name = "shop2parcel"
 version = "0.1.0"
 description = "Home Assistant custom integration: Shopify → Parcel App tracking via Gmail"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = []
 
 [project.optional-dependencies]
@@ -34,7 +34,7 @@ ignore = ["E501"]  # line length already enforced via line-length
 "tests/**/*.py" = ["B", "UP", "F401", "F841", "E402"]  # tests can use older idioms / bare assert patterns
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 strict = false
 ignore_missing_imports = true
 follow_imports = "silent"
