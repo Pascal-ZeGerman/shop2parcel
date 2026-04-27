@@ -538,6 +538,11 @@ async def test_cleanup_uses_filter_mode_recent(hass, mock_config_entry):
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         raw = hass.data[DOMAIN][mock_config_entry.entry_id]
         coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
+        # Seed data so the early-return guard (WR-01) doesn't skip the API call
+        coordinator.async_set_updated_data({"msg1": ShipmentData(
+            tracking_number="TR123", carrier_name="UPS",
+            order_name="#1", message_id="msg1", email_date=0,
+        )})
         await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
 
     fake_client.async_get_deliveries.assert_called_with(filter_mode="recent")
