@@ -151,3 +151,44 @@ async def test_cleanup_removes_entity(hass, mock_config_entry):
     post_uids = {e.unique_id for e in post_entries}
     assert f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a" not in post_uids
     assert "msg_a" not in coordinator.data
+
+
+async def test_sensor_appears_when_data_gains_entry(hass, mock_config_entry):
+    """ENTT-01 / Phase 6 D-01 gap fill: sensor entity registered AFTER coordinator.data
+    gains a new message_id key mid-run.
+
+    Existing tests (test_sensor_created_for_each_shipment) pre-seed data BEFORE setup.
+    This test sets up with EMPTY data, then dispatches a coordinator update with a new
+    key and asserts the listener registered a new sensor entity.
+    """
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+
+    registry = er.async_get(hass)
+    new_uid = f"{DOMAIN}_{mock_config_entry.entry_id}_msg_new"
+
+    # Pre-condition: no sensor entity for "msg_new" yet
+    pre_entries = registry.entities.get_entries_for_config_entry_id(
+        mock_config_entry.entry_id
+    )
+    pre_sensor_uids = {
+        e.unique_id for e in pre_entries if e.entity_id.startswith("sensor.")
+    }
+    assert new_uid not in pre_sensor_uids
+
+    # Dispatch coordinator update with a NEW shipment
+    coordinator.async_set_updated_data(
+        {"msg_new": _make_shipment("msg_new", "1Z999AA10123456784")}
+    )
+    await hass.async_block_till_done()
+
+    # Post-condition: sensor.shop2parcel_*_msg_new is now registered
+    post_entries = registry.entities.get_entries_for_config_entry_id(
+        mock_config_entry.entry_id
+    )
+    post_sensor_uids = {
+        e.unique_id for e in post_entries if e.entity_id.startswith("sensor.")
+    }
+    assert new_uid in post_sensor_uids, (
+        f"Expected {new_uid} in entity registry after coordinator update; "
+        f"found {post_sensor_uids}"
+    )
