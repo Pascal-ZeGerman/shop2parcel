@@ -7,7 +7,7 @@ api/*.py — this module only sequences them.
 Locked decisions (CONTEXT.md):
 - D-01: data is dict[str, ShipmentData] keyed by Gmail message_id.
 - D-02: data accumulates all ever-seen shipments — no status filtering here.
-- D-04: Store schema {"forwarded_ids": [...], "quota_exhausted_until": int | None}.
+- D-04: Store schema {"forwarded_ids": [...], "quota_exhausted_until": int | None, "last_email_timestamp": int | None}.
 - D-05: Quota exhausted -> Gmail polls continue, POST step skipped.
 - D-06: quota_exhausted_until = err.reset_at OR next_midnight_utc().
 """
@@ -99,13 +99,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         stored = await self._store.async_load() or {}
         self._forwarded_ids = set(stored.get("forwarded_ids", []))
         self._quota_exhausted_until = stored.get("quota_exhausted_until")
+        self._last_email_timestamp = stored.get("last_email_timestamp")
 
     async def _async_save_store(self) -> None:
-        """Persist current dedup + quota state to Store."""
+        """Persist current dedup + quota + timestamp state to Store."""
         await self._store.async_save(
             {
                 "forwarded_ids": sorted(self._forwarded_ids),
                 "quota_exhausted_until": self._quota_exhausted_until,
+                "last_email_timestamp": self._last_email_timestamp,
             }
         )
 
