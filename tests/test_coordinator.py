@@ -13,6 +13,7 @@ from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.api.exceptions import (
     GmailAuthError,
     GmailTransientError,
+    ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
     ParcelAppTransientError,
@@ -454,3 +455,136 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
         # here — that would over-constrain the test and break if future coordinator logic
         # saves for other events (e.g., updating last_email_timestamp in the store).
         assert "msg1" not in coord._forwarded_ids
+
+
+# -------- Phase 5 async_cleanup_delivered tests --------------------------
+
+
+async def test_cleanup_no_deliveries_in_data(hass, mock_config_entry):
+    """When coordinator.data is empty, cleanup makes the GET but never calls async_set_updated_data."""
+    mock_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(return_value=[])
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+        # Phase 5 dict shape — coordinator.data may already be {} (empty dict) at this point
+        if isinstance(coordinator, dict):
+            coordinator = coordinator["coordinator"]
+        with patch.object(coordinator, "async_set_updated_data") as set_data:
+            await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+            set_data.assert_not_called()
+
+
+async def test_cleanup_removes_delivered_from_data(hass, mock_config_entry):
+    """Cleanup drops entries whose tracking_number returns status_code=0 from parcelapp."""
+    mock_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(return_value=[
+        {"tracking_number": "TRACK_A", "status_code": 0},  # delivered
+        {"tracking_number": "TRACK_B", "status_code": 2},  # in transit, keep
+    ])
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        raw = hass.data[DOMAIN][mock_config_entry.entry_id]
+        coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
+
+        coordinator.async_set_updated_data({
+            "msg_a": ShipmentData("TRACK_A", "UPS", "#1", "msg_a", 1),
+            "msg_b": ShipmentData("TRACK_B", "UPS", "#2", "msg_b", 2),
+        })
+        await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+
+    assert "msg_a" not in coordinator.data
+    assert "msg_b" in coordinator.data
+
+
+async def test_cleanup_uses_filter_mode_recent(hass, mock_config_entry):
+    """RESEARCH.md Pitfall 6: must call GET with filter_mode='recent' (NOT 'active')."""
+    mock_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(return_value=[])
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        raw = hass.data[DOMAIN][mock_config_entry.entry_id]
+        coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
+        await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+
+    fake_client.async_get_deliveries.assert_called_with(filter_mode="recent")
+
+
+async def test_cleanup_handles_auth_error(hass, mock_config_entry):
+    """ParcelAppAuthError is caught + logged + returns None — does NOT propagate."""
+    mock_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(side_effect=ParcelAppAuthError("boom"))
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        raw = hass.data[DOMAIN][mock_config_entry.entry_id]
+        coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
+        # Must NOT raise
+        result = await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+        assert result is None
+
+
+async def test_cleanup_handles_transient_error(hass, mock_config_entry):
+    """ParcelAppTransientError is caught + logged + returns None — does NOT propagate."""
+    mock_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(side_effect=ParcelAppTransientError("net"))
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        raw = hass.data[DOMAIN][mock_config_entry.entry_id]
+        coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
+        result = await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+        assert result is None
