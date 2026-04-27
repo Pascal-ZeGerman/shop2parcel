@@ -461,7 +461,7 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
 
 
 async def test_cleanup_no_deliveries_in_data(hass, mock_config_entry):
-    """When coordinator.data is empty, cleanup makes the GET but never calls async_set_updated_data."""
+    """When coordinator.data is empty, cleanup returns early without making the API call."""
     mock_config_entry.add_to_hass(hass)
     fake_client = MagicMock()
     fake_client.async_get_deliveries = AsyncMock(return_value=[])

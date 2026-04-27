@@ -262,6 +262,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         ConfigEntryAuthFailed or UpdateFailed from here (RESEARCH.md Pitfall 5):
         those are only meaningful inside _async_update_data.
         """
+        if not self.data:
+            return  # Nothing to clean up — skip the API call entirely
+
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
             api_key=self._entry.data["api_key"],
@@ -273,9 +276,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             return
         except ParcelAppTransientError as err:
             _LOGGER.warning("parcelapp transient error during cleanup: %s", err)
-            return
-
-        if not self.data:
             return
 
         # D-11: O(1) reverse lookup {tracking_number: message_id}
