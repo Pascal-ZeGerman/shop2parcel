@@ -165,7 +165,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             html = extract_html_body(msg.get("payload", {}))
             if not html:
                 continue
-            email_date = int(msg.get("internalDate", "0")) // 1000
+            try:
+                email_date = int(msg.get("internalDate", "0")) // 1000
+            except (ValueError, TypeError):
+                _LOGGER.warning(
+                    "Unexpected internalDate value for message %s; skipping", msg_id
+                )
+                continue
             shipment = parser.parse(html, msg_id, email_date)
             if shipment is None:
                 continue
