@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from bs4 import BeautifulSoup
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class ShipmentData:
     """Structured output from EmailParser. Coordinator data type for Phase 4.
 
