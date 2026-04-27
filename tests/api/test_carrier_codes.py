@@ -2,7 +2,9 @@
 
 RED phase: these tests must fail before carrier_codes.py is created.
 """
+
 import pytest
+
 from custom_components.shop2parcel.api.carrier_codes import normalize_carrier
 
 

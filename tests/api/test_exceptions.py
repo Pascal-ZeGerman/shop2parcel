@@ -3,6 +3,7 @@
 Tests are written per TDD RED phase — exceptions.py must be green after these are written.
 Security note: No API tokens or credentials appear in these tests.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -65,6 +66,4 @@ def test_no_ha_imports_in_exceptions():
         / "exceptions.py"
     )
     source = exceptions_path.read_text(encoding="utf-8")
-    assert "homeassistant" not in source, (
-        "exceptions.py must not import from homeassistant.*"
-    )
+    assert "homeassistant" not in source, "exceptions.py must not import from homeassistant.*"

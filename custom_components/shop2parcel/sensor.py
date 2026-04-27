@@ -14,6 +14,7 @@ known_ids set and adds entities for any new keys. Removals are NOT handled here
 entity_registry.async_remove() calls (RESEARCH.md Pitfall 1 — entities don't
 auto-remove just because a key disappears from coordinator.data).
 """
+
 from __future__ import annotations
 
 import logging
@@ -57,9 +58,7 @@ async def async_setup_entry(
         new_ids = current_ids - known_ids
         if new_ids:
             known_ids.update(new_ids)
-            async_add_entities(
-                ShipmentSensor(coordinator, entry, msg_id) for msg_id in new_ids
-            )
+            async_add_entities(ShipmentSensor(coordinator, entry, msg_id) for msg_id in new_ids)
 
     # Add entities for current coordinator.data first (handles existing data at setup time).
     _check_shipments()
@@ -72,7 +71,7 @@ class ShipmentSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
 
     _attr_should_poll = False
     _attr_device_class = None  # D-02: no standard device class for parcel tracking
-    _attr_state_class = None   # D-02: string/enum state, not a measurement
+    _attr_state_class = None  # D-02: string/enum state, not a measurement
     _attr_has_entity_name = True
 
     def __init__(

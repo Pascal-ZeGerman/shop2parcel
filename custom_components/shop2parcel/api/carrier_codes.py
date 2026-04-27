@@ -7,6 +7,7 @@ IMPORTANT: Never submit 'none' to the parcelapp API — that is a parcel-ha inte
 sentinel. Use 'pholder' as fallback (valid parcelapp code, returns HTTP 200).
 Every failed POST (including invalid codes -> HTTP 400) consumes one of the 20/day quota.
 """
+
 from __future__ import annotations
 
 _SHOPIFY_TO_PARCEL: dict[str, str] = {

@@ -5,6 +5,7 @@ will ImportError until Plan 02 lands the implementation.
 
 Coverage: ENTT-03 (D-07: is_on = len(coordinator.data) > 0).
 """
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch

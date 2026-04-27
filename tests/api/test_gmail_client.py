@@ -4,6 +4,7 @@ google-api-python-client is mocked at the module level so tests run without
 the real library installed. Token values in tests are always "fake-token" literals
 — never real OAuth2 access tokens (T-02-02 threat mitigation).
 """
+
 from __future__ import annotations
 
 import base64
@@ -25,12 +26,14 @@ _mock_errors = MagicMock()
 _mock_google_oauth2 = MagicMock()
 _mock_credentials_module = MagicMock()
 
+
 # HttpError mock class — must behave like the real one (resp.status attribute)
 class _MockHttpError(Exception):
     def __init__(self, resp, content=b"error"):
         super().__init__(str(content))
         self.resp = resp
         self.content = content
+
 
 _mock_errors.HttpError = _MockHttpError
 
@@ -42,20 +45,20 @@ sys.modules.setdefault("google", MagicMock())
 sys.modules.setdefault("google.oauth2", _mock_google_oauth2)
 sys.modules.setdefault("google.oauth2.credentials", _mock_credentials_module)
 
+from custom_components.shop2parcel.api.exceptions import (  # noqa: E402
+    GmailAuthError,
+    GmailTransientError,
+)
 from custom_components.shop2parcel.api.gmail_client import (  # noqa: E402
     GmailClient,
     build_incremental_query,
     extract_html_body,
 )
-from custom_components.shop2parcel.api.exceptions import (  # noqa: E402
-    GmailAuthError,
-    GmailTransientError,
-)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_resp_mock(status: int):
     """Create a mock HTTP response with .status attribute."""
@@ -85,6 +88,7 @@ def make_service_mock(list_result=None, get_result=None):
 # ---------------------------------------------------------------------------
 # Executor factory — captures calls for inspection
 # ---------------------------------------------------------------------------
+
 
 class _CapturingExecutor:
     """Async executor that runs callables inline and records calls.
@@ -120,6 +124,7 @@ class _CapturingExecutor:
 # Tests: async_list_messages
 # ---------------------------------------------------------------------------
 
+
 async def test_list_messages_appends_after_timestamp():
     """after_timestamp=1000 → query contains 'after:1000'."""
     captured_queries = []
@@ -127,8 +132,8 @@ async def test_list_messages_appends_after_timestamp():
     service = MagicMock()
     list_request = MagicMock()
     list_request.execute = MagicMock(return_value={"messages": [{"id": "abc"}]})
-    service.users.return_value.messages.return_value.list.side_effect = (
-        lambda userId, q: captured_queries.append(q) or list_request
+    service.users.return_value.messages.return_value.list.side_effect = lambda userId, q: (
+        captured_queries.append(q) or list_request
     )
 
     executor = _CapturingExecutor(service=service, execute_return={"messages": [{"id": "abc"}]})
@@ -145,8 +150,8 @@ async def test_list_messages_no_after_timestamp():
     service = MagicMock()
     list_request = MagicMock()
     list_request.execute = MagicMock(return_value={})
-    service.users.return_value.messages.return_value.list.side_effect = (
-        lambda userId, q: captured_queries.append(q) or list_request
+    service.users.return_value.messages.return_value.list.side_effect = lambda userId, q: (
+        captured_queries.append(q) or list_request
     )
 
     executor = _CapturingExecutor(service=service, execute_return={})
@@ -189,6 +194,7 @@ async def test_list_messages_returns_empty_on_no_results():
 # Tests: async_get_message
 # ---------------------------------------------------------------------------
 
+
 async def test_get_message_calls_executor_with_format_full():
     """async_get_message → service.users().messages().get called with format='full'."""
     captured_kwargs: list[dict] = []
@@ -196,8 +202,8 @@ async def test_get_message_calls_executor_with_format_full():
     service = MagicMock()
     get_request = MagicMock()
     get_request.execute = MagicMock(return_value={"id": "msg123", "payload": {}})
-    service.users.return_value.messages.return_value.get.side_effect = (
-        lambda **kw: captured_kwargs.append(kw) or get_request
+    service.users.return_value.messages.return_value.get.side_effect = lambda **kw: (
+        captured_kwargs.append(kw) or get_request
     )
 
     executor = _CapturingExecutor(service=service, execute_return={"id": "msg123", "payload": {}})
@@ -211,6 +217,7 @@ async def test_get_message_calls_executor_with_format_full():
 # ---------------------------------------------------------------------------
 # Tests: error handling
 # ---------------------------------------------------------------------------
+
 
 async def test_auth_error_on_401():
     """HttpError with status=401 → GmailAuthError raised."""
@@ -273,6 +280,7 @@ async def test_transient_error_on_network_failure():
 # Tests: extract_html_body
 # ---------------------------------------------------------------------------
 
+
 def test_extract_html_body_decodes_base64url():
     """text/html part with base64url data → decoded UTF-8 string returned."""
     original = "<h1>Hello World</h1>"
@@ -312,6 +320,7 @@ def test_extract_html_body_recurses_into_parts():
 # ---------------------------------------------------------------------------
 # Tests: build_incremental_query
 # ---------------------------------------------------------------------------
+
 
 def test_build_incremental_query_with_timestamp():
     """build_incremental_query('base', 1000) → 'base after:1000'."""

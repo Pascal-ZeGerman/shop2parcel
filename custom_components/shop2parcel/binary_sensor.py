@@ -8,6 +8,7 @@ Phase 5 (ENTT-03):
 CoordinatorEntity automatically calls async_write_ha_state() on every
 coordinator update, so is_on re-evaluates without any custom override.
 """
+
 from __future__ import annotations
 
 import logging
@@ -38,9 +39,7 @@ async def async_setup_entry(
     async_add_entities([HasActiveShipmentsBinarySensor(coordinator, entry)])
 
 
-class HasActiveShipmentsBinarySensor(
-    CoordinatorEntity[Shop2ParcelCoordinator], BinarySensorEntity
-):
+class HasActiveShipmentsBinarySensor(CoordinatorEntity[Shop2ParcelCoordinator], BinarySensorEntity):
     """True when coordinator.data has at least one active shipment (ENTT-03)."""
 
     _attr_should_poll = False

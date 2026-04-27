@@ -4,6 +4,7 @@ Verifies async_setup_entry instantiates Shop2ParcelCoordinator, hydrates Store
 before first refresh, and that hass.data[DOMAIN][entry_id] holds a dict with
 "coordinator" and "cancel_cleanup" keys (Phase 5 dict shape).
 """
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -114,12 +115,14 @@ async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
 async def test_setup_entry_forwards_to_sensor_platforms(hass, mock_config_entry):
     """CONTEXT.md D-09: PLATFORMS = ['sensor', 'binary_sensor'] in Phase 5."""
     from custom_components.shop2parcel import PLATFORMS
+
     assert PLATFORMS == ["sensor", "binary_sensor"]
 
 
 async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_config_entry):
     """D-08: async_track_time_interval is registered with timedelta(hours=24)."""
     from datetime import timedelta
+
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
@@ -140,7 +143,9 @@ async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_c
     assert mock_track.called
     call_args = mock_track.call_args
     # Positional args: (hass, callback, interval) — interval is positional in HA's signature
-    interval_arg = call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("interval")
+    interval_arg = (
+        call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("interval")
+    )
     assert interval_arg == timedelta(hours=24)
 
 

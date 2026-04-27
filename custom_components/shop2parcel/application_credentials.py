@@ -3,6 +3,7 @@
 Declares the Google OAuth2 authorization server for HA's application_credentials platform.
 The authorization_url and token_url are Google's standard OAuth2 v2 endpoints.
 """
+
 from __future__ import annotations
 
 from homeassistant.components.application_credentials import AuthorizationServer

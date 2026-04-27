@@ -3,22 +3,23 @@
 Uses aioresponses to mock HTTP responses. All 18 behavioral scenarios
 from the plan are covered.
 """
+
 from __future__ import annotations
 
-import pytest
 import aiohttp
+import pytest
 from aioresponses import aioresponses
 
-from custom_components.shop2parcel.api.parcelapp import (
-    ParcelAppClient,
-    ADD_DELIVERY_URL,
-    VIEW_DELIVERIES_URL,
-)
 from custom_components.shop2parcel.api.exceptions import (
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
     ParcelAppTransientError,
+)
+from custom_components.shop2parcel.api.parcelapp import (
+    ADD_DELIVERY_URL,
+    VIEW_DELIVERIES_URL,
+    ParcelAppClient,
 )
 
 # ---------------------------------------------------------------------------
@@ -169,6 +170,7 @@ async def test_add_delivery_request_uses_api_key_header(client):
         mock.post(ADD_DELIVERY_URL, payload={"success": True}, status=200)
         await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
         import yarl
+
         requests = mock.requests[("POST", yarl.URL(ADD_DELIVERY_URL))]
         assert len(requests) == 1
         assert requests[0].kwargs["headers"]["api-key"] == "test-key-123"
@@ -180,6 +182,7 @@ async def test_add_delivery_request_body_shape(client):
         mock.post(ADD_DELIVERY_URL, payload={"success": True}, status=200)
         await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
         import yarl
+
         requests = mock.requests[("POST", yarl.URL(ADD_DELIVERY_URL))]
         # aioresponses captures json= kwarg in requests[0].kwargs["json"]
         body = requests[0].kwargs["json"]
@@ -252,6 +255,7 @@ async def test_get_deliveries_uses_filter_mode_param(client):
 def test_no_ha_imports():
     """Inspect parcelapp.py source — 'homeassistant' must not appear anywhere."""
     from pathlib import Path
+
     parcelapp_path = (
         Path(__file__).parent.parent.parent
         / "custom_components"

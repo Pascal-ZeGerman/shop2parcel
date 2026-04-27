@@ -12,6 +12,7 @@ Phase boundary:
 - Phase 5 adds 'sensor' and 'binary_sensor' to PLATFORMS, switches hass.data to
   dict shape, and wires the daily cleanup task via async_track_time_interval.
 """
+
 from __future__ import annotations
 
 from datetime import timedelta

@@ -2,6 +2,7 @@
 
 RED phase: these tests must fail before email_parser.py is created.
 """
+
 import dataclasses
 import inspect
 from pathlib import Path
@@ -53,11 +54,7 @@ def test_dual_strategy_fallback_used() -> None:
     pair). So: tracking in a <div> (not <p>), order in a <div>. But the regex fallback
     works on full text. Let's use HTML with no <p> elements at all.
     """
-    html = (
-        "<html><body>"
-        "<div>Tracking number: 1Z999AA10123456784 Order #5678</div>"
-        "</body></html>"
-    )
+    html = "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>"
     parser = EmailParser()
     # HTML strategy only scans <p> — so <div>-only HTML should return None from HTML strategy
     html_result = parser._parse_html_template(html, "msg456", 0)
@@ -96,12 +93,7 @@ def test_shipment_data_slots() -> None:
 def test_carrier_name_unknown_when_not_found() -> None:
     """When carrier not extractable from HTML, carrier_name defaults to 'Unknown'."""
     # HTML has tracking + order but no 'via Carrier' pattern
-    html = (
-        "<html><body>"
-        "<p>Your order #9999 has shipped.</p>"
-        "<p>1Z999AA10123456784</p>"
-        "</body></html>"
-    )
+    html = "<html><body><p>Your order #9999 has shipped.</p><p>1Z999AA10123456784</p></body></html>"
     parser = EmailParser()
     result = parser.parse(html, "msg789", 0)
     assert result is not None
@@ -118,11 +110,7 @@ def test_order_name_starts_with_hash(shopify_html: str) -> None:
 
 def test_regex_fallback_extracts_tracking() -> None:
     """Regex fallback correctly extracts tracking number from minimal HTML."""
-    html = (
-        "<html><body>"
-        "<p>Tracking number: 1Z999AA10123456784 Order #5678</p>"
-        "</body></html>"
-    )
+    html = "<html><body><p>Tracking number: 1Z999AA10123456784 Order #5678</p></body></html>"
     parser = EmailParser()
     result = parser.parse(html, "msg456", 0)
     assert result is not None
@@ -131,11 +119,7 @@ def test_regex_fallback_extracts_tracking() -> None:
 
 def test_regex_fallback_extracts_order() -> None:
     """Regex fallback correctly extracts order name from minimal HTML."""
-    html = (
-        "<html><body>"
-        "<p>Tracking number: 1Z999AA10123456784 Order #5678</p>"
-        "</body></html>"
-    )
+    html = "<html><body><p>Tracking number: 1Z999AA10123456784 Order #5678</p></body></html>"
     parser = EmailParser()
     result = parser.parse(html, "msg456", 0)
     assert result is not None
@@ -145,6 +129,7 @@ def test_regex_fallback_extracts_order() -> None:
 def test_no_ha_imports() -> None:
     """email_parser.py must not import from homeassistant.*"""
     import custom_components.shop2parcel.api.email_parser as module
+
     source_file = inspect.getfile(module)
     content = Path(source_file).read_text(encoding="utf-8")
     assert "homeassistant" not in content, (

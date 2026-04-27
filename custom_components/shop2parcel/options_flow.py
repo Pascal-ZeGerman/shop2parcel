@@ -8,12 +8,12 @@ Locked decisions:
 - D-07: OptionsFlowWithReload, NOT manual entry.add_update_listener.
 - D-08: CONF_POLL_INTERVAL int range 5..1440, default 30; CONF_GMAIL_QUERY str.
 """
+
 from __future__ import annotations
 
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import OptionsFlowWithReload
 from homeassistant.data_entry_flow import FlowResult
 
@@ -33,9 +33,7 @@ class OptionsFlowHandler(OptionsFlowWithReload):
     options dict, and the coordinator picks up the new poll interval.
     """
 
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show form with current values; save and reload on submit."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
@@ -50,13 +48,11 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                 ): vol.All(int, vol.Range(min=5, max=1440)),
                 vol.Required(
                     CONF_GMAIL_QUERY,
-                    default=self.config_entry.options.get(
-                        CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY
-                    ),
-                # min=1 prevents an empty query which matches ALL Gmail messages,
-                # causing the coordinator to attempt parsing every email in the inbox
-                # (DoS against Gmail API quota and the HA event loop).
-                # max=500 mirrors Gmail's practical query length limit.
+                    default=self.config_entry.options.get(CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY),
+                    # min=1 prevents an empty query which matches ALL Gmail messages,
+                    # causing the coordinator to attempt parsing every email in the inbox
+                    # (DoS against Gmail API quota and the HA event loop).
+                    # max=500 mirrors Gmail's practical query length limit.
                 ): vol.All(str, vol.Length(min=1, max=500)),
             }
         )

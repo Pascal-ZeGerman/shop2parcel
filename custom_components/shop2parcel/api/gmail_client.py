@@ -4,12 +4,14 @@ No HA imports. Caller (Phase 4 coordinator) passes hass.async_add_executor_job.
 Token model: accepts pre-validated short-lived access_token per call.
 Token refresh is the coordinator's responsibility (via OAuth2Session.async_ensure_token_valid).
 """
+
 from __future__ import annotations
 
 import base64
 import time
+from collections.abc import Callable
 from functools import partial
-from typing import Any, Callable
+from typing import Any
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -43,9 +45,7 @@ class GmailClient:
         full_query = build_incremental_query(query, after_timestamp)
         try:
             creds = Credentials(token=access_token)
-            service = await self._executor(
-                partial(build, "gmail", "v1", credentials=creds)
-            )
+            service = await self._executor(partial(build, "gmail", "v1", credentials=creds))
             request = service.users().messages().list(userId="me", q=full_query)
             result = await self._executor(request.execute)
             return result.get("messages", [])
@@ -53,18 +53,12 @@ class GmailClient:
             _classify_gmail_error(err)
             raise  # unreachable, but prevents implicit None return
 
-    async def async_get_message(
-        self, access_token: str, message_id: str
-    ) -> dict[str, Any]:
+    async def async_get_message(self, access_token: str, message_id: str) -> dict[str, Any]:
         """Fetch full message payload (format=full for MIME parts with body data)."""
         try:
             creds = Credentials(token=access_token)
-            service = await self._executor(
-                partial(build, "gmail", "v1", credentials=creds)
-            )
-            request = service.users().messages().get(
-                userId="me", id=message_id, format="full"
-            )
+            service = await self._executor(partial(build, "gmail", "v1", credentials=creds))
+            request = service.users().messages().get(userId="me", id=message_id, format="full")
             return await self._executor(request.execute)
         except Exception as err:
             _classify_gmail_error(err)

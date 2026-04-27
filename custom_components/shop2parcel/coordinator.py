@@ -11,12 +11,13 @@ Locked decisions (CONTEXT.md):
 - D-05: Quota exhausted -> Gmail polls continue, POST step skipped.
 - D-06: quota_exhausted_until = err.reset_at OR next_midnight_utc().
 """
+
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, time as dt_time, timedelta, timezone
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -58,12 +59,12 @@ def _next_midnight_utc() -> int:
     Per CONTEXT.md D-06: when ParcelAppQuotaError.reset_at is None, fall back
     to the next UTC midnight so the backoff aligns with parcelapp's daily reset.
     """
-    today_utc = datetime.now(timezone.utc).date()
+    today_utc = datetime.now(UTC).date()
     return int(
         datetime.combine(
             today_utc + timedelta(days=1),
             dt_time.min,
-            tzinfo=timezone.utc,
+            tzinfo=UTC,
         ).timestamp()
     )
 
@@ -81,7 +82,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             update_interval=timedelta(minutes=poll_minutes),
         )
         self._entry = entry
-        self._store: Store = Store(hass, version=STORAGE_VERSION, key=f"shop2parcel.{entry.entry_id}")
+        self._store: Store = Store(
+            hass, version=STORAGE_VERSION, key=f"shop2parcel.{entry.entry_id}"
+        )
         self._forwarded_ids: set[str] = set()
         self._quota_exhausted_until: int | None = None
         self._last_email_timestamp: int | None = None
@@ -146,8 +149,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         current_data: dict[str, ShipmentData] = dict(self.data or {})
         now = int(time.time())
         quota_blocked = (
-            self._quota_exhausted_until is not None
-            and now < self._quota_exhausted_until
+            self._quota_exhausted_until is not None and now < self._quota_exhausted_until
         )
         max_email_date = self._last_email_timestamp or 0
 
@@ -170,9 +172,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
             except (ValueError, TypeError):
-                _LOGGER.warning(
-                    "Unexpected internalDate value for message %s; skipping", msg_id
-                )
+                _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
                 continue
             shipment = parser.parse(html, msg_id, email_date)
             if shipment is None:
@@ -282,8 +282,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         # D-11: O(1) reverse lookup {tracking_number: message_id}
         tracking_to_msg_id = {
-            shipment.tracking_number: msg_id
-            for msg_id, shipment in self.data.items()
+            shipment.tracking_number: msg_id for msg_id, shipment in self.data.items()
         }
         # Use .get() — guard against missing 'status_code' (RESEARCH.md Security V5)
         delivered_tracking = {
@@ -292,9 +291,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if d.get("status_code") == 0 and "tracking_number" in d
         }
         removed_ids = {
-            tracking_to_msg_id[tn]
-            for tn in delivered_tracking
-            if tn in tracking_to_msg_id
+            tracking_to_msg_id[tn] for tn in delivered_tracking if tn in tracking_to_msg_id
         }
         if not removed_ids:
             return
@@ -310,9 +307,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         entry_entities = entity_registry.entities.get_entries_for_config_entry_id(
             self._entry.entry_id
         )
-        unique_id_to_entity_id = {
-            e.unique_id: e.entity_id for e in entry_entities
-        }
+        unique_id_to_entity_id = {e.unique_id: e.entity_id for e in entry_entities}
         for removed_id in removed_ids:
             target_uid = f"{DOMAIN}_{self._entry.entry_id}_{removed_id}"
             entity_id = unique_id_to_entity_id.get(target_uid)

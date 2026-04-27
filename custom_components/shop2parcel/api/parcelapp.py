@@ -11,9 +11,8 @@ Never create a new aiohttp.ClientSession inside this class.
 
 No HA imports (D-01/D-03).
 """
-from __future__ import annotations
 
-import asyncio
+from __future__ import annotations
 
 import aiohttp
 
@@ -64,9 +63,7 @@ class ParcelAppClient:
             "send_push_confirmation": False,
         }
         try:
-            async with self._session.post(
-                ADD_DELIVERY_URL, headers=headers, json=body
-            ) as resp:
+            async with self._session.post(ADD_DELIVERY_URL, headers=headers, json=body) as resp:
                 if resp.status in (401, 403):
                     raise ParcelAppAuthError(f"Auth failed: HTTP {resp.status}")
                 if resp.status == 429:
@@ -77,9 +74,7 @@ class ParcelAppClient:
                     except (ValueError, aiohttp.ContentTypeError):
                         # Non-JSON or wrong content-type body — reset_at stays None.
                         pass
-                    raise ParcelAppQuotaError(
-                        "Daily quota (20/day) exhausted", reset_at=reset_at
-                    )
+                    raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
                 if resp.status == 400:
                     try:
                         data = await resp.json(content_type=None)
@@ -93,16 +88,10 @@ class ParcelAppClient:
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 resp.raise_for_status()
-        except (
-            aiohttp.ClientConnectionError,
-            aiohttp.ServerTimeoutError,
-            asyncio.TimeoutError,
-        ) as err:
+        except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
 
-    async def async_get_deliveries(
-        self, filter_mode: str = "recent"
-    ) -> list[dict]:
+    async def async_get_deliveries(self, filter_mode: str = "recent") -> list[dict]:
         """GET current deliveries from parcelapp.net.
 
         Used by Phase 4 coordinator for deduplication at startup.
@@ -124,9 +113,5 @@ class ParcelAppClient:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 return data.get("deliveries", [])
-        except (
-            aiohttp.ClientConnectionError,
-            aiohttp.ServerTimeoutError,
-            asyncio.TimeoutError,
-        ) as err:
+        except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err

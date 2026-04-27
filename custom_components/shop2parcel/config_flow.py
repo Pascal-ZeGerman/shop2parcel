@@ -20,6 +20,7 @@ Security:
               duplicate config entries for the same Gmail account.
   T-03-03-05: Scope is explicitly set to gmail.readonly only.
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,7 +29,6 @@ from typing import Any
 import voluptuous as vol
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigFlowResult
 from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import callback
@@ -46,9 +46,7 @@ CONF_API_KEY = "api_key"
 CONF_NAME = "name"
 
 
-class OAuth2FlowHandler(
-    config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN
-):
+class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN):
     """Config flow to handle Shop2Parcel OAuth2 authentication."""
 
     DOMAIN = DOMAIN
@@ -83,7 +81,7 @@ class OAuth2FlowHandler(
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> "OptionsFlowHandler":
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlowHandler:  # noqa: F821
         """Return options flow handler — registers the gear icon in HA UI.
 
         Lazy import avoids circular dependency: options_flow.py imports from
@@ -91,11 +89,10 @@ class OAuth2FlowHandler(
         works today but the lazy form is the HA-idiomatic pattern.
         """
         from .options_flow import OptionsFlowHandler
+
         return OptionsFlowHandler()
 
-    async def async_oauth_create_entry(
-        self, data: dict[str, Any]
-    ) -> ConfigFlowResult:
+    async def async_oauth_create_entry(self, data: dict[str, Any]) -> ConfigFlowResult:
         """Called by framework after successful OAuth2 token exchange.
 
         Fetch Gmail email address via executor (synchronous google-api call).
@@ -127,9 +124,7 @@ class OAuth2FlowHandler(
         self._title = f"Shop2Parcel ({email})"
         return await self.async_step_finish()
 
-    async def async_step_finish(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_finish(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Collect parcelapp.net API key and entry name.
 
         Validates API key via lightweight GET deliveries call (view-deliveries endpoint,
@@ -139,9 +134,7 @@ class OAuth2FlowHandler(
         errors: dict[str, str] = {}
         if user_input is not None:
             session = async_get_clientsession(self.hass)
-            client = ParcelAppClient(
-                session=session, api_key=user_input[CONF_API_KEY]
-            )
+            client = ParcelAppClient(session=session, api_key=user_input[CONF_API_KEY])
             try:
                 await client.async_get_deliveries()
             except ParcelAppAuthError:
@@ -165,9 +158,7 @@ class OAuth2FlowHandler(
             errors=errors,
         )
 
-    async def async_step_reauth(
-        self, entry_data: dict[str, Any]
-    ) -> ConfigFlowResult:
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
         """Initiate re-authorization flow.
 
         Called by HA Repairs system when ConfigEntryAuthFailed is raised (Phase 4).

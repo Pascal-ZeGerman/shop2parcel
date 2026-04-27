@@ -6,11 +6,12 @@ a real Home Assistant installation or google-api-python-client installed.
 Threat mitigation T-03-03-01/02: api_key and access_token values in tests are
 always fake literals — never real credentials.
 """
+
 from __future__ import annotations
 
 import sys
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -103,12 +104,11 @@ sys.modules.setdefault("google.oauth2.credentials", _mock_credentials_module)
 sys.modules.setdefault("googleapiclient", _mock_googleapiclient)
 sys.modules.setdefault("googleapiclient.discovery", _mock_discovery)
 
-from custom_components.shop2parcel.config_flow import OAuth2FlowHandler  # noqa: E402
 from custom_components.shop2parcel.api.exceptions import (  # noqa: E402
     ParcelAppAuthError,
     ParcelAppTransientError,
 )
-
+from custom_components.shop2parcel.config_flow import OAuth2FlowHandler  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -207,9 +207,7 @@ async def test_finish_step_auth_error_shows_invalid_api_key():
         "custom_components.shop2parcel.config_flow.ParcelAppClient",
         return_value=mock_client,
     ):
-        result = await handler.async_step_finish(
-            user_input={"api_key": "bad-key", "name": "Test"}
-        )
+        result = await handler.async_step_finish(user_input={"api_key": "bad-key", "name": "Test"})
 
     assert result["errors"]["base"] == "invalid_api_key"
 
@@ -219,9 +217,7 @@ async def test_finish_step_transient_error_shows_cannot_connect():
     handler = _make_handler()
 
     mock_client = AsyncMock()
-    mock_client.async_get_deliveries = AsyncMock(
-        side_effect=ParcelAppTransientError("timeout")
-    )
+    mock_client.async_get_deliveries = AsyncMock(side_effect=ParcelAppTransientError("timeout"))
 
     mock_session = MagicMock()
     _mock_ha_aiohttp_client.async_get_clientsession = MagicMock(return_value=mock_session)
@@ -230,9 +226,7 @@ async def test_finish_step_transient_error_shows_cannot_connect():
         "custom_components.shop2parcel.config_flow.ParcelAppClient",
         return_value=mock_client,
     ):
-        result = await handler.async_step_finish(
-            user_input={"api_key": "any-key", "name": "Test"}
-        )
+        result = await handler.async_step_finish(user_input={"api_key": "any-key", "name": "Test"})
 
     assert result["errors"]["base"] == "cannot_connect"
 

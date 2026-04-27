@@ -10,6 +10,7 @@ Strategy 2 (fallback): stdlib re on plain text.
 
 No HA imports (D-01/D-03).
 """
+
 from __future__ import annotations
 
 import re
@@ -30,19 +31,19 @@ class ShipmentData:
 
     tracking_number: str
     carrier_name: str
-    order_name: str     # e.g. "#1234"
-    message_id: str     # Gmail message ID for deduplication
-    email_date: int     # Unix timestamp (seconds)
+    order_name: str  # e.g. "#1234"
+    message_id: str  # Gmail message ID for deduplication
+    email_date: int  # Unix timestamp (seconds)
 
 
 # Known tracking number format patterns (EMAIL-04).
 # Patterns are bounded quantifiers — no ReDoS risk (ASVS V5).
 _TRACKING_PATTERNS = [
-    re.compile(r"^1Z[A-Z0-9]{16}$"),           # UPS: 1Z999AA10123456784
-    re.compile(r"^[0-9]{20,22}$"),             # USPS domestic
-    re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"), # USPS international
-    re.compile(r"^[0-9]{12,15}$"),             # FedEx
-    re.compile(r"^[0-9]{10,11}$"),             # DHL (assumed)
+    re.compile(r"^1Z[A-Z0-9]{16}$"),  # UPS: 1Z999AA10123456784
+    re.compile(r"^[0-9]{20,22}$"),  # USPS domestic
+    re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"),  # USPS international
+    re.compile(r"^[0-9]{12,15}$"),  # FedEx
+    re.compile(r"^[0-9]{10,11}$"),  # DHL (assumed)
 ]
 
 
@@ -57,9 +58,7 @@ class EmailParser:
     EMAIL-03: HTML template strategy first, regex fallback second.
     """
 
-    def parse(
-        self, html: str, message_id: str, email_date: int
-    ) -> ShipmentData | None:
+    def parse(self, html: str, message_id: str, email_date: int) -> ShipmentData | None:
         """Parse email HTML. Returns ShipmentData or None if unparseable."""
         result = self._parse_html_template(html, message_id, email_date)
         if result:
@@ -84,9 +83,7 @@ class EmailParser:
                 if m:
                     order_name = f"#{m.group(1)}"
             if not carrier_name:
-                m = re.search(
-                    r"\bvia\s+([A-Za-z][A-Za-z ]+?)(?:\s+with|\s*$|\.)", text
-                )
+                m = re.search(r"\bvia\s+([A-Za-z][A-Za-z ]+?)(?:\s+with|\s*$|\.)", text)
                 if m:
                     carrier_name = m.group(1).strip()
             if not tracking_number:

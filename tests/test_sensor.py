@@ -6,6 +6,7 @@ the sensor platform is implemented.
 
 Coverage: ENTT-01, ENTT-02, ENTT-04, ENTT-05, ENTT-06.
 """
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -70,8 +71,7 @@ async def test_sensor_attributes(hass, mock_config_entry):
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
     sensor_entry = next(
-        e for e in entries
-        if e.unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a"
+        e for e in entries if e.unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a"
     )
     state = hass.states.get(sensor_entry.entity_id)
     assert state is not None
@@ -88,8 +88,7 @@ async def test_sensor_native_value_is_in_transit(hass, mock_config_entry):
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
     sensor_entry = next(
-        e for e in entries
-        if e.unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a"
+        e for e in entries if e.unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a"
     )
     state = hass.states.get(sensor_entry.entity_id)
     assert state is not None
@@ -109,10 +108,15 @@ async def test_sensor_unique_id_stable(hass, mock_config_entry):
 async def test_device_grouping(hass, mock_config_entry):
     """ENTT-06 / D-06: All entities share DeviceInfo identifiers={(DOMAIN, entry_id)}."""
     from homeassistant.helpers import device_registry as dr
+
     data = {"msg_a": _make_shipment("msg_a", "1Z999AA10123456784")}
     await _setup_with_data(hass, mock_config_entry, data)
     device_reg = dr.async_get(hass)
-    devices = [d for d in device_reg.devices.values() if (DOMAIN, mock_config_entry.entry_id) in d.identifiers]
+    devices = [
+        d
+        for d in device_reg.devices.values()
+        if (DOMAIN, mock_config_entry.entry_id) in d.identifiers
+    ]
     assert len(devices) == 1, f"Expected exactly one Shop2Parcel device, found {len(devices)}"
     # Both sensor and binary_sensor must attach to this device
     registry = er.async_get(hass)
@@ -129,6 +133,7 @@ async def test_cleanup_removes_entity(hass, mock_config_entry):
     is gone (not just unavailable).
     """
     from datetime import datetime, timezone
+
     data = {"msg_a": _make_shipment("msg_a", "1Z999AA10123456784")}
     coordinator = await _setup_with_data(hass, mock_config_entry, data)
     registry = er.async_get(hass)
@@ -137,9 +142,11 @@ async def test_cleanup_removes_entity(hass, mock_config_entry):
     assert f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a" in pre_uids
 
     fake_client = MagicMock()
-    fake_client.async_get_deliveries = AsyncMock(return_value=[
-        {"tracking_number": "1Z999AA10123456784", "status_code": 0},
-    ])
+    fake_client.async_get_deliveries = AsyncMock(
+        return_value=[
+            {"tracking_number": "1Z999AA10123456784", "status_code": 0},
+        ]
+    )
     with patch(
         "custom_components.shop2parcel.coordinator.ParcelAppClient",
         return_value=fake_client,
@@ -167,28 +174,17 @@ async def test_sensor_appears_when_data_gains_entry(hass, mock_config_entry):
     new_uid = f"{DOMAIN}_{mock_config_entry.entry_id}_msg_new"
 
     # Pre-condition: no sensor entity for "msg_new" yet
-    pre_entries = registry.entities.get_entries_for_config_entry_id(
-        mock_config_entry.entry_id
-    )
-    pre_sensor_uids = {
-        e.unique_id for e in pre_entries if e.entity_id.startswith("sensor.")
-    }
+    pre_entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    pre_sensor_uids = {e.unique_id for e in pre_entries if e.entity_id.startswith("sensor.")}
     assert new_uid not in pre_sensor_uids
 
     # Dispatch coordinator update with a NEW shipment
-    coordinator.async_set_updated_data(
-        {"msg_new": _make_shipment("msg_new", "1Z999AA10123456784")}
-    )
+    coordinator.async_set_updated_data({"msg_new": _make_shipment("msg_new", "1Z999AA10123456784")})
     await hass.async_block_till_done()
 
     # Post-condition: sensor.shop2parcel_*_msg_new is now registered
-    post_entries = registry.entities.get_entries_for_config_entry_id(
-        mock_config_entry.entry_id
-    )
-    post_sensor_uids = {
-        e.unique_id for e in post_entries if e.entity_id.startswith("sensor.")
-    }
+    post_entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    post_sensor_uids = {e.unique_id for e in post_entries if e.entity_id.startswith("sensor.")}
     assert new_uid in post_sensor_uids, (
-        f"Expected {new_uid} in entity registry after coordinator update; "
-        f"found {post_sensor_uids}"
+        f"Expected {new_uid} in entity registry after coordinator update; found {post_sensor_uids}"
     )

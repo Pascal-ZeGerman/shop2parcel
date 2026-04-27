@@ -3,6 +3,7 @@
 No HA imports. The coordinator (Phase 4) is the only layer
 that translates these to ConfigEntryAuthFailed / UpdateFailed.
 """
+
 from __future__ import annotations
 
 

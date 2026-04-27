@@ -1,4 +1,5 @@
 """Shared test fixtures for Shop2Parcel integration tests."""
+
 from __future__ import annotations
 
 import sys
