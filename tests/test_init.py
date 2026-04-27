@@ -1,8 +1,8 @@
-"""Tests for Shop2Parcel __init__.py — Phase 4 coordinator wiring.
+"""Tests for Shop2Parcel __init__.py — Phase 5 coordinator wiring.
 
 Verifies async_setup_entry instantiates Shop2ParcelCoordinator, hydrates Store
-before first refresh, and that hass.data[DOMAIN][entry_id] holds the coordinator
-instance (replacing Phase 3's empty-dict placeholder).
+before first refresh, and that hass.data[DOMAIN][entry_id] holds a dict with
+"coordinator" and "cancel_cleanup" keys (Phase 5 dict shape).
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
 
 
 async def test_setup_entry_wires_coordinator(hass, mock_config_entry):
-    """Phase 4 setup stores Shop2ParcelCoordinator (NOT a placeholder dict) in hass.data."""
+    """Phase 5 setup stores dict with coordinator + cancel_cleanup in hass.data."""
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
@@ -34,7 +34,11 @@ async def test_setup_entry_wires_coordinator(hass, mock_config_entry):
     assert result is True
     assert DOMAIN in hass.data
     assert mock_config_entry.entry_id in hass.data[DOMAIN]
-    assert isinstance(hass.data[DOMAIN][mock_config_entry.entry_id], Shop2ParcelCoordinator)
+    entry_data = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert isinstance(entry_data, dict)
+    assert isinstance(entry_data["coordinator"], Shop2ParcelCoordinator)
+    assert "cancel_cleanup" in entry_data
+    assert callable(entry_data["cancel_cleanup"])
 
 
 async def test_setup_entry_calls_load_store_before_first_refresh(hass, mock_config_entry):
@@ -88,7 +92,7 @@ async def test_setup_entry_gmail_auth_failure_sets_setup_error(hass, mock_config
 
 
 async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
-    """async_unload_entry calls async_unload_platforms with PLATFORMS=[] then drops hass.data."""
+    """async_unload_entry calls async_unload_platforms with PLATFORMS then drops hass.data."""
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
@@ -107,7 +111,56 @@ async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
     assert mock_config_entry.entry_id not in hass.data.get(DOMAIN, {})
 
 
-async def test_setup_entry_forwards_to_empty_platforms(hass, mock_config_entry):
-    """CONTEXT.md D-09: PLATFORMS=[] in Phase 4; Phase 5 adds entities."""
+async def test_setup_entry_forwards_to_sensor_platforms(hass, mock_config_entry):
+    """CONTEXT.md D-09: PLATFORMS = ['sensor', 'binary_sensor'] in Phase 5."""
     from custom_components.shop2parcel import PLATFORMS
-    assert PLATFORMS == []
+    assert PLATFORMS == ["sensor", "binary_sensor"]
+
+
+async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_config_entry):
+    """D-08: async_track_time_interval is registered with timedelta(hours=24)."""
+    from datetime import timedelta
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.async_track_time_interval") as mock_track,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        cancel_cb = MagicMock()
+        mock_track.return_value = cancel_cb
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    # Assert async_track_time_interval was called with the 24h timedelta
+    assert mock_track.called
+    call_args = mock_track.call_args
+    # Positional args: (hass, callback, interval) — interval is positional in HA's signature
+    interval_arg = call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("interval")
+    assert interval_arg == timedelta(hours=24)
+
+
+async def test_unload_entry_cancels_cleanup_task(hass, mock_config_entry):
+    """D-10: async_unload_entry must invoke the cancel callback returned by async_track_time_interval."""
+    mock_config_entry.add_to_hass(hass)
+    cancel_cb = MagicMock()
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.async_track_time_interval", return_value=cancel_cb),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        cancel_cb.assert_not_called()  # Setup does NOT call cancel
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
+    cancel_cb.assert_called_once()

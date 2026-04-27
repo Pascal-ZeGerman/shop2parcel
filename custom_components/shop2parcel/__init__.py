@@ -9,19 +9,21 @@ Phase boundary:
   handles all API errors and translates to ConfigEntryAuthFailed/UpdateFailed).
 - Phase 4 owns coordinator instantiation, Store hydration, platform forwarding stub,
   and options flow registration (registered via config_flow.py).
-- Phase 5 will add 'sensor' and 'binary_sensor' to PLATFORMS — no other changes
-  to this file required.
+- Phase 5 adds 'sensor' and 'binary_sensor' to PLATFORMS, switches hass.data to
+  dict shape, and wires the daily cleanup task via async_track_time_interval.
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN
 
-# Phase 4: empty platform list. Phase 5 adds: ["sensor", "binary_sensor"]
-# CONTEXT.md D-09 — Phase 5 only modifies this list, no other setup changes needed.
-PLATFORMS: list[str] = []
+# Phase 5 (CONTEXT.md D-09): platforms now populated.
+PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -46,8 +48,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_load_store()
     await coordinator.async_config_entry_first_refresh()
 
+    # Phase 5 D-08: schedule once-daily delivered-shipment cleanup.
+    # The cancel callback MUST be stored so async_unload_entry can stop the
+    # scheduled task (RESEARCH.md "Don't Hand-Roll" — async_track_time_interval
+    # gives us correct DST/shutdown handling for free).
+    cancel_cleanup = async_track_time_interval(
+        hass,
+        coordinator.async_cleanup_delivered,
+        timedelta(hours=24),
+        name="shop2parcel_cleanup",
+    )
+
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = coordinator
+    # Phase 5 D-10: dict-shaped value — sensor.py / binary_sensor.py read
+    # ["coordinator"] and async_unload_entry pops + invokes ["cancel_cleanup"].
+    hass.data[DOMAIN][entry.entry_id] = {
+        "coordinator": coordinator,
+        "cancel_cleanup": cancel_cleanup,
+    }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -61,5 +79,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        entry_data = hass.data[DOMAIN].pop(entry.entry_id, {})
+        # Cancel the scheduled cleanup task — without this, the callback continues
+        # firing after the integration is unloaded (RESEARCH.md anti-pattern).
+        if cancel_callback := entry_data.get("cancel_cleanup"):
+            cancel_callback()
     return unload_ok
