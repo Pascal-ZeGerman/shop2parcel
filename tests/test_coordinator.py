@@ -342,6 +342,57 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
         assert "new_msg" not in data
 
 
+async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
+    """FWRD-04 / Phase 6 D-01 gap fill: when _quota_exhausted_until is in the past,
+    POST resumes on the next poll AND _quota_exhausted_until is cleared to None
+    (coordinator.py lines 242-248).
+
+    The existing test_gmail_polling_continues_during_quota exercises the BLOCKED state
+    (quota_exhausted_until in the future). This test exercises the EXIT state.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body",
+            return_value="<html/>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        save_mock = AsyncMock()
+        mock_store_cls.return_value.async_save = save_mock
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=[{"id": "msg_recover"}]
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_shipment("msg_recover")
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = Shop2ParcelCoordinator(hass, mock_config_entry)
+        await coord.async_load_store()
+        # Set quota_exhausted_until to a timestamp 1 second IN THE PAST
+        coord._quota_exhausted_until = int(time_module.time()) - 1
+
+        data = await coord._async_update_data()
+
+        # POST must have been invoked (quota window expired)
+        mock_parcel_cls.return_value.async_add_delivery.assert_called_once()
+        # New shipment is in returned data and forwarded set
+        assert "msg_recover" in data
+        assert "msg_recover" in coord._forwarded_ids
+        # Quota window was cleared
+        assert coord._quota_exhausted_until is None
+        # Save was called at least once after recovery
+        assert save_mock.await_count >= 1
+
+
 # -------- FWRD-05: error translation taxonomy ---------------------------
 
 
