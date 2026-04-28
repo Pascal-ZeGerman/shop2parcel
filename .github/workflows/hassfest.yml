@@ -9,4 +9,4 @@ on:
 jobs:
   hassfest:
     name: Validate manifest.json
-    uses: "home-assistant/actions/.github/workflows/hassfest.yaml@master"
+    uses: "home-assistant/actions/.github/workflows/hassfest.yml@master"
