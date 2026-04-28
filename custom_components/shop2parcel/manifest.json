@@ -1,12 +1,12 @@
 {
   "domain": "shop2parcel",
   "name": "Shop2Parcel",
-  "version": "0.1.0",
-  "documentation": "https://github.com/Pascal-ZeGerman/shop2parcel",
-  "issue_tracker": "https://github.com/Pascal-ZeGerman/shop2parcel/issues",
   "codeowners": ["@Pascal-ZeGerman"],
-  "requirements": ["google-api-python-client==2.194.0", "google-auth>=2.0.0", "beautifulsoup4==4.12.3", "lxml==5.3.0"],
+  "config_flow": true,
   "dependencies": ["application_credentials"],
+  "documentation": "https://github.com/Pascal-ZeGerman/shop2parcel",
   "iot_class": "cloud_polling",
-  "config_flow": true
+  "issue_tracker": "https://github.com/Pascal-ZeGerman/shop2parcel/issues",
+  "requirements": ["google-api-python-client==2.194.0", "google-auth>=2.0.0", "beautifulsoup4==4.12.3", "lxml==5.3.0"],
+  "version": "0.1.0"
 }
