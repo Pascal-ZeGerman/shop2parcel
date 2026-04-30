@@ -548,10 +548,7 @@ async def test_cleanup_no_deliveries_in_data(hass, mock_config_entry):
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
-        # Phase 5 dict shape — coordinator.data may already be {} (empty dict) at this point
-        if isinstance(coordinator, dict):
-            coordinator = coordinator["coordinator"]
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
         with patch.object(coordinator, "async_set_updated_data") as set_data:
             await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
             set_data.assert_not_called()
@@ -582,8 +579,7 @@ async def test_cleanup_removes_delivered_from_data(hass, mock_config_entry):
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        raw = hass.data[DOMAIN][mock_config_entry.entry_id]
-        coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
 
         coordinator.async_set_updated_data(
             {
@@ -617,8 +613,7 @@ async def test_cleanup_uses_filter_mode_recent(hass, mock_config_entry):
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        raw = hass.data[DOMAIN][mock_config_entry.entry_id]
-        coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
         # Seed data so the early-return guard (WR-01) doesn't skip the API call
         coordinator.async_set_updated_data(
             {
