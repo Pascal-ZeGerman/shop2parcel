@@ -11,7 +11,7 @@ import base64
 import time
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, NoReturn
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -95,7 +95,7 @@ def extract_html_body(payload: dict) -> str | None:
     return None
 
 
-def _classify_gmail_error(err: Exception) -> None:
+def _classify_gmail_error(err: Exception) -> NoReturn:
     """Translate Google API exceptions to custom taxonomy. Never returns normally.
 
     EMAIL-06: HttpError 401/403 → GmailAuthError (coordinator raises ConfigEntryAuthFailed).
