@@ -131,7 +131,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # may create a new data dict on the config entry (HA 2024.x+), so self._entry.data
         # could still hold the pre-refresh snapshot.  The OAuth2Session already holds the
         # refreshed token after the await above.
-        access_token: str = oauth_session.token["access_token"]
+        access_token = oauth_session.token.get("access_token")
+        if not access_token:
+            raise ConfigEntryAuthFailed("OAuth2 token missing access_token field") from None
 
         # 2. List Gmail messages matching the configured query.
         gmail = GmailClient(self.hass.async_add_executor_job)
