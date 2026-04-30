@@ -159,6 +159,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._quota_exhausted_until is not None and now < self._quota_exhausted_until
         )
         max_email_date = self._last_email_timestamp or 0
+        any_forwarded = False
 
         # 4. Iterate messages — skip already-forwarded BEFORE fetching body (saves quota).
         for msg_meta in messages:
@@ -231,16 +232,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 _LOGGER.warning("parcelapp.net transient error for %s: %s", msg_id, err)
                 continue
 
-            # 6. Success — update data and persist (current_data deferred to here so
-            # quota/error paths cannot produce a stale entry, satisfying FWRD-02).
+            # 6. Success — update in-memory data (persist deferred to after the loop
+            # so the store is written once for all successfully forwarded messages in
+            # this poll cycle rather than once per message).
             self._forwarded_ids.add(msg_id)
             current_data[msg_id] = shipment
             if email_date > max_email_date:
                 max_email_date = email_date
-            await self._async_save_store()
+            any_forwarded = True
 
         if max_email_date > (self._last_email_timestamp or 0):
             self._last_email_timestamp = max_email_date
+        # Persist once after the loop if any shipments were forwarded (covers both
+        # _forwarded_ids and _last_email_timestamp updates in a single write).
+        if any_forwarded:
+            await self._async_save_store()
 
         # Clear stale quota block from Store once the window has expired.  Without
         # this, a past-epoch timestamp would accumulate across restarts indefinitely.
