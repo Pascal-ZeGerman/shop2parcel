@@ -28,7 +28,7 @@ source = ["custom_components"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py314"
 extend-exclude = [".venv", ".claude", "tests/__pycache__"]
 
 [tool.ruff.lint]
