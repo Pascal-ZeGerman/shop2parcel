@@ -117,7 +117,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
-        oauth_session = config_entry_oauth2_flow.OAuth2Session(self.hass, self._entry)
+        implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
+            self.hass, self._entry
+        )
+        oauth_session = config_entry_oauth2_flow.OAuth2Session(
+            self.hass, self._entry, implementation
+        )
         try:
             await oauth_session.async_ensure_token_valid()
         except Exception as err:  # noqa: BLE001 — translate to HA exception
