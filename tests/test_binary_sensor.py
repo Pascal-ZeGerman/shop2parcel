@@ -8,7 +8,7 @@ Coverage: ENTT-03 (D-07: is_on = len(coordinator.data) > 0).
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.helpers import entity_registry as er
