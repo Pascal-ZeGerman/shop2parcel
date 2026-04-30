@@ -73,6 +73,7 @@ async def test_new_shipment_is_posted(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
@@ -102,6 +103,7 @@ async def test_no_duplicate_post(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(
             return_value={"forwarded_ids": ["msg1"], "quota_exhausted_until": None}
         )
@@ -148,6 +150,7 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         # Store returns a sentinel with a known msg_id already forwarded
         mock_store_cls.return_value.async_load = AsyncMock(
             return_value={"forwarded_ids": ["sentinel_msg"], "quota_exhausted_until": None}
@@ -185,6 +188,7 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         save_mock = AsyncMock()
         mock_store_cls.return_value.async_save = save_mock
@@ -223,6 +227,7 @@ async def test_quota_exhaustion(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
@@ -260,6 +265,7 @@ async def test_quota_exhausted_until_midnight(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
@@ -291,6 +297,7 @@ async def test_quota_exhausted_until_reset_at(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
@@ -322,6 +329,7 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
@@ -367,6 +375,7 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         save_mock = AsyncMock()
         mock_store_cls.return_value.async_save = save_mock
@@ -415,6 +424,7 @@ async def test_parcelapp_transient_error_skipped(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
@@ -444,6 +454,7 @@ async def test_gmail_transient_raises_update_failed(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
@@ -464,6 +475,7 @@ async def test_gmail_auth_raises_config_entry_auth_failed(hass, mock_config_entr
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
@@ -490,6 +502,7 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         save_mock = AsyncMock()
         mock_store_cls.return_value.async_save = save_mock
@@ -530,6 +543,7 @@ async def test_cleanup_no_deliveries_in_data(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
@@ -563,6 +577,7 @@ async def test_cleanup_removes_delivered_from_data(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
@@ -597,6 +612,7 @@ async def test_cleanup_uses_filter_mode_recent(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
@@ -635,6 +651,7 @@ async def test_cleanup_handles_auth_error(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
@@ -661,6 +678,7 @@ async def test_cleanup_handles_transient_error(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])

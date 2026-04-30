@@ -39,6 +39,7 @@ async def _setup_with_data(hass, mock_config_entry, data: dict[str, ShipmentData
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         # Make _async_update_data return the seeded data
