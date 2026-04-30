@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import sys
 import time
+from functools import partial
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -94,8 +95,13 @@ class _CapturingExecutor:
     """Async executor that runs callables inline and records calls.
 
     Call sequence from gmail_client:
-      1st call: partial(build, "gmail", "v1", credentials=creds) → returns service mock
-      2nd call: request.execute (bound method of request) → returns execute_return dict
+      build call:  partial(build, "gmail", "v1", credentials=creds) → returns service mock
+      execute call: request.execute (bound method of request) → returns execute_return dict
+
+    Distinguishes the two call types by checking isinstance(func, partial) — the
+    gmail_client always wraps build() in functools.partial, while request.execute is
+    a plain bound method. This avoids the fragile parity-based (call_count % 2)
+    approach which breaks if the production code adds or removes executor calls.
     """
 
     def __init__(self, service=None, execute_return=None, raise_on_execute=None):
@@ -103,18 +109,14 @@ class _CapturingExecutor:
         self.execute_return = execute_return
         self.raise_on_execute = raise_on_execute
         self.calls: list[Any] = []
-        self._call_count = 0
 
     async def __call__(self, func, *args):
         self.calls.append((func, args))
-        self._call_count += 1
-        if self._call_count % 2 == 1:
-            # Odd calls: build() partial → return service mock
-            if self.service is not None:
-                return self.service
-            return MagicMock()
+        if isinstance(func, partial):
+            # build() call — return service mock
+            return self.service if self.service is not None else MagicMock()
         else:
-            # Even calls: request.execute → return result or raise
+            # request.execute call — return result or raise
             if self.raise_on_execute:
                 raise self.raise_on_execute
             return self.execute_return if self.execute_return is not None else {}
