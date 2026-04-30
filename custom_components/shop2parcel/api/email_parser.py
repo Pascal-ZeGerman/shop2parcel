@@ -87,9 +87,10 @@ class EmailParser:
                 if m:
                     carrier_name = m.group(1).strip()
             if not tracking_number:
-                m = re.search(r"\b([A-Z0-9]{10,40})\b", text)
-                if m and _looks_like_tracking(m.group(1)):
-                    tracking_number = m.group(1)
+                for candidate in re.findall(r"\b([A-Z0-9]{10,40})\b", text):
+                    if _looks_like_tracking(candidate):
+                        tracking_number = candidate
+                        break
 
         if tracking_number and order_name:
             return ShipmentData(
