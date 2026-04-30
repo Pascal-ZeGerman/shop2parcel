@@ -174,7 +174,7 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
 
 
 async def test_store_saved_after_post(hass, mock_config_entry):
-    """FWRD-03: Store.async_save called immediately after each successful POST."""
+    """FWRD-03: Store.async_save called at least once after a poll cycle that successfully forwarded one or more shipments (deferred-save model — single write per cycle, not per message)."""
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
@@ -206,7 +206,8 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord.async_load_store()
         await coord._async_update_data()
-        assert save_mock.await_count >= 2  # one save per successful POST
+        # Coordinator defers save to after the loop — one write for the whole cycle.
+        assert save_mock.await_count >= 1
 
 
 # -------- FWRD-04: quota handling ---------------------------------------
