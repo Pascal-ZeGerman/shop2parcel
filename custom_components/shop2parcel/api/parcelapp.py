@@ -88,7 +88,12 @@ class ParcelAppClient:
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 resp.raise_for_status()
-        except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as err:
+        except (
+            TimeoutError,
+            aiohttp.ClientConnectionError,
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ServerTimeoutError,
+        ) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
 
     async def async_get_deliveries(self, filter_mode: str = "recent") -> list[dict]:
@@ -113,5 +118,10 @@ class ParcelAppClient:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 return data.get("deliveries", [])
-        except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as err:
+        except (
+            TimeoutError,
+            aiohttp.ClientConnectionError,
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ServerTimeoutError,
+        ) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
