@@ -14,8 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import OptionsFlowWithReload
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 
 from .const import (
     CONF_GMAIL_QUERY,
@@ -33,7 +32,7 @@ class OptionsFlowHandler(OptionsFlowWithReload):
     options dict, and the coordinator picks up the new poll interval.
     """
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show form with current values; save and reload on submit."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
