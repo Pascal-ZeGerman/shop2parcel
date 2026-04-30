@@ -22,6 +22,6 @@ async def async_get_description_placeholders(hass: HomeAssistant) -> dict[str, s
     """Return description placeholders for the credentials dialog."""
     return {
         "oauth_consent_url": "https://console.cloud.google.com/apis/credentials/consent",
-        "more_info_url": "https://github.com/yourusername/shop2parcel",
+        "more_info_url": "https://github.com/Pascal-ZeGerman/shop2parcel",
         "oauth_creds_url": "https://console.cloud.google.com/apis/credentials",
     }
