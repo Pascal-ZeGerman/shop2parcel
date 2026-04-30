@@ -1,6 +1,6 @@
 [project]
 name = "shop2parcel"
-version = "0.1.0"
+version = "0.1.3"
 description = "Home Assistant custom integration: Shopify → Parcel App tracking via Gmail"
 requires-python = ">=3.14"
 dependencies = [
