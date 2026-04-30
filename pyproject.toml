@@ -51,12 +51,15 @@ exclude = [
 
 [[tool.mypy.overrides]]
 module = "shop2parcel.options_flow"
-ignore_errors = true
+# HA generic types (OptionsFlowWithReload, ConfigFlowResult) lack complete stubs
+disable_error_codes = ["misc", "no-untyped-def", "no-untyped-call"]
 
 [[tool.mypy.overrides]]
 module = "shop2parcel.config_flow"
-ignore_errors = true
+# HA generic types (ConfigFlow, ConfigFlowResult) lack complete stubs
+disable_error_codes = ["misc", "no-untyped-def", "no-untyped-call"]
 
 [[tool.mypy.overrides]]
 module = "shop2parcel.coordinator"
-ignore_errors = true
+# HA generic types (DataUpdateCoordinator, OAuth2Session) lack complete stubs
+disable_error_codes = ["misc", "no-untyped-def", "no-untyped-call", "attr-defined"]
