@@ -8,7 +8,7 @@ Coverage: ENTT-03 (D-07: is_on = len(coordinator.data) > 0).
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.helpers import entity_registry as er
@@ -37,6 +37,7 @@ async def _setup_with_data(hass, mock_config_entry, data: dict[str, ShipmentData
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
