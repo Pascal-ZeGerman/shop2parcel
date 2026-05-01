@@ -17,13 +17,14 @@ sys.modules.setdefault("google.oauth2", _GOOGLE_MOCK)
 sys.modules.setdefault("google.oauth2.credentials", _GOOGLE_MOCK)
 sys.modules.setdefault("googleapiclient", _GOOGLE_MOCK)
 sys.modules.setdefault("googleapiclient.discovery", _GOOGLE_MOCK)
-# NOTE: googleapiclient.errors is intentionally NOT mocked here.
-# tests/api/test_gmail_client.py sets up its own _MockHttpError and registers it
-# via sys.modules before importing gmail_client. If conftest pre-registers
-# googleapiclient.errors with a different class, the setdefault in test_gmail_client.py
-# becomes a no-op and isinstance() checks in gmail_client._classify_gmail_error break.
-# coordinator.py tests mock GmailClient directly so gmail_client.py's module-level
-# import of HttpError is not exercised at coordinator test runtime.
+# NOTE: googleapiclient.errors is also mocked here via setdefault so that
+# tests/test_coordinator.py can be collected independently (when run in isolation
+# the gmail_client module-level `from googleapiclient.errors import HttpError` would
+# fail because Python can't do `from <non-package> import`).
+# Using setdefault means tests/api/test_gmail_client.py can still override with its
+# own _MockHttpError class; the isinstance() checks in _classify_gmail_error use
+# whatever is registered when gmail_client.py is first imported.
+sys.modules.setdefault("googleapiclient.errors", _GOOGLE_MOCK)
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
