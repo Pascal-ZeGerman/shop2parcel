@@ -38,10 +38,15 @@ class _MockHttpError(Exception):
 
 _mock_errors.HttpError = _MockHttpError
 
-# Patch sys.modules before importing gmail_client
+# Patch sys.modules before importing gmail_client.
+# Use direct assignment (not setdefault) for googleapiclient.errors so that
+# _MockHttpError is always the HttpError class used in gmail_client.py —
+# even when conftest.py has already registered a stub HttpError for coordinator
+# test isolation. Direct assignment re-registers the module and the already-imported
+# gmail_client module will have HttpError patched at the namespace level below.
 sys.modules.setdefault("googleapiclient", _mock_googleapiclient)
 sys.modules.setdefault("googleapiclient.discovery", _mock_discovery)
-sys.modules.setdefault("googleapiclient.errors", _mock_errors)
+sys.modules["googleapiclient.errors"] = _mock_errors  # direct assignment — see comment above
 sys.modules.setdefault("google", MagicMock())
 sys.modules.setdefault("google.oauth2", _mock_google_oauth2)
 sys.modules.setdefault("google.oauth2.credentials", _mock_credentials_module)
@@ -55,6 +60,11 @@ from custom_components.shop2parcel.api.gmail_client import (  # noqa: E402
     build_incremental_query,
     extract_html_body,
 )
+import custom_components.shop2parcel.api.gmail_client as _gmail_client_module  # noqa: E402
+
+# Re-bind HttpError in gmail_client's module namespace so that isinstance() checks
+# in _classify_gmail_error use _MockHttpError (not whatever conftest registered).
+_gmail_client_module.HttpError = _MockHttpError
 
 # ---------------------------------------------------------------------------
 # Helpers

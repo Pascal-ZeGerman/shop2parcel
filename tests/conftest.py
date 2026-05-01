@@ -17,14 +17,32 @@ sys.modules.setdefault("google.oauth2", _GOOGLE_MOCK)
 sys.modules.setdefault("google.oauth2.credentials", _GOOGLE_MOCK)
 sys.modules.setdefault("googleapiclient", _GOOGLE_MOCK)
 sys.modules.setdefault("googleapiclient.discovery", _GOOGLE_MOCK)
-# NOTE: googleapiclient.errors is also mocked here via setdefault so that
-# tests/test_coordinator.py can be collected independently (when run in isolation
-# the gmail_client module-level `from googleapiclient.errors import HttpError` would
-# fail because Python can't do `from <non-package> import`).
-# Using setdefault means tests/api/test_gmail_client.py can still override with its
-# own _MockHttpError class; the isinstance() checks in _classify_gmail_error use
-# whatever is registered when gmail_client.py is first imported.
-sys.modules.setdefault("googleapiclient.errors", _GOOGLE_MOCK)
+# Phase 7 fix: tests/test_coordinator.py must be collectable standalone (without
+# tests/api/test_gmail_client.py running first).  The gmail_client module-level
+# `from googleapiclient.errors import HttpError` fails when googleapiclient is a
+# MagicMock and googleapiclient.errors is NOT in sys.modules.
+#
+# Solution: register a minimal errors-module mock with HttpError as a real exception
+# class (required for isinstance() checks in _classify_gmail_error).
+# tests/api/test_gmail_client.py uses setdefault — since conftest runs first this
+# setdefault is now a no-op.  That test file is updated to use direct assignment
+# so its _MockHttpError class takes effect for gmail_client's already-cached import.
+#
+# NOTE: gmail_client.py caches the HttpError class on first import.  When the full
+# suite runs (gmail_client tests first), the class in play is from test_gmail_client.py.
+# When test_coordinator.py runs alone, the class below is used — coordinator tests
+# mock GmailClient entirely so HttpError is never exercised in those tests.
+
+class _StubHttpError(Exception):
+    """Stub HttpError for coordinator-test isolation — not used in isinstance() path."""
+    def __init__(self, resp=None, content=b""):
+        self.resp = resp
+        self.content = content
+
+
+_ERRORS_MOCK = MagicMock()
+_ERRORS_MOCK.HttpError = _StubHttpError
+sys.modules.setdefault("googleapiclient.errors", _ERRORS_MOCK)
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry

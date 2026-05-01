@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 
@@ -29,7 +30,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api.carrier_codes import normalize_carrier
-from .api.email_parser import EmailParser, ShipmentData
+from .api.email_parser import EmailParser, ParseResult, ShipmentData
 from .api.exceptions import (
     GmailAuthError,
     GmailTransientError,
@@ -69,6 +70,40 @@ def _next_midnight_utc() -> int:
     )
 
 
+@dataclass(slots=True)
+class PollStats:
+    """Phase 7 (DIAG-05..DIAG-12): in-memory diagnostic accumulator.
+
+    Mutated in place by `_async_update_data`. NOT frozen (Pitfall 3) and NOT
+    persisted (D-04) — counters reset to 0 on each HA restart, matching the
+    ROADMAP spec ("cumulative since last HA restart").
+
+    Field semantics:
+      *_total fields: cumulative since coordinator construction (HA session lifetime).
+      last_poll_* fields: reset at the top of every _async_update_data call (D-06).
+    """
+
+    emails_scanned_total: int = 0
+    emails_matched_total: int = 0
+    tracking_numbers_found_total: int = 0
+    keyword_hits_total: int = 0
+    last_poll_emails_scanned: int = 0
+    last_poll_emails_matched: int = 0
+    last_poll_time: float | None = None
+    last_poll_duration_ms: float | None = None
+    last_poll_query: str | None = None
+    last_poll_skip_reasons: list[dict] = field(default_factory=list)
+    last_poll_found: list[dict] = field(default_factory=list)
+    last_poll_keyword_hits: int = 0
+    keyword_hits_per_key: dict[str, int] = field(
+        default_factory=lambda: {
+            "tracking_regex": 0,
+            "order_regex": 0,
+            "carrier_regex": 0,
+        }
+    )
+
+
 class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     """Polls Gmail, parses shipping emails, forwards to parcelapp.net."""
 
@@ -88,6 +123,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._forwarded_ids: set[str] = set()
         self._quota_exhausted_until: int | None = None
         self._last_email_timestamp: int | None = None
+        # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
+        self._diagnostics: PollStats = PollStats()
 
     async def async_load_store(self) -> None:
         """Hydrate dedup + quota state from Store.
@@ -138,6 +175,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # 2. List Gmail messages matching the configured query.
         gmail = GmailClient(self.hass.async_add_executor_job)
         query = self._entry.options.get(CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY)
+
+        # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
+        poll_start = time.time()
+        d = self._diagnostics
+        d.last_poll_emails_scanned = 0
+        d.last_poll_emails_matched = 0
+        d.last_poll_skip_reasons = []
+        d.last_poll_found = []
+        d.last_poll_keyword_hits = 0
+        d.last_poll_time = None
+        d.last_poll_duration_ms = None
+        d.last_poll_query = query
+
         try:
             messages = await gmail.async_list_messages(
                 access_token, query, after_timestamp=self._last_email_timestamp
@@ -176,15 +226,49 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
             html = extract_html_body(msg.get("payload", {}))
             if not html:
+                # Phase 7 (D-02): no_html_body is set by the COORDINATOR — the parser
+                # never sees this case because we don't call parser.parse on empty HTML.
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": msg_id, "reason": "no_html_body"}
+                )
                 continue
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
             except (ValueError, TypeError):
                 _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
                 continue
-            shipment = parser.parse(html, msg_id, email_date)
-            if shipment is None:
+            # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
+            # the existing forwarding flow with the unwrapped ShipmentData.
+            result: ParseResult = parser.parse(html, msg_id, email_date)
+            d.emails_scanned_total += 1
+            d.last_poll_emails_scanned += 1
+            if result.shipment is None:
+                d.last_poll_skip_reasons.append(
+                    {"message_id": msg_id, "reason": result.skip_reason}
+                )
+            else:
+                d.emails_matched_total += 1
+                d.last_poll_emails_matched += 1
+                d.tracking_numbers_found_total += 1
+                d.last_poll_found.append(
+                    {
+                        "tracking_number": result.shipment.tracking_number,
+                        "carrier": result.shipment.carrier_name,
+                        "order_name": result.shipment.order_name,
+                        "message_id": msg_id,
+                    }
+                )
+            # Keyword hit accumulation (D-08): always — HTML strategy gives all-False.
+            for key, hit in result.keyword_hits.items():
+                if hit:
+                    d.keyword_hits_per_key[key] += 1
+                    d.keyword_hits_total += 1
+                    d.last_poll_keyword_hits += 1
+            if result.shipment is None:
                 continue
+            shipment = result.shipment
 
             # 5. Quota guard (D-05): when quota is exhausted, do NOT add the shipment
             # to current_data and do NOT advance max_email_date.  Keeping the message
@@ -240,6 +324,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if email_date > max_email_date:
                 max_email_date = email_date
             any_forwarded = True
+
+        # Phase 7: capture per-poll timing (D-04, Specifics).
+        d.last_poll_time = poll_start
+        d.last_poll_duration_ms = (time.time() - poll_start) * 1000
 
         if max_email_date > (self._last_email_timestamp or 0):
             self._last_email_timestamp = max_email_date
