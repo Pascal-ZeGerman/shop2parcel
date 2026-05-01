@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.shop2parcel.api.email_parser import EmailParser, ShipmentData
+from custom_components.shop2parcel.api.email_parser import EmailParser, ParseResult, ShipmentData
 
 FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "shopify_shipping_email.html"
 
@@ -23,21 +23,21 @@ def test_extracts_all_fields_from_fixture(shopify_html: str) -> None:
     """HTML strategy: parse standard Shopify shipping email and extract all fields."""
     parser = EmailParser()
     result = parser.parse(shopify_html, "msg123", 1745452800)
-    assert result is not None
-    assert isinstance(result, ShipmentData)
-    assert result.tracking_number == "1Z999AA10123456784"
-    assert result.order_name == "#1234"
-    assert result.carrier_name != ""
-    assert result.message_id == "msg123"
-    assert result.email_date == 1745452800
+    assert result.shipment is not None
+    assert isinstance(result.shipment, ShipmentData)
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.shipment.order_name == "#1234"
+    assert result.shipment.carrier_name != ""
+    assert result.shipment.message_id == "msg123"
+    assert result.shipment.email_date == 1745452800
 
 
 def test_html_strategy_used_first(shopify_html: str) -> None:
     """HTML strategy should return non-None for standard Shopify layout (no regex needed)."""
     parser = EmailParser()
-    result = parser._parse_html_template(shopify_html, "msg123", 1745452800)
-    assert result is not None
-    assert result.tracking_number == "1Z999AA10123456784"
+    html_result = parser._parse_html_template(shopify_html, "msg123", 1745452800)
+    assert html_result.shipment is not None
+    assert html_result.shipment.tracking_number == "1Z999AA10123456784"
 
 
 def test_dual_strategy_fallback_used() -> None:
@@ -58,18 +58,18 @@ def test_dual_strategy_fallback_used() -> None:
     parser = EmailParser()
     # HTML strategy only scans <p> — so <div>-only HTML should return None from HTML strategy
     html_result = parser._parse_html_template(html, "msg456", 0)
-    assert html_result is None, "HTML strategy should fail on div-only HTML"
+    assert html_result.shipment is None, "HTML strategy should fail on div-only HTML"
     # Regex fallback should succeed
     result = parser.parse(html, "msg456", 0)
-    assert result is not None
-    assert result.tracking_number == "1Z999AA10123456784"
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
 
 
 def test_returns_none_when_no_tracking_no_order() -> None:
     """Parser returns None when neither tracking number nor order name is found."""
     parser = EmailParser()
     result = parser.parse("<html><body><p>Hello world</p></body></html>", "x", 0)
-    assert result is None
+    assert result.shipment is None
 
 
 def test_shipment_data_is_dataclass() -> None:
@@ -96,16 +96,16 @@ def test_carrier_name_unknown_when_not_found() -> None:
     html = "<html><body><p>Your order #9999 has shipped.</p><p>1Z999AA10123456784</p></body></html>"
     parser = EmailParser()
     result = parser.parse(html, "msg789", 0)
-    assert result is not None
-    assert result.carrier_name == "Unknown"
+    assert result.shipment is not None
+    assert result.shipment.carrier_name == "Unknown"
 
 
 def test_order_name_starts_with_hash(shopify_html: str) -> None:
     """Parsed order_name must always start with '#'."""
     parser = EmailParser()
     result = parser.parse(shopify_html, "msg123", 1745452800)
-    assert result is not None
-    assert result.order_name.startswith("#")
+    assert result.shipment is not None
+    assert result.shipment.order_name.startswith("#")
 
 
 def test_regex_fallback_extracts_tracking() -> None:
@@ -113,8 +113,8 @@ def test_regex_fallback_extracts_tracking() -> None:
     html = "<html><body><p>Tracking number: 1Z999AA10123456784 Order #5678</p></body></html>"
     parser = EmailParser()
     result = parser.parse(html, "msg456", 0)
-    assert result is not None
-    assert result.tracking_number == "1Z999AA10123456784"
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
 
 
 def test_regex_fallback_extracts_order() -> None:
@@ -122,8 +122,69 @@ def test_regex_fallback_extracts_order() -> None:
     html = "<html><body><p>Tracking number: 1Z999AA10123456784 Order #5678</p></body></html>"
     parser = EmailParser()
     result = parser.parse(html, "msg456", 0)
-    assert result is not None
-    assert result.order_name == "#5678"
+    assert result.shipment is not None
+    assert result.shipment.order_name == "#5678"
+
+
+def test_parse_always_returns_parseresult(shopify_html: str) -> None:
+    """DIAG-01: parse() must always return a ParseResult instance, never None."""
+    parser = EmailParser()
+    # Success path
+    assert isinstance(parser.parse(shopify_html, "msg1", 1), ParseResult)
+    # Failure path
+    assert isinstance(parser.parse("<html/>", "msg2", 2), ParseResult)
+
+
+def test_html_strategy_success_strategy_used(shopify_html: str) -> None:
+    """DIAG-02: HTML strategy success -> strategy_used='html_template', skip_reason=None,
+    keyword_hits all-False (HTML strategy never runs the fallback regexes -- D-07)."""
+    parser = EmailParser()
+    result = parser.parse(shopify_html, "msg1", 1)
+    assert result.shipment is not None
+    assert result.strategy_used == "html_template"
+    assert result.skip_reason is None
+    assert result.keyword_hits == {
+        "tracking_regex": False,
+        "order_regex": False,
+        "carrier_regex": False,
+    }
+
+
+def test_regex_fallback_success_strategy_used() -> None:
+    """DIAG-03: Regex fallback success -> strategy_used='regex_fallback', skip_reason=None,
+    tracking_regex and order_regex hits are True."""
+    html = (
+        "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "msg2", 0)
+    assert result.shipment is not None
+    assert result.strategy_used == "regex_fallback"
+    assert result.skip_reason is None
+    assert result.keyword_hits["tracking_regex"] is True
+    assert result.keyword_hits["order_regex"] is True
+
+
+def test_keyword_hits_always_has_all_three_keys() -> None:
+    """DIAG-04: Every parse() call's keyword_hits has exactly the 3 expected keys
+    with bool values, including the total-failure path."""
+    parser = EmailParser()
+    expected_keys = {"tracking_regex", "order_regex", "carrier_regex"}
+    # Total failure path
+    empty = parser.parse("<html><body><p>Hello world</p></body></html>", "x", 0)
+    assert empty.shipment is None
+    assert empty.skip_reason == "no_regex_match"
+    assert empty.strategy_used is None
+    assert set(empty.keyword_hits.keys()) == expected_keys
+    assert all(isinstance(v, bool) for v in empty.keyword_hits.values())
+    # Regex fallback path
+    regex = parser.parse(
+        "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>",
+        "y",
+        0,
+    )
+    assert set(regex.keyword_hits.keys()) == expected_keys
+    assert all(isinstance(v, bool) for v in regex.keyword_hits.values())
 
 
 def test_no_ha_imports() -> None:
