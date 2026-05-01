@@ -29,6 +29,12 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import Shop2ParcelCoordinator
+from .diagnostic_sensor import (
+    EmailsMatchedSensor,
+    EmailsScannedSensor,
+    KeywordHitsSensor,
+    TrackingNumbersFoundSensor,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,8 +51,24 @@ async def async_setup_entry(
 
     Pitfall 4: hass.data[DOMAIN][entry.entry_id] is a dict {"coordinator": ..., "cancel_cleanup": ...}
     after Phase 5 changes to __init__.py — use ["coordinator"] key, not bare access.
+
+    Phase 7 (D-09/D-13): 4 static diagnostic sensors are co-registered here.
+    "diagnostic_sensor" is not a built-in HA platform domain and cannot be used
+    in PLATFORMS directly — sensors belonging to the "sensor" domain must be
+    registered from sensor.py's async_setup_entry.
     """
     coordinator: Shop2ParcelCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+
+    # Phase 7 (D-09): register the 4 static diagnostic sensors.
+    async_add_entities(
+        [
+            EmailsScannedSensor(coordinator, entry),
+            EmailsMatchedSensor(coordinator, entry),
+            TrackingNumbersFoundSensor(coordinator, entry),
+            KeywordHitsSensor(coordinator, entry),
+        ]
+    )
+
     known_ids: set[str] = set()
 
     @callback
