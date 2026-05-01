@@ -2,7 +2,8 @@
 
 These tests assume Plan 03 has landed:
 - custom_components/shop2parcel/diagnostic_sensor.py exists with 4 sensor classes.
-- PLATFORMS in __init__.py includes 'diagnostic_sensor'.
+- Diagnostic sensors are registered via sensor.py::async_setup_entry (not via a
+  "diagnostic_sensor" platform — HA only supports built-in platform domains).
 - coordinator._diagnostics is a PollStats instance (Plan 02).
 """
 
