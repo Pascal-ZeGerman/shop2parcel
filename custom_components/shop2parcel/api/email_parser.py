@@ -36,6 +36,22 @@ class ShipmentData:
     email_date: int  # Unix timestamp (seconds)
 
 
+@dataclass(slots=True, frozen=True)
+class ParseResult:
+    """Phase 7 (DIAG-01): instrumented return type for EmailParser.parse().
+
+    Always fully populated — `keyword_hits` always has exactly the keys
+    "tracking_regex", "order_regex", "carrier_regex" with bool values, even
+    on HTML-strategy parses (all False in that case — D-07). This guarantees
+    the coordinator can iterate the dict without key guards.
+    """
+
+    shipment: ShipmentData | None
+    skip_reason: str | None          # "no_template_match" | "no_regex_match" | None
+    strategy_used: str | None        # "html_template" | "regex_fallback" | None
+    keyword_hits: dict[str, bool]    # keys always: tracking_regex, order_regex, carrier_regex
+
+
 # Known tracking number format patterns (EMAIL-04).
 # Patterns are bounded quantifiers — no ReDoS risk (ASVS V5).
 _TRACKING_PATTERNS = [
@@ -58,16 +74,22 @@ class EmailParser:
     EMAIL-03: HTML template strategy first, regex fallback second.
     """
 
-    def parse(self, html: str, message_id: str, email_date: int) -> ShipmentData | None:
-        """Parse email HTML. Returns ShipmentData or None if unparseable."""
-        result = self._parse_html_template(html, message_id, email_date)
-        if result:
-            return result
+    def parse(self, html: str, message_id: str, email_date: int) -> ParseResult:
+        """Parse email HTML. Returns ParseResult always — never None.
+
+        shipment is None when both strategies fail; skip_reason indicates which
+        stage failed (D-02).
+        """
+        html_result = self._parse_html_template(html, message_id, email_date)
+        if html_result.shipment is not None:
+            return html_result
+        # HTML strategy failed; try regex fallback. The fallback's keyword_hits
+        # supersedes the HTML strategy's all-False placeholder.
         return self._parse_regex_fallback(html, message_id, email_date)
 
     def _parse_html_template(
         self, html: str, message_id: str, email_date: int
-    ) -> ShipmentData | None:
+    ) -> ParseResult:
         """Strategy 1: BeautifulSoup on <p> text patterns.
 
         Shopify standard template embeds tracking info as prose in <p> elements.
@@ -93,18 +115,28 @@ class EmailParser:
                         break
 
         if tracking_number and order_name:
-            return ShipmentData(
-                tracking_number=tracking_number,
-                carrier_name=carrier_name or "Unknown",
-                order_name=order_name,
-                message_id=message_id,
-                email_date=email_date,
+            return ParseResult(
+                shipment=ShipmentData(
+                    tracking_number=tracking_number,
+                    carrier_name=carrier_name or "Unknown",
+                    order_name=order_name,
+                    message_id=message_id,
+                    email_date=email_date,
+                ),
+                skip_reason=None,
+                strategy_used="html_template",
+                keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
             )
-        return None
+        return ParseResult(
+            shipment=None,
+            skip_reason="no_template_match",
+            strategy_used=None,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
 
     def _parse_regex_fallback(
         self, html: str, message_id: str, email_date: int
-    ) -> ShipmentData | None:
+    ) -> ParseResult:
         """Strategy 2: strip HTML, apply keyword regex to plain text.
 
         Handles custom merchant templates and non-Shopify shipping emails.
@@ -122,12 +154,27 @@ class EmailParser:
             text,
             re.IGNORECASE,
         )
+        hits = {
+            "tracking_regex": tracking is not None,
+            "order_regex": order is not None,
+            "carrier_regex": carrier is not None,
+        }
         if tracking and order:
-            return ShipmentData(
-                tracking_number=tracking.group(1),
-                carrier_name=carrier.group(1).strip() if carrier else "Unknown",
-                order_name=f"#{order.group(1)}",
-                message_id=message_id,
-                email_date=email_date,
+            return ParseResult(
+                shipment=ShipmentData(
+                    tracking_number=tracking.group(1),
+                    carrier_name=carrier.group(1).strip() if carrier else "Unknown",
+                    order_name=f"#{order.group(1)}",
+                    message_id=message_id,
+                    email_date=email_date,
+                ),
+                skip_reason=None,
+                strategy_used="regex_fallback",
+                keyword_hits=hits,
             )
-        return None
+        return ParseResult(
+            shipment=None,
+            skip_reason="no_regex_match",
+            strategy_used=None,
+            keyword_hits=hits,
+        )
