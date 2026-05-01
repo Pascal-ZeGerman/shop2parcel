@@ -238,6 +238,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 email_date = int(msg.get("internalDate", "0")) // 1000
             except (ValueError, TypeError):
                 _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append("invalid_internal_date")
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
