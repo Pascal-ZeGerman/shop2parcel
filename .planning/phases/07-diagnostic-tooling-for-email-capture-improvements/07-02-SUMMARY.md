@@ -134,6 +134,16 @@ None - no external service configuration required.
 - PollStats.last_poll_* fields are per-cycle (reset at top of each _async_update_data call)
 - No blockers — all 128 tests pass
 
+## Self-Check: PASSED
+
+- SUMMARY.md exists: FOUND at .planning/phases/07-diagnostic-tooling-for-email-capture-improvements/07-02-SUMMARY.md
+- coordinator.py modified: FOUND at custom_components/shop2parcel/coordinator.py
+- test_coordinator.py updated: FOUND at tests/test_coordinator.py
+- Commit 44f340a (RED): FOUND
+- Commit 18ba72d (GREEN): FOUND
+- Commit 08a0907 (SUMMARY): FOUND
+- Final test run: 128 passed, 2 xfailed, 1 xpassed
+
 ---
 *Phase: 07-diagnostic-tooling-for-email-capture-improvements*
 *Completed: 2026-05-01*
