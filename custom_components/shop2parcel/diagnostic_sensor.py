@@ -1,12 +1,17 @@
-"""Shop2Parcel diagnostic_sensor platform — 4 static DiagnosticSensor entities.
+"""Shop2Parcel diagnostic_sensor — 4 static DiagnosticSensor entity classes.
 
 Phase 7 (DIAG-08, DIAG-09, DIAG-10):
-- D-09: All 4 sensors registered statically in async_setup_entry (no dynamic pattern).
+- D-09: All 4 sensors registered statically via sensor.py::async_setup_entry.
 - D-10: All 4 sensors use CoordinatorEntity[Shop2ParcelCoordinator]; read from
   coordinator._diagnostics (a PollStats instance, always non-None — Pitfall 5).
 - D-11: Diagnostic sensors share the same Shop2Parcel DeviceInfo as shipment sensors
   (one device per config entry, identifiers={(DOMAIN, entry.entry_id)}).
 - D-12: Sensor state/attribute mapping per CONTEXT.md D-12.
+
+This module only exports sensor classes.  Registration happens in
+sensor.py::async_setup_entry because HA's platform forwarding only supports
+built-in platform domains (e.g. "sensor", "binary_sensor") — there is no
+"diagnostic_sensor" platform domain in HA core.
 
 MEASUREMENT state class is used because counters reset on HA restart,
 which avoids false statistics anomalies on restart (RESEARCH.md Open Questions §1).
@@ -19,32 +24,13 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import Shop2ParcelCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-
-
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Set up Shop2Parcel diagnostic_sensor platform — 4 static entities (D-09)."""
-    coordinator: Shop2ParcelCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities(
-        [
-            EmailsScannedSensor(coordinator, entry),
-            EmailsMatchedSensor(coordinator, entry),
-            TrackingNumbersFoundSensor(coordinator, entry),
-            KeywordHitsSensor(coordinator, entry),
-        ]
-    )
 
 
 class DiagnosticSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
