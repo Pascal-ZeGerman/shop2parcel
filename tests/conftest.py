@@ -76,3 +76,25 @@ def mock_config_entry() -> MockConfigEntry:
         },
         unique_id="user@gmail.com",
     )
+
+
+@pytest.fixture
+def mock_imap_config_entry() -> MockConfigEntry:
+    """Return a MockConfigEntry with minimal valid IMAP data for Shop2Parcel."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "connection_type": "imap",
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "imap_username": "user@example.com",
+            "imap_password": "app-password-here",
+            "imap_tls": "ssl",
+            "api_key": "test-parcelapp-key",
+        },
+        options={
+            "imap_search": 'SUBJECT "shipped"',
+            "poll_interval": 30,
+        },
+        unique_id="user@example.com@imap.example.com",
+    )
