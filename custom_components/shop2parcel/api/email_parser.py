@@ -85,6 +85,146 @@ def _looks_like_tracking(s: str) -> bool:
     return any(p.match(s) for p in _TRACKING_PATTERNS)
 
 
+# ---------------------------------------------------------------------------
+# Carrier template registry (Phase 8, D-04 / D-05).
+# Each carrier email format gets a (detect_fn, parse_fn) tuple. parse() iterates
+# CARRIER_REGISTRY before falling through to the existing Shopify dual-strategy.
+# Detection is HTML-fingerprint-based (no sender header parameter — D-04).
+# ---------------------------------------------------------------------------
+
+
+def _detect_ups(html: str) -> bool:
+    """Return True if html is a UPS shipping notification email.
+
+    Primary marker: 'mcinfo@ups.com' (UPS My Choice transactional sender).
+    Fallback marker: 'ups.com' in html AND 'shopify' not in html — prevents
+    misclassifying Shopify merchant emails for UPS-fulfilled orders (Pitfall 1
+    in RESEARCH.md). T-Spoof mitigation.
+    """
+    html_lower = html.lower()
+    if "mcinfo@ups.com" in html_lower:
+        return True
+    return "ups.com" in html_lower and "shopify" not in html_lower
+
+
+def _detect_usps(html: str) -> bool:
+    """Return True if html is a USPS shipping notification email.
+
+    Marker: 'usps.com' — low false-positive risk; not present in Shopify fixtures.
+    """
+    return "usps.com" in html.lower()
+
+
+def _detect_fedex(html: str) -> bool:
+    """Return True if html is a FedEx shipping notification email.
+
+    Marker: 'fedex.com' — low false-positive risk; not present in Shopify fixtures.
+    """
+    return "fedex.com" in html.lower()
+
+
+def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
+    """Extract tracking number from UPS shipping notification email.
+
+    UPS direct emails embed tracking in <td>/<a> — not <p>. Strategy: full
+    get_text() + carrier-specific bounded regex + _looks_like_tracking() validator.
+    order_name='' for direct carrier emails (no Shopify order number present —
+    sensor entity, coordinator, and parcelapp 'description' all accept empty
+    string per Phase 5 design).
+    """
+    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    m = _UPS_TRACKING_RE.search(text)
+    if m and _looks_like_tracking(m.group(1)):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=m.group(1),
+                carrier_name="UPS",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_UPS,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    return ParseResult(
+        shipment=None,
+        skip_reason="no_template_match",
+        strategy_used=None,
+        keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+    )
+
+
+def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
+    """Extract tracking number from USPS shipping notification email.
+
+    USPS uses 22-26 digit tracking numbers starting with 9[2345]; the
+    _USPS_TRACKING_RE pattern is the carrier-specific extractor and
+    _TRACKING_PATTERNS USPS entry was widened in Task 1 so _looks_like_tracking
+    accepts the full 26-digit form.
+    """
+    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    m = _USPS_TRACKING_RE.search(text)
+    if m and _looks_like_tracking(m.group(1)):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=m.group(1),
+                carrier_name="USPS",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_USPS,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    return ParseResult(
+        shipment=None,
+        skip_reason="no_template_match",
+        strategy_used=None,
+        keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+    )
+
+
+def _parse_fedex(html: str, message_id: str, email_date: int) -> ParseResult:
+    """Extract tracking number from FedEx shipping notification email.
+
+    FedEx uses 12-20 digit tracking numbers (Express 12, Ground 15, SmartPost 20);
+    the _FEDEX_TRACKING_RE and _TRACKING_PATTERNS FedEx entries were widened to
+    the full 12-20 range in Task 1.
+    """
+    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    m = _FEDEX_TRACKING_RE.search(text)
+    if m and _looks_like_tracking(m.group(1)):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=m.group(1),
+                carrier_name="FedEx",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_FEDEX,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    return ParseResult(
+        shipment=None,
+        skip_reason="no_template_match",
+        strategy_used=None,
+        keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+    )
+
+
+# Registry order: UPS -> USPS -> FedEx -> (fallthrough to Shopify in parse()).
+# First match wins. Order matters per RESEARCH.md ordering analysis.
+CARRIER_REGISTRY: list[tuple] = [
+    (_detect_ups, _parse_ups),
+    (_detect_usps, _parse_usps),
+    (_detect_fedex, _parse_fedex),
+]
+
+
 class EmailParser:
     """Parse Shopify shipping confirmation emails using dual-strategy approach.
 
@@ -94,9 +234,17 @@ class EmailParser:
     def parse(self, html: str, message_id: str, email_date: int) -> ParseResult:
         """Parse email HTML. Returns ParseResult always — never None.
 
-        shipment is None when both strategies fail; skip_reason indicates which
-        stage failed (D-02).
+        Carrier template registry (D-05) is consulted first: each (detect_fn,
+        parse_fn) tuple in CARRIER_REGISTRY is evaluated in order, first match
+        wins. If no registry entry matches, falls through to the existing
+        Shopify dual-strategy: HTML template -> regex fallback. shipment is
+        None when all strategies fail; skip_reason indicates which stage failed
+        (D-02).
         """
+        for detect_fn, parse_fn in CARRIER_REGISTRY:
+            if detect_fn(html):
+                return parse_fn(html, message_id, email_date)
+        # No registry match — fall through to existing Shopify dual-strategy.
         html_result = self._parse_html_template(html, message_id, email_date)
         if html_result.shipment is not None:
             return html_result
