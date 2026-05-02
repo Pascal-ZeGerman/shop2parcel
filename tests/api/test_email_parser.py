@@ -285,6 +285,30 @@ def test_fedex_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> Non
     assert _detect_fedex(shopify_html) is False
 
 
+def test_usps_detect_fn_not_triggered_on_shopify_usps_merchant_email() -> None:
+    """_detect_usps must NOT fire on a Shopify merchant email that includes a USPS tracking URL."""
+    from custom_components.shop2parcel.api.email_parser import _detect_usps
+    html = (
+        "<html><body>"
+        "<p>Your order #1234 has shipped. shopify.com</p>"
+        "<a href='https://tools.usps.com/go/TrackConfirmAction?tLabels=9261290100830125000029'>Track</a>"
+        "</body></html>"
+    )
+    assert _detect_usps(html) is False
+
+
+def test_fedex_detect_fn_not_triggered_on_shopify_fedex_merchant_email() -> None:
+    """_detect_fedex must NOT fire on a Shopify merchant email that includes a FedEx tracking URL."""
+    from custom_components.shop2parcel.api.email_parser import _detect_fedex
+    html = (
+        "<html><body>"
+        "<p>Your order #5678 has shipped. shopify.com</p>"
+        "<a href='https://www.fedex.com/fedextrack/?trknbr=449044304137821'>Track</a>"
+        "</body></html>"
+    )
+    assert _detect_fedex(html) is False
+
+
 def test_registry_checks_carrier_templates_before_shopify_path(shopify_html: str) -> None:
     """PARSE-03: Registry order must NOT cause Shopify fixture to be misclassified — strategy_used must be STRATEGY_HTML."""
     parser = EmailParser()
