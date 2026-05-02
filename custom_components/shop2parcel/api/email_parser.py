@@ -276,7 +276,7 @@ class EmailParser:
                 if m:
                     order_name = f"#{m.group(1)}"
             if not carrier_name:
-                m = re.search(r"\bvia\s+([A-Za-z][A-Za-z ]+?)(?:\s+with|\s*$|\.)", text)
+                m = re.search(r"\bvia\s+([A-Za-z][A-Za-z ]+?)(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)", text)
                 if m:
                     carrier_name = m.group(1).strip()
             if not tracking_number:
