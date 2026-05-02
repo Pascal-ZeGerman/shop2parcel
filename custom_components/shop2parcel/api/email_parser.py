@@ -326,7 +326,8 @@ class EmailParser:
         )
         order = re.search(r"order\s*#?\s*(\d+)", text, re.IGNORECASE)
         carrier = re.search(
-            r"(?:shipped?|carrier|via)\s+(?:by\s+)?([A-Za-z][A-Za-z]{2,20})(?:\s|$|\.)",
+            r"(?:via|carrier)\s+(?:by\s+)?([A-Za-z][A-Za-z]{2,20})(?:\s|$|\.)"
+            r"|shipped\s+by\s+([A-Za-z][A-Za-z]{2,20})(?:\s|$|\.)",
             text,
             re.IGNORECASE,
         )
@@ -339,7 +340,13 @@ class EmailParser:
             return ParseResult(
                 shipment=ShipmentData(
                     tracking_number=tracking.group(1),
-                    carrier_name=carrier.group(1).strip() if carrier else "Unknown",
+                    carrier_name=(
+                        next(
+                            (g for g in (carrier.group(1), carrier.group(2)) if g),
+                            "Unknown",
+                        ).strip()
+                        if carrier else "Unknown"
+                    ),
                     order_name=f"#{order.group(1)}",
                     message_id=message_id,
                     email_date=email_date,
