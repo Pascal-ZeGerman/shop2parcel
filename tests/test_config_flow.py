@@ -360,3 +360,117 @@ def test_handler_defines_async_step_reauth():
 def test_handler_defines_async_step_reauth_confirm():
     """async_step_reauth_confirm must be defined in OAuth2FlowHandler."""
     assert "async_step_reauth_confirm" in OAuth2FlowHandler.__dict__
+
+
+# ---------------------------------------------------------------------------
+# IMAP config flow stubs — D-01, D-02, D-03, D-04
+# All xfail until Plan 09-03 implements the IMAP flow steps.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=False, reason="async_step_user IMAP routing not yet implemented — Plan 09-03")
+async def test_async_step_user_shows_picker():
+    """D-01: async_step_user with None input returns a form with step_id='user'."""
+    handler = _make_handler()
+    result = await handler.async_step_user(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "user"
+
+
+@pytest.mark.xfail(strict=False, reason="async_step_user IMAP routing not yet implemented — Plan 09-03")
+async def test_async_step_user_routes_imap_to_async_step_imap():
+    """D-01: async_step_user with connection_type='imap' delegates to async_step_imap."""
+    handler = _make_handler()
+    handler.async_step_imap = AsyncMock(return_value={"type": "form", "step_id": "imap"})
+    result = await handler.async_step_user(user_input={"connection_type": "imap"})
+    handler.async_step_imap.assert_called_once()
+    assert result["step_id"] == "imap"
+
+
+@pytest.mark.xfail(strict=False, reason="async_step_imap not yet implemented — Plan 09-03")
+async def test_async_step_imap_returns_form():
+    """D-02: async_step_imap with None input returns a form with step_id='imap'."""
+    handler = _make_handler()
+    result = await handler.async_step_imap(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "imap"
+
+
+@pytest.mark.xfail(strict=False, reason="async_step_imap not yet implemented — Plan 09-03")
+async def test_async_step_imap_on_success_stores_credentials_in_data():
+    """D-02/D-03: Successful async_step_imap stores credentials in entry.data (not options).
+
+    Credentials (host, port, username, password, tls_mode) must be in handler._data
+    so they land in entry.data (encrypted) rather than entry.options.
+    """
+    handler = _make_handler()
+    handler.async_set_unique_id = AsyncMock()
+    handler.async_step_finish = AsyncMock(return_value={"type": "create_entry", "title": "Shop2Parcel (user@imap.example.com)", "data": {}})
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=([], None))
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "app-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    # Credentials must be in handler._data (goes to entry.data, not entry.options)
+    assert handler._data.get("imap_host") == "imap.example.com"
+    assert handler._data.get("imap_username") == "user@example.com"
+    assert handler._data.get("imap_password") == "app-password"
+    assert "connection_type" in handler._data
+    assert handler._data["connection_type"] == "imap"
+
+
+@pytest.mark.xfail(strict=False, reason="async_step_imap not yet implemented — Plan 09-03")
+async def test_async_step_imap_sets_unique_id_to_username_at_host():
+    """D-03: async_step_imap sets unique_id to 'username@host' after successful connection."""
+    handler = _make_handler()
+    handler.async_set_unique_id = AsyncMock()
+    handler.async_step_finish = AsyncMock(return_value={"type": "create_entry"})
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=([], None))
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "app-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    handler.async_set_unique_id.assert_awaited_once_with("user@example.com@imap.example.com")
+
+
+@pytest.mark.xfail(strict=False, reason="async_step_reauth IMAP branching not yet implemented — Plan 09-03")
+async def test_async_step_reauth_routes_imap_entry_to_reauth_imap():
+    """D-04: async_step_reauth routes IMAP entries to async_step_reauth_imap."""
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {"connection_type": "imap"}
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+    handler.async_step_reauth_imap = AsyncMock(
+        return_value={"type": "form", "step_id": "reauth_confirm_imap"}
+    )
+
+    result = await handler.async_step_reauth(entry_data=fake_entry.data)
+
+    handler.async_step_reauth_imap.assert_called_once()
+    assert result["step_id"] == "reauth_confirm_imap"
