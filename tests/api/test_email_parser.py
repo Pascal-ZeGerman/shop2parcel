@@ -9,14 +9,39 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.shop2parcel.api.email_parser import EmailParser, ParseResult, ShipmentData
+from custom_components.shop2parcel.api.email_parser import (
+    EmailParser,
+    ParseResult,
+    ShipmentData,
+    STRATEGY_FEDEX,
+    STRATEGY_HTML,
+    STRATEGY_REGEX,
+    STRATEGY_UPS,
+    STRATEGY_USPS,
+)
 
-FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "shopify_shipping_email.html"
+FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
+FIXTURE_PATH = FIXTURE_DIR / "shopify_shipping_email.html"  # backward compat for existing tests/fixtures
 
 
 @pytest.fixture
 def shopify_html() -> str:
     return FIXTURE_PATH.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def ups_html() -> str:
+    return (FIXTURE_DIR / "ups_shipping.html").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def usps_html() -> str:
+    return (FIXTURE_DIR / "usps_shipping.html").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def fedex_html() -> str:
+    return (FIXTURE_DIR / "fedex_shipping.html").read_text(encoding="utf-8")
 
 
 def test_extracts_all_fields_from_fixture(shopify_html: str) -> None:
@@ -196,3 +221,91 @@ def test_no_ha_imports() -> None:
     assert "homeassistant" not in content, (
         "email_parser.py contains homeassistant import — violates D-03 no-HA-import rule"
     )
+
+
+def test_strategy_constants_are_defined() -> None:
+    """PARSE-01 / D-07: All STRATEGY_* constants importable from email_parser with locked string values."""
+    assert STRATEGY_HTML == "html_template"
+    assert STRATEGY_UPS == "ups_template"
+    assert STRATEGY_USPS == "usps_template"
+    assert STRATEGY_FEDEX == "fedex_template"
+    assert STRATEGY_REGEX == "regex_fallback"
+
+
+def test_ups_template_extracts_tracking(ups_html: str) -> None:
+    """PARSE-04: UPS template extracts tracking number, sets carrier_name='UPS' and strategy_used=STRATEGY_UPS."""
+    parser = EmailParser()
+    result = parser.parse(ups_html, "ups_msg1", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z0Y12345678031234"
+    assert result.shipment.carrier_name == "UPS"
+    assert result.shipment.message_id == "ups_msg1"
+    assert result.shipment.email_date == 1746000000
+    assert result.strategy_used == STRATEGY_UPS
+    assert result.skip_reason is None
+
+
+def test_usps_template_extracts_tracking(usps_html: str) -> None:
+    """PARSE-05: USPS template extracts 26-digit tracking number, sets carrier_name='USPS' and strategy_used=STRATEGY_USPS."""
+    parser = EmailParser()
+    result = parser.parse(usps_html, "usps_msg1", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "92123456508577307776690000"
+    assert result.shipment.carrier_name == "USPS"
+    assert result.strategy_used == STRATEGY_USPS
+    assert result.skip_reason is None
+
+
+def test_fedex_template_extracts_tracking(fedex_html: str) -> None:
+    """PARSE-06: FedEx template extracts 20-digit SmartPost tracking, sets carrier_name='FedEx' and strategy_used=STRATEGY_FEDEX."""
+    parser = EmailParser()
+    result = parser.parse(fedex_html, "fedex_msg1", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "61290912345678912345"
+    assert result.shipment.carrier_name == "FedEx"
+    assert result.strategy_used == STRATEGY_FEDEX
+    assert result.skip_reason is None
+
+
+def test_ups_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> None:
+    """PARSE-09 / T-Spoof mitigation: _detect_ups must NOT fire on Shopify fixture (contains ups.com link but also 'shopify')."""
+    from custom_components.shop2parcel.api.email_parser import _detect_ups
+    assert _detect_ups(shopify_html) is False
+
+
+def test_usps_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> None:
+    """PARSE-09 / T-Spoof mitigation: _detect_usps must NOT fire on the Shopify fixture (no usps.com present)."""
+    from custom_components.shop2parcel.api.email_parser import _detect_usps
+    assert _detect_usps(shopify_html) is False
+
+
+def test_fedex_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> None:
+    """PARSE-09 / T-Spoof mitigation: _detect_fedex must NOT fire on the Shopify fixture (no fedex.com present)."""
+    from custom_components.shop2parcel.api.email_parser import _detect_fedex
+    assert _detect_fedex(shopify_html) is False
+
+
+def test_registry_checks_carrier_templates_before_shopify_path(shopify_html: str) -> None:
+    """PARSE-03: Registry order must NOT cause Shopify fixture to be misclassified — strategy_used must be STRATEGY_HTML."""
+    parser = EmailParser()
+    result = parser.parse(shopify_html, "msg1", 1)
+    assert result.strategy_used == STRATEGY_HTML
+
+
+def test_ups_direct_email_has_empty_order_name(ups_html: str) -> None:
+    """PARSE-04: Direct carrier emails have no Shopify order number — order_name must be ''."""
+    parser = EmailParser()
+    result = parser.parse(ups_html, "ups_msg1", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.order_name == ""
+
+
+def test_ups_template_keyword_hits_all_false(ups_html: str) -> None:
+    """PARSE-13: Carrier templates don't run fallback regex — keyword_hits must be all False with all 3 keys."""
+    parser = EmailParser()
+    result = parser.parse(ups_html, "ups_msg1", 1746000000)
+    assert result.keyword_hits == {
+        "tracking_regex": False,
+        "order_regex": False,
+        "carrier_regex": False,
+    }
