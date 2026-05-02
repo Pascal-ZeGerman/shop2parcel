@@ -55,12 +55,29 @@ class ParseResult:
 # Known tracking number format patterns (EMAIL-04).
 # Patterns are bounded quantifiers — no ReDoS risk (ASVS V5).
 _TRACKING_PATTERNS = [
-    re.compile(r"^1Z[A-Z0-9]{16}$"),  # UPS: 1Z999AA10123456784
-    re.compile(r"^[0-9]{20,22}$"),  # USPS domestic
-    re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"),  # USPS international
-    re.compile(r"^[0-9]{12,15}$"),  # FedEx
-    re.compile(r"^[0-9]{10,11}$"),  # DHL (assumed)
+    re.compile(r"^1Z[A-Z0-9]{16}$"),          # UPS: 1Z999AA10123456784
+    re.compile(r"^9[2345][0-9]{15,26}$"),      # USPS domestic (Phase 8: 9+[2345] anchor, up to 28 digits total)
+    re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"), # USPS international
+    re.compile(r"^[0-9]{12,20}$"),             # FedEx (Phase 8: extended for SmartPost up to 20 digits)
+    re.compile(r"^[0-9]{10,11}$"),             # DHL (assumed)
 ]
+
+
+# Strategy constants (D-07) — module-level string constants for ParseResult.strategy_used.
+# Tests import these to avoid bare string comparisons. Values are stable contract.
+STRATEGY_HTML = "html_template"
+STRATEGY_UPS = "ups_template"
+STRATEGY_USPS = "usps_template"
+STRATEGY_FEDEX = "fedex_template"
+STRATEGY_REGEX = "regex_fallback"
+
+
+# Carrier-specific extraction regex — compiled at import, bounded quantifiers (ASVS V5).
+# Used by carrier template parse_fn before _looks_like_tracking() validation.
+# T-ReDoS mitigation: every quantifier is bounded; no `+` or `*` on character classes.
+_UPS_TRACKING_RE = re.compile(r"\b(1Z[0-9A-Z]{16})\b")
+_USPS_TRACKING_RE = re.compile(r"\b(9[2345][0-9]{15,26})\b")
+_FEDEX_TRACKING_RE = re.compile(r"\b([0-9]{12,20})\b")
 
 
 def _looks_like_tracking(s: str) -> bool:
@@ -124,7 +141,7 @@ class EmailParser:
                     email_date=email_date,
                 ),
                 skip_reason=None,
-                strategy_used="html_template",
+                strategy_used=STRATEGY_HTML,
                 keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
             )
         return ParseResult(
@@ -169,7 +186,7 @@ class EmailParser:
                     email_date=email_date,
                 ),
                 skip_reason=None,
-                strategy_used="regex_fallback",
+                strategy_used=STRATEGY_REGEX,
                 keyword_hits=hits,
             )
         return ParseResult(
