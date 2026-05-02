@@ -1,0 +1,161 @@
+"""IMAP client — async wrapper using executor for blocking imaplib calls.
+
+No HA imports. Caller (coordinator) passes hass.async_add_executor_job.
+"""
+
+from __future__ import annotations
+
+import email
+import imaplib
+from collections.abc import Callable
+from typing import Any, NoReturn
+
+from .exceptions import ImapAuthError, ImapTransientError
+
+
+class ImapClient:
+    """Wraps imaplib for async use in HA. No HA imports — executor callable injected.
+
+    In production: pass hass.async_add_executor_job as async_add_executor_job.
+    In tests: pass an async callable that runs the sync function inline.
+    Opens a fresh connection per fetch_shipping_emails call (stateful IMAP
+    connections must not be shared across threads — RESEARCH.md Pitfall 6).
+    """
+
+    def __init__(self, async_add_executor_job: Callable) -> None:
+        self._executor = async_add_executor_job
+
+    async def fetch_shipping_emails(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        tls_mode: str,
+        search_criteria: str,
+        since_uid: int | None,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Fetch shipping emails via IMAP, returning (messages, max_uid).
+
+        D-06: Returns list[dict] with keys "uid" (int) and "raw" (bytes).
+        D-08: Passes since_uid to _fetch_sync for UID-based incremental polling.
+        Entire IMAP session runs in one executor call (RESEARCH.md Pitfall 6).
+        """
+        try:
+            return await self._executor(
+                self._fetch_sync,
+                host,
+                port,
+                username,
+                password,
+                tls_mode,
+                search_criteria,
+                since_uid,
+            )
+        except Exception as err:
+            _classify_imap_error(err)
+            raise  # unreachable, but prevents implicit None return
+
+    def _fetch_sync(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        tls_mode: str,
+        search_criteria: str,
+        since_uid: int | None,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Synchronous IMAP session — runs in executor thread.
+
+        D-09: Uses select(readonly) to issue EXAMINE (not SELECT) — read-only at protocol level.
+        D-09: Uses PEEK fetch spec to avoid setting \\Seen flag.
+        D-09: Never calls store(), expunge(), copy(), or uid(MOVE/STORE/EXPUNGE/COPY).
+        """
+        conn: imaplib.IMAP4
+        if tls_mode == "ssl":
+            conn = imaplib.IMAP4_SSL(host, port)
+        else:
+            conn = imaplib.IMAP4(host, port)
+            if tls_mode == "starttls":
+                conn.starttls()
+
+        try:
+            typ, _ = conn.login(username, password)
+            if typ != "OK":
+                raise imaplib.IMAP4.error(f"LOGIN failed: {typ}")
+
+            conn.select("INBOX", readonly=True)  # Issues EXAMINE — read-only at protocol level
+
+            if since_uid is not None:
+                uid_arg = f"UID {since_uid + 1}:* {search_criteria}"
+            else:
+                uid_arg = search_criteria
+
+            typ, data = conn.uid("SEARCH", uid_arg)
+            if typ != "OK" or not data or not data[0]:
+                return [], None
+
+            uid_list = data[0].decode().split()
+            results: list[dict[str, Any]] = []
+            max_uid: int | None = None
+
+            for uid_str in uid_list:
+                uid_int = int(uid_str)
+                typ, msg_data = conn.uid("FETCH", uid_str, "(BODY.PEEK[])")
+                if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+                    continue
+                raw_bytes = msg_data[0][1]
+                results.append({"uid": uid_int, "raw": raw_bytes})
+                if max_uid is None or uid_int > max_uid:
+                    max_uid = uid_int
+
+            return results, max_uid
+        except (ImapAuthError, ImapTransientError):
+            raise  # already classified — re-raise without double-wrapping
+        except Exception as err:
+            _classify_imap_error(err)
+            raise  # unreachable, but prevents implicit None return
+        finally:
+            try:
+                conn.logout()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _classify_imap_error(err: Exception) -> NoReturn:
+    """Translate imaplib exceptions to ImapAuthError / ImapTransientError.
+
+    Security: never include password in exception message.
+    ImapAuthError → coordinator raises ConfigEntryAuthFailed (D-04).
+    ImapTransientError → coordinator raises UpdateFailed (D-04).
+    """
+    if isinstance(err, imaplib.IMAP4.error):
+        msg = str(err).lower()
+        if any(kw in msg for kw in ("login", "auth", "credential", "invalid", "username", "password")):
+            raise ImapAuthError(str(err)) from err
+    raise ImapTransientError(str(err)) from err
+
+
+def extract_html_body_imap(raw_bytes: bytes) -> str | None:
+    """Extract HTML body from raw IMAP message bytes.
+
+    Uses email.message_from_bytes + .walk() for MIME multipart handling.
+    Charset fallback: part.get_content_charset() or "utf-8".
+    Parallels extract_html_body() in gmail_client.py for the IMAP path.
+    """
+    msg = email.message_from_bytes(raw_bytes)
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    return payload.decode(charset, errors="replace")
+    else:
+        if msg.get_content_type() == "text/html":
+            payload = msg.get_payload(decode=True)
+            if payload:
+                charset = msg.get_content_charset() or "utf-8"
+                return payload.decode(charset, errors="replace")
+    return None
