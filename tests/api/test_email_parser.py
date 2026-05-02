@@ -333,3 +333,17 @@ def test_ups_template_keyword_hits_all_false(ups_html: str) -> None:
         "order_regex": False,
         "carrier_regex": False,
     }
+
+
+def test_regex_fallback_extracts_carrier_shipped_via() -> None:
+    """WR-02: Regex fallback must extract 'UPS' from 'shipped via UPS', not 'via'."""
+    html = (
+        "<html><body><div>"
+        "Your order #1234 was shipped via UPS. "
+        "Tracking number: 1Z999AA10123456784"
+        "</div></body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "msg_carrier", 0)
+    assert result.shipment is not None
+    assert result.shipment.carrier_name == "UPS"
