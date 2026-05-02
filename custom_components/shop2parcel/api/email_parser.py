@@ -110,17 +110,23 @@ def _detect_ups(html: str) -> bool:
 def _detect_usps(html: str) -> bool:
     """Return True if html is a USPS shipping notification email.
 
-    Marker: 'usps.com' — low false-positive risk; not present in Shopify fixtures.
+    Marker: 'usps.com' AND 'shopify' not present — prevents misclassifying
+    Shopify merchant emails for USPS-fulfilled orders (T-Spoof mitigation,
+    matching _detect_ups pattern).
     """
-    return "usps.com" in html.lower()
+    html_lower = html.lower()
+    return "usps.com" in html_lower and "shopify" not in html_lower
 
 
 def _detect_fedex(html: str) -> bool:
     """Return True if html is a FedEx shipping notification email.
 
-    Marker: 'fedex.com' — low false-positive risk; not present in Shopify fixtures.
+    Marker: 'fedex.com' AND 'shopify' not present — prevents misclassifying
+    Shopify merchant emails for FedEx-fulfilled orders (T-Spoof mitigation,
+    matching _detect_ups pattern).
     """
-    return "fedex.com" in html.lower()
+    html_lower = html.lower()
+    return "fedex.com" in html_lower and "shopify" not in html_lower
 
 
 def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
