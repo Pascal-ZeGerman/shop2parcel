@@ -16,3 +16,15 @@ DEFAULT_GMAIL_QUERY = (
     "from:inform@informeddelivery.usps.com OR from:TrackingUpdates@fedex.com) "
     "subject:(shipped OR delivered OR tracking OR package)"
 )
+
+# Phase 9: IMAP connection + multi-account constants
+CONF_CONNECTION_TYPE = "connection_type"   # str: "gmail" | "imap"
+CONNECTION_TYPE_GMAIL = "gmail"
+CONNECTION_TYPE_IMAP = "imap"
+CONF_IMAP_HOST = "imap_host"               # str
+CONF_IMAP_PORT = "imap_port"               # int
+CONF_IMAP_USERNAME = "imap_username"       # str
+CONF_IMAP_PASSWORD = "imap_password"       # str (encrypted in entry.data)
+CONF_IMAP_TLS = "imap_tls"                 # str: "ssl" | "starttls" | "none"
+CONF_IMAP_SEARCH = "imap_search"           # str: IMAP SEARCH criteria
+DEFAULT_IMAP_SEARCH = 'SUBJECT "shipped"'
