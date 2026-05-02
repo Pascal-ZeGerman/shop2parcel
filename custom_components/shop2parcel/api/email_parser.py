@@ -14,6 +14,7 @@ No HA imports (D-01/D-03).
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from bs4 import BeautifulSoup
@@ -224,7 +225,11 @@ def _parse_fedex(html: str, message_id: str, email_date: int) -> ParseResult:
 
 # Registry order: UPS -> USPS -> FedEx -> (fallthrough to Shopify in parse()).
 # First match wins. Order matters per RESEARCH.md ordering analysis.
-CARRIER_REGISTRY: list[tuple] = [
+_CarrierEntry = tuple[
+    Callable[[str], bool],
+    Callable[[str, str, int], ParseResult],
+]
+CARRIER_REGISTRY: list[_CarrierEntry] = [
     (_detect_ups, _parse_ups),
     (_detect_usps, _parse_usps),
     (_detect_fedex, _parse_fedex),
