@@ -85,7 +85,8 @@ def extract_html_body(payload: dict) -> str | None:
     """
     mime_type = payload.get("mimeType", "")
     if mime_type == "text/html":
-        data = payload.get("body", {}).get("data", "")
+        body = payload.get("body") or {}          # guards body=None
+        data = body.get("data", "")
         if data:
             return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
     for part in payload.get("parts", []):
