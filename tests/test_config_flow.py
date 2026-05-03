@@ -115,6 +115,8 @@ sys.modules.setdefault("googleapiclient", _mock_googleapiclient)
 sys.modules.setdefault("googleapiclient.discovery", _mock_discovery)
 
 from custom_components.shop2parcel.api.exceptions import (  # noqa: E402
+    ImapAuthError,
+    ImapTransientError,
     ParcelAppAuthError,
     ParcelAppTransientError,
 )
@@ -554,3 +556,58 @@ async def test_reauth_imap_step_id_not_reauth_confirm_imap():
     assert result.get("step_id") != "reauth_confirm_imap", (
         "step_id='reauth_confirm_imap' is the CR-01 bug — no handler method exists for that step_id."
     )
+
+
+# ---------------------------------------------------------------------------
+# IN-03: IMAP error path tests — ImapAuthError and ImapTransientError
+# ---------------------------------------------------------------------------
+
+
+async def test_async_step_imap_auth_error_shows_invalid_auth():
+    """IN-03: ImapAuthError in async_step_imap → errors["base"] == "invalid_auth"."""
+    handler = _make_handler()
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(
+        side_effect=ImapAuthError("bad credentials")
+    )
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        result = await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "wrong-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "invalid_auth"
+
+
+async def test_async_step_imap_transient_error_shows_cannot_connect():
+    """IN-03: ImapTransientError in async_step_imap → errors["base"] == "imap_cannot_connect"."""
+    handler = _make_handler()
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(
+        side_effect=ImapTransientError("connection timeout")
+    )
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        result = await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.unreachable.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "imap_cannot_connect"
