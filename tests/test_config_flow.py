@@ -69,7 +69,7 @@ class _FakeAbstractOAuth2FlowHandler:
     def async_create_entry(self, *, title, data):
         return {"type": "create_entry", "title": title, "data": data}
 
-    def async_update_reload_and_abort(self, entry, *, data):
+    def async_update_reload_and_abort(self, entry, *, data=None, data_updates=None):
         return {"type": "abort", "reason": "reauth_successful"}
 
     def _abort_if_unique_id_configured(self):
@@ -322,7 +322,7 @@ async def test_reauth_oauth_create_entry_calls_update_reload_and_abort():
     # Reauth entry was looked up and used
     handler._get_reauth_entry.assert_called_once()
     handler.async_update_reload_and_abort.assert_called_once_with(
-        fake_reauth_entry, data=FAKE_TOKEN_DATA
+        fake_reauth_entry, data_updates=FAKE_TOKEN_DATA
     )
     # Result is the abort dict (does NOT proceed to async_step_finish)
     assert result == {"type": "abort", "reason": "reauth_successful"}
