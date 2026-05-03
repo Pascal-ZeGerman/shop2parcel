@@ -201,7 +201,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raise ConfigEntryAuthFailed("OAuth2 token missing access_token field") from None
 
         # 2. List Gmail messages matching the configured query.
-        gmail = GmailClient(self.hass.async_add_executor_job)
+        gmail = self._email_client
         query = self._entry.options.get(CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY)
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
