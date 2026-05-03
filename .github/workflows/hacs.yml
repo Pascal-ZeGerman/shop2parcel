@@ -11,7 +11,7 @@ jobs:
     name: Validate HACS repo structure
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: HACS validation
         uses: hacs/action@v1.3.4  # pinned to specific release tag (supply-chain safety)
         with:
