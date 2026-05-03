@@ -89,7 +89,12 @@ async def test_coordinator_uses_poll_interval(hass, mock_config_entry):
 
 
 async def test_new_shipment_is_posted(hass, mock_config_entry):
-    """FWRD-01: New parsed shipment triggers ParcelAppClient.async_add_delivery."""
+    """FWRD-01: New parsed shipment triggers ParcelAppClient.async_add_delivery.
+
+    Also exercises the access-token extraction path (IN-01): oauth_session.token
+    is a real dict so the coordinator extracts a real string token and forwards it
+    to GmailClient.async_list_messages as the first positional argument.
+    """
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
@@ -103,6 +108,10 @@ async def test_new_shipment_is_posted(hass, mock_config_entry):
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -118,6 +127,12 @@ async def test_new_shipment_is_posted(hass, mock_config_entry):
         assert "msg1" in data
         assert "msg1" in coord._forwarded_ids
         mock_parcel_cls.return_value.async_add_delivery.assert_called_once()
+        # Verify the real access_token string was forwarded to the Gmail client (IN-01).
+        call_args = mock_gmail_cls.return_value.async_list_messages.call_args
+        assert call_args[0][0] == "fake-access-token", (
+            "Coordinator must extract access_token from oauth_session.token and pass it "
+            "to GmailClient.async_list_messages as first positional argument"
+        )
 
 
 # -------- FWRD-02: deduplication via Store ------------------------------
@@ -515,6 +530,29 @@ async def test_gmail_auth_raises_config_entry_auth_failed(hass, mock_config_entr
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         with pytest.raises(ConfigEntryAuthFailed):
+            await coord._async_update_data()
+
+
+async def test_missing_access_token_raises_config_entry_auth_failed(hass, mock_config_entry):
+    """IN-01: oauth_session.token with no access_token key → ConfigEntryAuthFailed.
+
+    Exercises the guard at coordinator.py line 198-199 with a realistic empty
+    token dict so the if-not-access_token branch is reachable in tests.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        # Token dict present but access_token is missing — triggers the guard
+        mock_oauth.OAuth2Session.return_value.token = {"expires_at": 9999999999.0}
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = Shop2ParcelCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(ConfigEntryAuthFailed, match="access_token"):
             await coord._async_update_data()
 
 
