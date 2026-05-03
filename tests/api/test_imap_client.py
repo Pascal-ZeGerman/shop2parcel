@@ -24,14 +24,12 @@ async def _inline_executor(func, *args):
 # Stub: ImapClient class existence and constructor signature
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason="ImapClient not yet implemented — Plan 09-02")
 def test_imap_client_is_importable():
     """D-06: ImapClient must be importable from api/imap_client.py."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
     assert ImapClient is not None
 
 
-@pytest.mark.xfail(strict=False, reason="ImapClient not yet implemented — Plan 09-02")
 def test_imap_client_constructor_accepts_executor():
     """D-05: ImapClient.__init__ accepts a single Callable (executor injection)."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
@@ -43,7 +41,6 @@ def test_imap_client_constructor_accepts_executor():
 # Stub: D-09 read-only contract — STORE/EXPUNGE/COPY/MOVE never called
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason="ImapClient not yet implemented — Plan 09-02")
 def test_imap_client_never_calls_mutating_commands():
     """D-09: ImapClient MUST NEVER call store(), expunge(), copy() or uid(MOVE/STORE/EXPUNGE/COPY).
 
@@ -79,7 +76,6 @@ def test_imap_client_never_calls_mutating_commands():
 # Stub: D-06 — fetch_shipping_emails return shape
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason="ImapClient not yet implemented — Plan 09-02")
 async def test_fetch_shipping_emails_returns_tuple():
     """D-06: fetch_shipping_emails returns (list[dict], int|None) tuple."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
@@ -113,7 +109,6 @@ async def test_fetch_shipping_emails_returns_tuple():
 # Stub: D-08 — EXAMINE (select readonly=True) is called, not SELECT
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason="ImapClient not yet implemented — Plan 09-02")
 def test_imap_client_uses_examine_not_select():
     """D-08/D-09: select() must be called with readonly=True (issues EXAMINE command)."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
@@ -145,7 +140,6 @@ def test_imap_client_uses_examine_not_select():
 # Stub: D-05 — auth error raises ImapAuthError
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason="ImapClient not yet implemented — Plan 09-02")
 def test_imap_login_failure_raises_imap_auth_error():
     """D-04/D-05: Login failures must raise ImapAuthError (coordinator maps to ConfigEntryAuthFailed)."""
     from custom_components.shop2parcel.api.exceptions import ImapAuthError  # noqa: PLC0415
@@ -168,7 +162,6 @@ def test_imap_login_failure_raises_imap_auth_error():
 # Stub: extract_html_body_imap function
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason="ImapClient not yet implemented — Plan 09-02")
 def test_extract_html_body_imap_extracts_html():
     """D-06: extract_html_body_imap(raw_bytes) returns HTML string from RFC822 bytes."""
     from custom_components.shop2parcel.api.imap_client import extract_html_body_imap  # noqa: PLC0415

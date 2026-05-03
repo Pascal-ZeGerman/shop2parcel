@@ -368,7 +368,6 @@ def test_handler_defines_async_step_reauth_confirm():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="async_step_user IMAP routing not yet implemented — Plan 09-03")
 async def test_async_step_user_shows_picker():
     """D-01: async_step_user with None input returns a form with step_id='user'."""
     handler = _make_handler()
@@ -377,7 +376,6 @@ async def test_async_step_user_shows_picker():
     assert result["step_id"] == "user"
 
 
-@pytest.mark.xfail(strict=False, reason="async_step_user IMAP routing not yet implemented — Plan 09-03")
 async def test_async_step_user_routes_imap_to_async_step_imap():
     """D-01: async_step_user with connection_type='imap' delegates to async_step_imap."""
     handler = _make_handler()
@@ -387,7 +385,6 @@ async def test_async_step_user_routes_imap_to_async_step_imap():
     assert result["step_id"] == "imap"
 
 
-@pytest.mark.xfail(strict=False, reason="async_step_imap not yet implemented — Plan 09-03")
 async def test_async_step_imap_returns_form():
     """D-02: async_step_imap with None input returns a form with step_id='imap'."""
     handler = _make_handler()
@@ -396,7 +393,6 @@ async def test_async_step_imap_returns_form():
     assert result["step_id"] == "imap"
 
 
-@pytest.mark.xfail(strict=False, reason="async_step_imap not yet implemented — Plan 09-03")
 async def test_async_step_imap_on_success_stores_credentials_in_data():
     """D-02/D-03: Successful async_step_imap stores credentials in entry.data (not options).
 
@@ -432,7 +428,6 @@ async def test_async_step_imap_on_success_stores_credentials_in_data():
     assert handler._data["connection_type"] == "imap"
 
 
-@pytest.mark.xfail(strict=False, reason="async_step_imap not yet implemented — Plan 09-03")
 async def test_async_step_imap_sets_unique_id_to_username_at_host():
     """D-03: async_step_imap sets unique_id to 'username@host' after successful connection."""
     handler = _make_handler()
@@ -459,7 +454,6 @@ async def test_async_step_imap_sets_unique_id_to_username_at_host():
     handler.async_set_unique_id.assert_awaited_once_with("user@example.com@imap.example.com")
 
 
-@pytest.mark.xfail(strict=False, reason="async_step_reauth IMAP branching not yet implemented — Plan 09-03")
 async def test_async_step_reauth_routes_imap_entry_to_reauth_imap():
     """D-04: async_step_reauth routes IMAP entries to async_step_reauth_imap."""
     handler = _make_handler()
@@ -467,13 +461,13 @@ async def test_async_step_reauth_routes_imap_entry_to_reauth_imap():
     fake_entry.data = {"connection_type": "imap"}
     handler._get_reauth_entry = MagicMock(return_value=fake_entry)
     handler.async_step_reauth_imap = AsyncMock(
-        return_value={"type": "form", "step_id": "reauth_confirm_imap"}
+        return_value={"type": "form", "step_id": "reauth_imap"}
     )
 
     result = await handler.async_step_reauth(entry_data=fake_entry.data)
 
     handler.async_step_reauth_imap.assert_called_once()
-    assert result["step_id"] == "reauth_confirm_imap"
+    assert result["step_id"] == "reauth_imap"
 
 
 # ---------------------------------------------------------------------------
