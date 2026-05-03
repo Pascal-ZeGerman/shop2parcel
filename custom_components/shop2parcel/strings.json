@@ -23,15 +23,57 @@
       "reauth_confirm": {
         "title": "Re-authorize Gmail",
         "description": "Your Gmail authorization has expired or been revoked. Click below to re-authorize Shop2Parcel."
+      },
+      "user": {
+        "title": "Connect Shop2Parcel",
+        "description": "Choose how to connect to your email account. You can add multiple accounts by running setup again.",
+        "data": {
+          "connection_type": "Connection Type"
+        },
+        "data_description": {
+          "connection_type": "Select 'Gmail OAuth2' to connect via Google OAuth2, or 'IMAP' to connect via IMAP with username and password (app password)."
+        }
+      },
+      "imap": {
+        "title": "Configure IMAP Account",
+        "description": "Enter your IMAP server credentials. Use an app password if your provider requires two-factor authentication.",
+        "data": {
+          "imap_host": "IMAP Server",
+          "imap_port": "Port",
+          "imap_username": "Username",
+          "imap_password": "Password / App Password",
+          "imap_tls": "TLS Mode"
+        },
+        "data_description": {
+          "imap_host": "IMAP server hostname (e.g. imap.gmail.com, imap.outlook.com).",
+          "imap_port": "993 for SSL, 143 for STARTTLS or unencrypted.",
+          "imap_username": "Your email address.",
+          "imap_password": "Your email password or app-specific password.",
+          "imap_tls": "'ssl' (port 993, recommended), 'starttls' (port 143), or 'none' (unencrypted, not recommended)."
+        }
+      },
+      "reauth_confirm_imap": {
+        "title": "Re-enter IMAP Credentials",
+        "description": "IMAP authentication failed. Please re-enter your password.",
+        "data": {
+          "imap_host": "IMAP Server",
+          "imap_port": "Port",
+          "imap_username": "Username",
+          "imap_password": "New Password / App Password",
+          "imap_tls": "TLS Mode"
+        }
       }
     },
     "error": {
       "invalid_api_key": "Invalid parcelapp.net API key. Check the key in parcelapp Settings and try again.",
       "cannot_connect": "Could not connect to parcelapp.net. Check your network connection and try again.",
-      "oauth_error": "Google authorization failed. Please try again."
+      "oauth_error": "Google authorization failed. Please try again.",
+      "invalid_auth": "IMAP authentication failed. Check username and password.",
+      "imap_cannot_connect": "Could not connect to the IMAP server. Check hostname, port, and TLS mode."
     },
     "abort": {
       "already_configured": "Shop2Parcel is already configured for this Gmail account.",
+      "already_configured_imap": "An account with this username and host is already configured.",
       "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
       "wrong_account": "Wrong account: please authenticate with the original Gmail account.",
       "oauth_error": "[%key:common::config_flow::abort::oauth2_error%]",
