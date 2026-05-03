@@ -576,6 +576,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         except ParcelAppTransientError as err:
             _LOGGER.warning("parcelapp transient error during cleanup: %s", err)
             return
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Unexpected error during cleanup: %s", err)
+            return
 
         # D-11: O(1) reverse lookup {tracking_number: message_id}
         tracking_to_msg_id = {
