@@ -474,3 +474,65 @@ async def test_async_step_reauth_routes_imap_entry_to_reauth_imap():
 
     handler.async_step_reauth_imap.assert_called_once()
     assert result["step_id"] == "reauth_confirm_imap"
+
+
+# ---------------------------------------------------------------------------
+# Gap closure regression tests — 09-05-PLAN.md
+# ---------------------------------------------------------------------------
+
+
+async def test_reauth_imap_form_uses_step_id_reauth_imap():
+    """CR-01 regression: async_step_reauth_imap must use step_id='reauth_imap'.
+
+    HA data_entry_flow dispatches the next form submission to
+    async_step_{step_id}. The method is named async_step_reauth_imap,
+    so step_id MUST be 'reauth_imap' — not 'reauth_confirm_imap'.
+    This test fails if the bug is re-introduced.
+    """
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+
+    # Call with None input — handler should return the form (no user_input provided)
+    result = await handler.async_step_reauth_imap(user_input=None)
+
+    assert result["type"] == "form", (
+        f"Expected form result but got: {result['type']}"
+    )
+    assert result["step_id"] == "reauth_imap", (
+        f"step_id MUST be 'reauth_imap' (got '{result['step_id']}'). "
+        "HA dispatches the next submission to async_step_{step_id} — "
+        "'reauth_confirm_imap' has no matching handler method (CR-01)."
+    )
+
+
+async def test_reauth_imap_step_id_not_reauth_confirm_imap():
+    """CR-01 regression (negative): step_id must NOT be 'reauth_confirm_imap'.
+
+    Confirms the exact bug from CR-01 cannot regress: if step_id were
+    'reauth_confirm_imap', HA would call async_step_reauth_confirm_imap
+    on the next submission — a method that does not exist.
+    """
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+
+    result = await handler.async_step_reauth_imap(user_input=None)
+
+    assert result.get("step_id") != "reauth_confirm_imap", (
+        "step_id='reauth_confirm_imap' is the CR-01 bug — no handler method exists for that step_id."
+    )

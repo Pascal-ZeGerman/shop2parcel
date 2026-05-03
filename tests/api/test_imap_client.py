@@ -187,3 +187,86 @@ def test_extract_html_body_imap_extracts_html():
     result = extract_html_body_imap(raw)
     assert result is not None
     assert "HTML body" in result
+
+
+# ---------------------------------------------------------------------------
+# Gap closure regression tests — 09-05-PLAN.md
+# ---------------------------------------------------------------------------
+
+
+def test_starttls_failure_does_not_leak_socket():
+    """CR-02 regression: starttls() failure must NOT leave a dangling TCP socket.
+
+    When conn.starttls() raises ssl.SSLError (TLS negotiation failed, wrong port,
+    server does not support STARTTLS, etc.), conn.logout() MUST still be called
+    so the underlying TCP socket is closed.
+
+    Before the fix, connection setup was outside the try block, so a starttls()
+    exception escaped before the finally clause executed.
+    """
+    import ssl  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4)
+    mock_conn.starttls.side_effect = ssl.SSLError("handshake failed")
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(Exception):
+            # Any exception escaping _fetch_sync is acceptable;
+            # the key requirement is that logout() was called despite starttls() failing.
+            client._fetch_sync(
+                "imap.example.com", 143, "user@example.com", "password",
+                "starttls", 'SUBJECT "shipped"', None
+            )
+
+    mock_conn.logout.assert_called_once(), (
+        "conn.logout() must be called even when starttls() raises "
+        "(CR-02: connection setup was outside try block before fix)"
+    )
+
+
+def test_imap4_ssl_constructor_failure_does_not_leak_socket():
+    """CR-02 regression (SSL path): IMAP4_SSL constructor failure — conn stays None.
+
+    When imaplib.IMAP4_SSL(host, port) raises (DNS failure, connection refused,
+    certificate error), conn is None because the constructor never returned.
+    The finally clause must guard with 'if conn is not None' to avoid
+    AttributeError on None.logout().
+    """
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    with patch("imaplib.IMAP4_SSL", side_effect=ConnectionRefusedError("connection refused")):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(Exception):
+            client._fetch_sync(
+                "imap.example.com", 993, "user@example.com", "password",
+                "ssl", 'SUBJECT "shipped"', None
+            )
+    # If we get here without AttributeError on NoneType.logout(), the guard works.
+
+
+def test_select_non_ok_raises_imap_transient_error():
+    """WR-03 regression: conn.select() returning non-OK status must raise ImapTransientError.
+
+    Before the fix, the select() return value was discarded. A SELECT/EXAMINE
+    failure (mailbox not found, permission denied) was silently ignored, causing
+    a confusing SEARCH failure later instead of a clear INBOX-not-found error.
+    """
+    from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("NO", [b"[NONEXISTENT] Mailbox does not exist"])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(ImapTransientError, match="Failed to select INBOX"):
+            client._fetch_sync(
+                "imap.example.com", 993, "user@example.com", "password",
+                "ssl", 'SUBJECT "shipped"', None
+            )

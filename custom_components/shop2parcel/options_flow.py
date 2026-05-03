@@ -17,9 +17,11 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 
 from .const import (
+    CONF_CONNECTION_TYPE,
     CONF_GMAIL_QUERY,
     CONF_IMAP_SEARCH,
     CONF_POLL_INTERVAL,
+    CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
@@ -40,7 +42,7 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        conn_type = self.config_entry.data.get("connection_type", "gmail")
+        conn_type = self.config_entry.data.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_GMAIL)
         if conn_type == CONNECTION_TYPE_IMAP:
             schema = vol.Schema(
                 {
