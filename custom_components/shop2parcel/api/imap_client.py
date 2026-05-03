@@ -81,9 +81,7 @@ class ImapClient:
                 if tls_mode == "starttls":
                     conn.starttls()
 
-            typ, _ = conn.login(username, password)
-            if typ != "OK":
-                raise imaplib.IMAP4.error(f"LOGIN failed: {typ}")
+            conn.login(username, password)
 
             ok, _ = conn.select("INBOX", readonly=True)  # Issues EXAMINE — read-only at protocol level
             if ok != "OK":
