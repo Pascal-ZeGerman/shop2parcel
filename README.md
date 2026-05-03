@@ -85,7 +85,7 @@ Shop2Parcel reads your Gmail inbox using the Gmail API. You need a Google Cloud 
 
 1. In the left menu go to **APIs & Services → Credentials**.
 2. Click **+ Create Credentials → OAuth client ID**.
-3. Choose application type **Desktop app** (not "Web application" — Desktop app is required for Home Assistant's local OAuth2 redirect).
+3. Choose application type **Web application**.
 4. Give it a name (e.g., `shop2parcel-ha`) and click **Create**.
 5. Copy the **Client ID** and **Client Secret** shown in the dialog.
 
