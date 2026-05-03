@@ -132,10 +132,19 @@ def _classify_imap_error(err: Exception) -> NoReturn:
     Security: never include password in exception message.
     ImapAuthError → coordinator raises ConfigEntryAuthFailed (D-04).
     ImapTransientError → coordinator raises UpdateFailed (D-04).
+
+    IMAP4.abort is a subclass of IMAP4.error but semantically a service error
+    (close and retry) — always transient, even if the message contains "invalid".
+    Note: "invalid" is intentionally excluded from auth keywords because IMAP
+    protocol state errors like "command invalid in state AUTH" contain that word
+    but are transient, not auth failures.
     """
+    if isinstance(err, imaplib.IMAP4.abort):
+        # IMAP4.abort is semantically a service error (close and retry) — always transient.
+        raise ImapTransientError(str(err)) from err
     if isinstance(err, imaplib.IMAP4.error):
         msg = str(err).lower()
-        if any(kw in msg for kw in ("login", "auth", "credential", "invalid", "username", "password")):
+        if any(kw in msg for kw in ("login", "auth", "credential", "username", "password")):
             raise ImapAuthError(str(err)) from err
     raise ImapTransientError(str(err)) from err
 
