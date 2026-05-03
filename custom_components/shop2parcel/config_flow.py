@@ -214,7 +214,11 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
 
         def _get_profile() -> str:
             """Synchronous Gmail profile fetch — must run in executor."""
-            credentials = Credentials(data[CONF_TOKEN][CONF_ACCESS_TOKEN])
+            credentials = Credentials(
+                token=data[CONF_TOKEN][CONF_ACCESS_TOKEN],
+                refresh_token=data[CONF_TOKEN].get("refresh_token"),
+                token_uri="https://oauth2.googleapis.com/token",
+            )
             return (
                 build("gmail", "v1", credentials=credentials)
                 .users()
@@ -222,7 +226,11 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                 .execute()["emailAddress"]
             )
 
-        email: str = await self.hass.async_add_executor_job(_get_profile)
+        try:
+            email: str = await self.hass.async_add_executor_job(_get_profile)
+        except Exception:
+            _LOGGER.exception("Failed to fetch Gmail profile during config flow")
+            return self.async_abort(reason="oauth_error")
         await self.async_set_unique_id(email)
 
         if self.source == SOURCE_REAUTH:

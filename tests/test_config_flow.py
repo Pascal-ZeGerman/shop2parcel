@@ -72,6 +72,9 @@ class _FakeAbstractOAuth2FlowHandler:
     def async_update_reload_and_abort(self, entry, *, data=None, data_updates=None):
         return {"type": "abort", "reason": "reauth_successful"}
 
+    def async_abort(self, *, reason):
+        return {"type": "abort", "reason": reason}
+
     def _abort_if_unique_id_configured(self):
         pass
 
