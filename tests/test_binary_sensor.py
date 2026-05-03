@@ -55,7 +55,14 @@ async def test_binary_sensor_on_when_data_non_empty(hass, mock_config_entry):
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
     bs_uid = f"{DOMAIN}_{mock_config_entry.entry_id}_has_active_shipments"
-    bs_entry = next(e for e in entries if e.unique_id == bs_uid)
+    bs_entry = next(
+        (e for e in entries if e.unique_id == bs_uid),
+        None,
+    )
+    assert bs_entry is not None, (
+        f"Binary sensor {bs_uid!r} not found in entity registry. "
+        f"Found: {[e.unique_id for e in entries]}"
+    )
     state = hass.states.get(bs_entry.entity_id)
     assert state is not None
     assert state.state == "on"
@@ -67,7 +74,14 @@ async def test_binary_sensor_off_when_data_empty(hass, mock_config_entry):
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
     bs_uid = f"{DOMAIN}_{mock_config_entry.entry_id}_has_active_shipments"
-    bs_entry = next(e for e in entries if e.unique_id == bs_uid)
+    bs_entry = next(
+        (e for e in entries if e.unique_id == bs_uid),
+        None,
+    )
+    assert bs_entry is not None, (
+        f"Binary sensor {bs_uid!r} not found in entity registry. "
+        f"Found: {[e.unique_id for e in entries]}"
+    )
     state = hass.states.get(bs_entry.entity_id)
     assert state is not None
     assert state.state == "off"
