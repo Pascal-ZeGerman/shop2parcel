@@ -108,6 +108,8 @@ class ImapClient:
                 if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
                     continue
                 raw_bytes = msg_data[0][1]
+                if not isinstance(raw_bytes, bytes):
+                    continue  # Skip malformed FETCH tuple — body must be bytes
                 results.append({"uid": uid_int, "raw": raw_bytes})
                 if max_uid is None or uid_int > max_uid:
                     max_uid = uid_int
