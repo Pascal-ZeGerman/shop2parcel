@@ -250,6 +250,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             except GmailTransientError as err:
                 raise UpdateFailed(f"Gmail transient error: {err}") from err
 
+            # Extract email_date early so it can be used to advance max_email_date
+            # for skipped messages (no_html_body, parse failure) as well as forwarded ones.
+            # This prevents permanently-unparseable messages from blocking
+            # _last_email_timestamp indefinitely (WR-02 fix).
+            try:
+                email_date = int(msg.get("internalDate", "0")) // 1000
+            except (ValueError, TypeError):
+                _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append({"message_id": msg_id, "reason": "invalid_internal_date"})
+                continue
+
             html = extract_html_body(msg.get("payload", {}))
             if not html:
                 # Phase 7 (D-02): no_html_body is set by the COORDINATOR — the parser
@@ -259,14 +272,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "no_html_body"}
                 )
-                continue
-            try:
-                email_date = int(msg.get("internalDate", "0")) // 1000
-            except (ValueError, TypeError):
-                _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
-                d.emails_scanned_total += 1
-                d.last_poll_emails_scanned += 1
-                d.last_poll_skip_reasons.append({"message_id": msg_id, "reason": "invalid_internal_date"})
+                # Advance max_email_date so this un-parseable message does not block
+                # _last_email_timestamp and cause infinite re-fetching on future polls.
+                if email_date > max_email_date:
+                    max_email_date = email_date
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
@@ -297,6 +306,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
             if result.shipment is None:
+                # Advance max_email_date for parse failures too — the message cannot
+                # produce a shipment and should not be re-fetched indefinitely.
+                if email_date > max_email_date:
+                    max_email_date = email_date
                 continue
             shipment = result.shipment
 
@@ -359,11 +372,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
 
-        if max_email_date > (self._last_email_timestamp or 0):
+        timestamp_advanced = max_email_date > (self._last_email_timestamp or 0)
+        if timestamp_advanced:
             self._last_email_timestamp = max_email_date
-        # Persist once after the loop if any shipments were forwarded (covers both
-        # _forwarded_ids and _last_email_timestamp updates in a single write).
-        if any_forwarded:
+        # Persist once after the loop if any shipments were forwarded OR if the
+        # email timestamp advanced (covers skipped messages that unblock _last_email_timestamp).
+        if any_forwarded or timestamp_advanced:
             await self._async_save_store()
 
         # Clear stale quota block from Store once the window has expired.  Without
