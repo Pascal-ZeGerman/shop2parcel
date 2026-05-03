@@ -285,10 +285,17 @@ async def test_reauth_confirm_with_input_goes_to_oauth2_not_picker():
 
     WR-01: reauth must bypass the connection type picker by delegating to the base
     class OAuth2 method, not the overridden picker form.
+
+    Patch the base class async_step_user at the real import path (works in both
+    isolated test_config_flow.py runs and pytest-ha runs where real HA is loaded).
     """
+    from custom_components.shop2parcel.config_flow import OAuth2FlowHandler
+
+    # Find the actual base class in the real MRO (second entry after OAuth2FlowHandler itself)
+    base_cls = OAuth2FlowHandler.__mro__[1]
     handler = _make_handler()
     with patch.object(
-        _FakeAbstractOAuth2FlowHandler,
+        base_cls,
         "async_step_user",
         new=AsyncMock(return_value={"type": "external", "step_id": "auth"}),
     ) as mock_super_user:
