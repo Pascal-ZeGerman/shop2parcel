@@ -523,13 +523,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # When quota-blocked, keep _last_imap_uid at its previous value so the UID
         # SEARCH on the next poll re-includes those messages — mirrors the Gmail
         # path which does not advance max_email_date when quota_blocked (line 310).
+        store_dirty = any_forwarded
         if not any_quota_blocked and max_uid is not None and (
             self._last_imap_uid is None or max_uid > self._last_imap_uid
         ):
             self._last_imap_uid = max_uid
-            any_forwarded = True  # Ensure Store is updated with new UID
+            store_dirty = True  # UID advanced — persist even if no shipments forwarded this cycle
 
-        if any_forwarded:
+        if store_dirty:
             await self._async_save_store()
 
         # Clear stale quota block.
