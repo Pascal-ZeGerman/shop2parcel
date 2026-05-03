@@ -34,17 +34,28 @@ from .api.email_parser import EmailParser, ParseResult, ShipmentData
 from .api.exceptions import (
     GmailAuthError,
     GmailTransientError,
+    ImapAuthError,
+    ImapTransientError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
     ParcelAppTransientError,
 )
 from .api.gmail_client import GmailClient, extract_html_body
+from .api.imap_client import ImapClient, extract_html_body_imap
 from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_GMAIL_QUERY,
+    CONF_IMAP_HOST,
+    CONF_IMAP_PASSWORD,
+    CONF_IMAP_PORT,
+    CONF_IMAP_SEARCH,
+    CONF_IMAP_TLS,
+    CONF_IMAP_USERNAME,
     CONF_POLL_INTERVAL,
+    CONNECTION_TYPE_IMAP,
     DEFAULT_GMAIL_QUERY,
+    DEFAULT_IMAP_SEARCH,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
 )
@@ -125,6 +136,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._last_email_timestamp: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
+        # Phase 9 (D-05/D-10): dispatch to ImapClient or GmailClient based on connection type.
+        conn_type = entry.data.get("connection_type", "gmail")
+        if conn_type == CONNECTION_TYPE_IMAP:
+            self._email_client: ImapClient | GmailClient = ImapClient(hass.async_add_executor_job)
+        else:
+            self._email_client = GmailClient(hass.async_add_executor_job)
+        # Phase 9 (D-08): IMAP UID deduplication — persisted in Store. None means first run.
+        self._last_imap_uid: int | None = None
 
     async def async_load_store(self) -> None:
         """Hydrate dedup + quota state from Store.
@@ -140,19 +159,25 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._forwarded_ids = set(stored.get("forwarded_ids", []))
         self._quota_exhausted_until = stored.get("quota_exhausted_until")
         self._last_email_timestamp = stored.get("last_email_timestamp")
+        self._last_imap_uid = stored.get("last_imap_uid")
 
     async def _async_save_store(self) -> None:
-        """Persist current dedup + quota + timestamp state to Store."""
+        """Persist current dedup + quota + timestamp + IMAP UID state to Store."""
         await self._store.async_save(
             {
                 "forwarded_ids": sorted(self._forwarded_ids),
                 "quota_exhausted_until": self._quota_exhausted_until,
                 "last_email_timestamp": self._last_email_timestamp,
+                "last_imap_uid": self._last_imap_uid,
             }
         )
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
+        # Phase 9 (D-05): dispatch to IMAP path if connection_type == "imap".
+        if self._entry.data.get("connection_type") == CONNECTION_TYPE_IMAP:
+            return await self._async_update_data_imap()
+
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
             self.hass, self._entry
@@ -343,6 +368,160 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # this, a past-epoch timestamp would accumulate across restarts indefinitely.
         # Skip when quota_blocked=True: the timestamp was just set this cycle and must
         # not be cleared in the same pass (even if reset_at is already in the past).
+        if (
+            not quota_blocked
+            and self._quota_exhausted_until is not None
+            and int(time.time()) >= self._quota_exhausted_until
+        ):
+            self._quota_exhausted_until = None
+            await self._async_save_store()
+
+        return current_data
+
+    async def _async_update_data_imap(self) -> dict[str, ShipmentData]:
+        """IMAP poll path — mirrors _async_update_data but uses ImapClient + UID dedup.
+
+        Phase 9 (D-05/D-06/D-07/D-08): same post-fetch pipeline as Gmail (parse → forward).
+        Does NOT perform OAuth2 token refresh (IMAP uses entry.data credentials directly).
+        """
+        entry = self._entry
+
+        # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
+        poll_start = time.time()
+        d = self._diagnostics
+        query = entry.options.get(CONF_IMAP_SEARCH, DEFAULT_IMAP_SEARCH)
+        d.last_poll_emails_scanned = 0
+        d.last_poll_emails_matched = 0
+        d.last_poll_skip_reasons = []
+        d.last_poll_found = []
+        d.last_poll_keyword_hits = 0
+        d.last_poll_time = None
+        d.last_poll_duration_ms = None
+        d.last_poll_query = query
+
+        # Fetch messages from IMAP (whole session in one executor call per D-05/Pitfall 6).
+        try:
+            raw_messages, max_uid = await self._email_client.fetch_shipping_emails(
+                host=entry.data[CONF_IMAP_HOST],
+                port=entry.data[CONF_IMAP_PORT],
+                username=entry.data[CONF_IMAP_USERNAME],
+                password=entry.data[CONF_IMAP_PASSWORD],
+                tls_mode=entry.data[CONF_IMAP_TLS],
+                search_criteria=query,
+                since_uid=self._last_imap_uid,
+            )
+        except ImapAuthError as err:
+            raise ConfigEntryAuthFailed("IMAP auth error") from err
+        except ImapTransientError as err:
+            raise UpdateFailed(f"IMAP transient error: {err}") from err
+
+        # Set up parser + parcelapp client (same as Gmail path).
+        parser = EmailParser()
+        parcel_client = ParcelAppClient(
+            session=async_get_clientsession(self.hass),
+            api_key=entry.data["api_key"],
+        )
+        current_data: dict[str, ShipmentData] = dict(self.data or {})
+        now = int(time.time())
+        quota_blocked = (
+            self._quota_exhausted_until is not None and now < self._quota_exhausted_until
+        )
+        any_forwarded = False
+
+        for msg_info in raw_messages:
+            # IMAP uid used as message_id for deduplication (D-08).
+            uid_str = str(msg_info["uid"])
+            if uid_str in self._forwarded_ids:
+                continue
+
+            raw_bytes: bytes = msg_info["raw"]
+            html = extract_html_body_imap(raw_bytes)
+            if not html:
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": uid_str, "reason": "no_html_body"}
+                )
+                continue
+
+            # Assign a synthetic email_date (0 = unknown — IMAP does not guarantee internalDate).
+            # Phase 9 does not track IMAP email timestamps in _last_email_timestamp (that is
+            # a Gmail-specific pattern). IMAP uses UID-based dedup instead.
+            result: ParseResult = parser.parse(html, uid_str, 0)
+            d.emails_scanned_total += 1
+            d.last_poll_emails_scanned += 1
+            if result.shipment is None:
+                d.last_poll_skip_reasons.append(
+                    {"message_id": uid_str, "reason": result.skip_reason}
+                )
+            else:
+                d.emails_matched_total += 1
+                d.last_poll_emails_matched += 1
+                d.tracking_numbers_found_total += 1
+                d.last_poll_found.append(
+                    {
+                        "tracking_number": result.shipment.tracking_number,
+                        "carrier": result.shipment.carrier_name,
+                        "order_name": result.shipment.order_name,
+                        "message_id": uid_str,
+                    }
+                )
+            for key, hit in result.keyword_hits.items():
+                if hit:
+                    d.keyword_hits_per_key[key] += 1
+                    d.keyword_hits_total += 1
+                    d.last_poll_keyword_hits += 1
+            if result.shipment is None:
+                continue
+            shipment = result.shipment
+
+            if quota_blocked:
+                continue
+
+            carrier_code = normalize_carrier(shipment.carrier_name)
+            try:
+                await parcel_client.async_add_delivery(
+                    tracking_number=shipment.tracking_number,
+                    carrier_code=carrier_code,
+                    description=shipment.order_name,
+                )
+            except ParcelAppAuthError as err:
+                raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
+            except ParcelAppQuotaError as err:
+                self._quota_exhausted_until = (
+                    err.reset_at if err.reset_at is not None else _next_midnight_utc()
+                )
+                await self._async_save_store()
+                _LOGGER.warning(
+                    "parcelapp.net daily quota exhausted; forwarding paused until %s",
+                    self._quota_exhausted_until,
+                )
+                quota_blocked = True
+                continue
+            except ParcelAppInvalidTrackingError as err:
+                _LOGGER.error("Invalid tracking for UID %s: %s", uid_str, err)
+                continue
+            except ParcelAppTransientError as err:
+                _LOGGER.warning("parcelapp.net transient error for UID %s: %s", uid_str, err)
+                continue
+
+            self._forwarded_ids.add(uid_str)
+            current_data[uid_str] = shipment
+            any_forwarded = True
+
+        # Phase 7: capture per-poll timing.
+        d.last_poll_time = poll_start
+        d.last_poll_duration_ms = (time.time() - poll_start) * 1000
+
+        # Update last_imap_uid after successful fetch (D-08).
+        if max_uid is not None and (self._last_imap_uid is None or max_uid > self._last_imap_uid):
+            self._last_imap_uid = max_uid
+            any_forwarded = True  # Ensure Store is updated with new UID
+
+        if any_forwarded:
+            await self._async_save_store()
+
+        # Clear stale quota block.
         if (
             not quota_blocked
             and self._quota_exhausted_until is not None
