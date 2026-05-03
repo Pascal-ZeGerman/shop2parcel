@@ -1,16 +1,16 @@
-"""The Shop2Parcel integration.
+"""The Shop2Parcel integration entry point.
 
-Phase 4: async_setup_entry instantiates Shop2ParcelCoordinator, hydrates the
-deduplication state from Store BEFORE the first refresh (RESEARCH.md Pitfall 1),
-and forwards to PLATFORMS (empty in Phase 4; Phase 5 adds 'sensor' + 'binary_sensor').
-
-Phase boundary:
-- Phase 3 owned credential validation (replaced — coordinator's _async_update_data
-  handles all API errors and translates to ConfigEntryAuthFailed/UpdateFailed).
-- Phase 4 owns coordinator instantiation, Store hydration, platform forwarding stub,
-  and options flow registration (registered via config_flow.py).
-- Phase 5 adds 'sensor' and 'binary_sensor' to PLATFORMS, switches hass.data to
-  dict shape, and wires the daily cleanup task via async_track_time_interval.
+Responsibilities:
+- Instantiates Shop2ParcelCoordinator and hydrates deduplication state from
+  persistent Store BEFORE the first refresh (RESEARCH.md Pitfall 1: Store must
+  be loaded before async_config_entry_first_refresh() to avoid re-forwarding
+  previously processed shipments).
+- Schedules the once-daily delivered-shipment cleanup task via
+  async_track_time_interval and registers the cancel callback with
+  entry.async_on_unload so the timer is stopped on all teardown paths.
+- Stores the coordinator in hass.data[DOMAIN][entry.entry_id] as a dict keyed
+  by "coordinator" so sensor.py and binary_sensor.py can retrieve it.
+- Forwards platform setup to PLATFORMS ("sensor", "binary_sensor").
 """
 
 from __future__ import annotations
