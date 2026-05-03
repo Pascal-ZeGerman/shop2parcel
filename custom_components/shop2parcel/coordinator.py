@@ -130,7 +130,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             config_entry=entry,
             update_interval=timedelta(minutes=poll_minutes),
         )
-        self._entry = entry
         self._store: Store = Store(
             hass, version=STORAGE_VERSION, key=f"shop2parcel.{entry.entry_id}"
         )
@@ -178,22 +177,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
         # Phase 9 (D-05): dispatch to IMAP path if connection_type == "imap".
-        if self._entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_IMAP:
+        if self.config_entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_IMAP:
             return await self._async_update_data_imap()
 
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
-            self.hass, self._entry
+            self.hass, self.config_entry
         )
         oauth_session = config_entry_oauth2_flow.OAuth2Session(
-            self.hass, self._entry, implementation
+            self.hass, self.config_entry, implementation
         )
         try:
             await oauth_session.async_ensure_token_valid()
         except Exception as err:  # noqa: BLE001 — translate to HA exception
             raise ConfigEntryAuthFailed("Gmail token refresh failed") from err
         # Read token from the session object, not entry.data — async_ensure_token_valid
-        # may create a new data dict on the config entry (HA 2024.x+), so self._entry.data
+        # may create a new data dict on the config entry (HA 2024.x+), so self.config_entry.data
         # could still hold the pre-refresh snapshot.  The OAuth2Session already holds the
         # refreshed token after the await above.
         access_token = oauth_session.token.get("access_token")
@@ -202,7 +201,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         # 2. List Gmail messages matching the configured query.
         gmail = self._email_client
-        query = self._entry.options.get(CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY)
+        query = self.config_entry.options.get(CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY)
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
@@ -229,7 +228,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         parser = EmailParser()
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
-            api_key=self._entry.data[CONF_API_KEY],
+            api_key=self.config_entry.data[CONF_API_KEY],
         )
         current_data: dict[str, ShipmentData] = dict(self.data or {})
         now = int(time.time())
@@ -388,7 +387,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Phase 9 (D-05/D-06/D-07/D-08): same post-fetch pipeline as Gmail (parse → forward).
         Does NOT perform OAuth2 token refresh (IMAP uses entry.data credentials directly).
         """
-        entry = self._entry
+        entry = self.config_entry
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
@@ -567,7 +566,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
-            api_key=self._entry.data[CONF_API_KEY],
+            api_key=self.config_entry.data[CONF_API_KEY],
         )
         try:
             deliveries = await parcel_client.async_get_deliveries(filter_mode="recent")
@@ -603,11 +602,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # when their key disappears from coordinator.data (RESEARCH.md Pitfall 1).
         entity_registry = er.async_get(self.hass)
         entry_entities = entity_registry.entities.get_entries_for_config_entry_id(
-            self._entry.entry_id
+            self.config_entry.entry_id
         )
         unique_id_to_entity_id = {e.unique_id: e.entity_id for e in entry_entities}
         for removed_id in removed_ids:
-            target_uid = f"{DOMAIN}_{self._entry.entry_id}_{removed_id}"
+            target_uid = f"{DOMAIN}_{self.config_entry.entry_id}_{removed_id}"
             entity_id = unique_id_to_entity_id.get(target_uid)
             if entity_id is not None:
                 entity_registry.async_remove(entity_id)
