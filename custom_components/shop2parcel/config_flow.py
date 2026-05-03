@@ -175,7 +175,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             else:
                 account_id = f"{username}@{host}"
                 await self.async_set_unique_id(account_id)
-                self._abort_if_unique_id_configured()
+                self._abort_if_unique_id_configured(error="already_configured_imap")
                 self._title = f"Shop2Parcel ({account_id})"
                 self._data = {
                     CONF_CONNECTION_TYPE: CONNECTION_TYPE_IMAP,
