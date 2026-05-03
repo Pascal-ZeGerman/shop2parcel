@@ -429,6 +429,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._quota_exhausted_until is not None and now < self._quota_exhausted_until
         )
         any_forwarded = False
+        any_quota_blocked = False
 
         for msg_info in raw_messages:
             # IMAP uid used as message_id for deduplication (D-08).
@@ -478,6 +479,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             shipment = result.shipment
 
             if quota_blocked:
+                any_quota_blocked = True
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -499,6 +501,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     self._quota_exhausted_until,
                 )
                 quota_blocked = True
+                any_quota_blocked = True
                 continue
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error("Invalid tracking for UID %s: %s", uid_str, err)
@@ -516,7 +519,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
 
         # Update last_imap_uid after successful fetch (D-08).
-        if max_uid is not None and (self._last_imap_uid is None or max_uid > self._last_imap_uid):
+        # CRITICAL: Do NOT advance if any message was quota-blocked this cycle.
+        # When quota-blocked, keep _last_imap_uid at its previous value so the UID
+        # SEARCH on the next poll re-includes those messages — mirrors the Gmail
+        # path which does not advance max_email_date when quota_blocked (line 310).
+        if not any_quota_blocked and max_uid is not None and (
+            self._last_imap_uid is None or max_uid > self._last_imap_uid
+        ):
             self._last_imap_uid = max_uid
             any_forwarded = True  # Ensure Store is updated with new UID
 
