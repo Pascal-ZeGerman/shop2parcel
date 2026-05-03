@@ -147,7 +147,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 9 (D-08): IMAP UID deduplication — persisted in Store. None means first run.
         self._last_imap_uid: int | None = None
 
-    async def async_load_store(self) -> None:
+    async def _async_load_store(self) -> None:
         """Hydrate dedup + quota state from Store.
 
         MUST be called before async_config_entry_first_refresh().  Failing to do so

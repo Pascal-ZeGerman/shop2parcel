@@ -35,7 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     Order of operations is critical:
       1. Construct coordinator (no I/O)
-      2. async_load_store() hydrates dedup set + quota state from disk
+      2. _async_load_store() hydrates dedup set + quota state from disk
       3. async_config_entry_first_refresh() runs first poll cycle
       4. Store coordinator in hass.data and forward to platforms
 
@@ -49,7 +49,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
 
     coordinator = Shop2ParcelCoordinator(hass, entry)
-    await coordinator.async_load_store()
+    await coordinator._async_load_store()
     await coordinator.async_config_entry_first_refresh()
 
     # Phase 5 D-08: schedule once-daily delivered-shipment cleanup.
