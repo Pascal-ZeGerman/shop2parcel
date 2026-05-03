@@ -45,6 +45,7 @@ from .api.gmail_client import GmailClient, extract_html_body
 from .api.imap_client import ImapClient, extract_html_body_imap
 from .api.parcelapp import ParcelAppClient
 from .const import (
+    CONF_CONNECTION_TYPE,
     CONF_GMAIL_QUERY,
     CONF_IMAP_HOST,
     CONF_IMAP_PASSWORD,
@@ -53,6 +54,7 @@ from .const import (
     CONF_IMAP_TLS,
     CONF_IMAP_USERNAME,
     CONF_POLL_INTERVAL,
+    CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
@@ -137,7 +139,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
         # Phase 9 (D-05/D-10): dispatch to ImapClient or GmailClient based on connection type.
-        conn_type = entry.data.get("connection_type", "gmail")
+        conn_type = entry.data.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_GMAIL)
         if conn_type == CONNECTION_TYPE_IMAP:
             self._email_client: ImapClient | GmailClient = ImapClient(hass.async_add_executor_job)
         else:
@@ -175,7 +177,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
         # Phase 9 (D-05): dispatch to IMAP path if connection_type == "imap".
-        if self._entry.data.get("connection_type") == CONNECTION_TYPE_IMAP:
+        if self._entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_IMAP:
             return await self._async_update_data_imap()
 
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
@@ -265,7 +267,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
-                d.last_poll_skip_reasons.append("invalid_internal_date")
+                d.last_poll_skip_reasons.append({"message_id": msg_id, "reason": "invalid_internal_date"})
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.

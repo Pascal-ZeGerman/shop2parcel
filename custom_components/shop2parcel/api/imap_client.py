@@ -72,20 +72,22 @@ class ImapClient:
         D-09: Uses PEEK fetch spec to avoid setting \\Seen flag.
         D-09: Never calls store(), expunge(), copy(), or uid(MOVE/STORE/EXPUNGE/COPY).
         """
-        conn: imaplib.IMAP4
-        if tls_mode == "ssl":
-            conn = imaplib.IMAP4_SSL(host, port)
-        else:
-            conn = imaplib.IMAP4(host, port)
-            if tls_mode == "starttls":
-                conn.starttls()
-
+        conn: imaplib.IMAP4 | None = None
         try:
+            if tls_mode == "ssl":
+                conn = imaplib.IMAP4_SSL(host, port)
+            else:
+                conn = imaplib.IMAP4(host, port)
+                if tls_mode == "starttls":
+                    conn.starttls()
+
             typ, _ = conn.login(username, password)
             if typ != "OK":
                 raise imaplib.IMAP4.error(f"LOGIN failed: {typ}")
 
-            conn.select("INBOX", readonly=True)  # Issues EXAMINE — read-only at protocol level
+            ok, _ = conn.select("INBOX", readonly=True)  # Issues EXAMINE — read-only at protocol level
+            if ok != "OK":
+                raise ImapTransientError(f"Failed to select INBOX: {ok}")
 
             if since_uid is not None:
                 uid_arg = f"UID {since_uid + 1}:* {search_criteria}"
@@ -117,10 +119,11 @@ class ImapClient:
             _classify_imap_error(err)
             raise  # unreachable, but prevents implicit None return
         finally:
-            try:
-                conn.logout()
-            except Exception:  # noqa: BLE001
-                pass
+            if conn is not None:
+                try:
+                    conn.logout()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def _classify_imap_error(err: Exception) -> NoReturn:
