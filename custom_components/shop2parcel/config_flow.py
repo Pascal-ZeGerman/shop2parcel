@@ -92,7 +92,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlowHandler:  # noqa: F821
+    def async_get_options_flow(config_entry: ConfigEntry) -> "OptionsFlowHandler":
         """Return options flow handler — registers the gear icon in HA UI.
 
         Lazy import avoids circular dependency: options_flow.py imports from
