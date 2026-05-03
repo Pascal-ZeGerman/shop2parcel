@@ -92,7 +92,7 @@ class ShipmentSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
     """One sensor per forwarded shipment (ENTT-01)."""
 
     _attr_should_poll = False
-    _attr_device_class = None  # D-02: no standard device class for parcel tracking
+    # D-02: no standard device class for parcel tracking (None is the default)
     _attr_state_class = None  # D-02: string/enum state, not a measurement
     _attr_has_entity_name = True
 

@@ -43,7 +43,7 @@ class HasActiveShipmentsBinarySensor(CoordinatorEntity[Shop2ParcelCoordinator], 
     """True when coordinator.data has at least one active shipment (ENTT-03)."""
 
     _attr_should_poll = False
-    _attr_device_class = None  # D-02: no standard device class
+    # D-02: no standard device class (None is the default)
     _attr_has_entity_name = True
     _attr_name = "Has Active Shipments"
 
