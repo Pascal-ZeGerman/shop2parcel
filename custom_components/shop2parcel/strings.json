@@ -52,7 +52,7 @@
           "imap_tls": "'ssl' (port 993, recommended), 'starttls' (port 143), or 'none' (unencrypted, not recommended)."
         }
       },
-      "reauth_confirm_imap": {
+      "reauth_imap": {
         "title": "Re-enter IMAP Credentials",
         "description": "IMAP authentication failed. Please re-enter your password.",
         "data": {

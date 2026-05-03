@@ -171,7 +171,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             except ImapAuthError:
                 errors["base"] = "invalid_auth"
             except ImapTransientError:
-                errors["base"] = "cannot_connect"
+                errors["base"] = "imap_cannot_connect"
             else:
                 account_id = f"{username}@{host}"
                 await self.async_set_unique_id(account_id)
@@ -326,7 +326,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             except ImapAuthError:
                 errors["base"] = "invalid_auth"
             except ImapTransientError:
-                errors["base"] = "cannot_connect"
+                errors["base"] = "imap_cannot_connect"
             else:
                 new_data = dict(reauth_entry.data)
                 new_data[CONF_IMAP_PASSWORD] = password
@@ -334,7 +334,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
 
         # Pre-fill with existing values except password (never pre-fill credentials)
         return self.async_show_form(
-            step_id="reauth_confirm_imap",
+            step_id="reauth_imap",
             data_schema=vol.Schema(
                 {
                     vol.Required(
