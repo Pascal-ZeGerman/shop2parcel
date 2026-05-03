@@ -39,9 +39,6 @@ class OptionsFlowHandler(OptionsFlowWithReload):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show form with current values; save and reload on submit."""
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-
         conn_type = self.config_entry.data.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_GMAIL)
         if conn_type == CONNECTION_TYPE_IMAP:
             schema = vol.Schema(
@@ -81,4 +78,14 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                     ): vol.All(str, vol.Length(min=1, max=500)),
                 }
             )
+
+        if user_input is not None:
+            try:
+                validated = schema(user_input)
+            except vol.Invalid as err:
+                return self.async_show_form(
+                    step_id="init", data_schema=schema, errors={"base": str(err)}
+                )
+            return self.async_create_entry(title="", data=validated)
+
         return self.async_show_form(step_id="init", data_schema=schema)
