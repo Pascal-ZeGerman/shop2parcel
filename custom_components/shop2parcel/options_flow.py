@@ -80,12 +80,6 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             )
 
         if user_input is not None:
-            try:
-                validated = schema(user_input)
-            except vol.Invalid as err:
-                return self.async_show_form(
-                    step_id="init", data_schema=schema, errors={"base": str(err)}
-                )
-            return self.async_create_entry(title="", data=validated)
+            return self.async_create_entry(title="", data=user_input)
 
         return self.async_show_form(step_id="init", data_schema=schema)
