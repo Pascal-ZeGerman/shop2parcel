@@ -892,3 +892,18 @@ async def test_diagnostics_already_forwarded_not_scanned(hass, mock_config_entry
         mock_parser_cls.return_value.parse.assert_not_called()
         # No skip_reason recorded — already-forwarded is NOT propagated as a skip.
         assert coord._diagnostics.last_poll_skip_reasons == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: IMAP coordinator dispatch
+# ---------------------------------------------------------------------------
+
+
+async def test_coordinator_uses_gmail_client_for_gmail_entry(hass, mock_config_entry):
+    """Phase 9 D-10: Gmail entry (no connection_type or 'gmail') instantiates GmailClient."""
+    from custom_components.shop2parcel.api.gmail_client import GmailClient  # noqa: PLC0415
+    mock_config_entry.add_to_hass(hass)
+    coordinator = Shop2ParcelCoordinator(hass, mock_config_entry)
+    assert isinstance(coordinator._email_client, GmailClient), (
+        "Gmail entry must create GmailClient"
+    )

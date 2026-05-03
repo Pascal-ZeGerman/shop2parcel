@@ -18,8 +18,11 @@ from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 
 from .const import (
     CONF_GMAIL_QUERY,
+    CONF_IMAP_SEARCH,
     CONF_POLL_INTERVAL,
+    CONNECTION_TYPE_IMAP,
     DEFAULT_GMAIL_QUERY,
+    DEFAULT_IMAP_SEARCH,
     DEFAULT_POLL_INTERVAL,
 )
 
@@ -37,22 +40,43 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_POLL_INTERVAL,
-                    default=self.config_entry.options.get(
-                        CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
-                    ),
-                ): vol.All(int, vol.Range(min=5, max=1440)),
-                vol.Required(
-                    CONF_GMAIL_QUERY,
-                    default=self.config_entry.options.get(CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY),
-                    # min=1 prevents an empty query which matches ALL Gmail messages,
-                    # causing the coordinator to attempt parsing every email in the inbox
-                    # (DoS against Gmail API quota and the HA event loop).
-                    # max=500 mirrors Gmail's practical query length limit.
-                ): vol.All(str, vol.Length(min=1, max=500)),
-            }
-        )
+        conn_type = self.config_entry.data.get("connection_type", "gmail")
+        if conn_type == CONNECTION_TYPE_IMAP:
+            schema = vol.Schema(
+                {
+                    vol.Required(
+                        CONF_POLL_INTERVAL,
+                        default=self.config_entry.options.get(
+                            CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
+                        ),
+                    ): vol.All(int, vol.Range(min=5, max=1440)),
+                    vol.Required(
+                        CONF_IMAP_SEARCH,
+                        default=self.config_entry.options.get(
+                            CONF_IMAP_SEARCH, DEFAULT_IMAP_SEARCH
+                        ),
+                    ): vol.All(str, vol.Length(min=1, max=500)),
+                }
+            )
+        else:
+            schema = vol.Schema(
+                {
+                    vol.Required(
+                        CONF_POLL_INTERVAL,
+                        default=self.config_entry.options.get(
+                            CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
+                        ),
+                    ): vol.All(int, vol.Range(min=5, max=1440)),
+                    vol.Required(
+                        CONF_GMAIL_QUERY,
+                        default=self.config_entry.options.get(
+                            CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY
+                        ),
+                        # min=1 prevents an empty query which matches ALL Gmail messages,
+                        # causing the coordinator to attempt parsing every email in the inbox
+                        # (DoS against Gmail API quota and the HA event loop).
+                        # max=500 mirrors Gmail's practical query length limit.
+                    ): vol.All(str, vol.Length(min=1, max=500)),
+                }
+            )
         return self.async_show_form(step_id="init", data_schema=schema)

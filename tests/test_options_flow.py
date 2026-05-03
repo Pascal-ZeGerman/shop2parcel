@@ -90,3 +90,70 @@ async def test_gmail_query_default(hass, mock_config_entry):
     schema2_dict = {str(k): k for k in schema2.schema}
     query_key2 = schema2_dict[CONF_GMAIL_QUERY]
     assert query_key2.default() == "from:custom"
+
+
+# ---------------------------------------------------------------------------
+# IMAP options flow branch (Phase 9)
+# ---------------------------------------------------------------------------
+
+
+def _make_imap_handler_with_options(options: dict) -> OptionsFlowHandler:
+    """Construct OptionsFlowHandler with a fake IMAP config_entry."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        CONF_IMAP_SEARCH,
+        DEFAULT_IMAP_SEARCH,
+    )
+    handler = OptionsFlowHandler.__new__(OptionsFlowHandler)
+    fake_entry = MagicMock()
+    fake_entry.options = options
+    fake_entry.data = {"connection_type": "imap"}
+    type(handler).config_entry = property(lambda self: fake_entry)
+    return handler
+
+
+async def test_options_flow_imap_shows_imap_search_field(hass, mock_imap_config_entry):
+    """Phase 9 D-07: IMAP entry options form shows CONF_IMAP_SEARCH, not CONF_GMAIL_QUERY."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        CONF_GMAIL_QUERY,
+        CONF_IMAP_SEARCH,
+        DEFAULT_IMAP_SEARCH,
+    )
+    handler = _make_imap_handler_with_options(options={})
+    result = await handler.async_step_init(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "init"
+    schema = result["data_schema"]
+    schema_keys = [str(k) for k in schema.schema]
+    assert CONF_IMAP_SEARCH in schema_keys, "IMAP options form must show imap_search field"
+    assert CONF_GMAIL_QUERY not in schema_keys, "IMAP options form must NOT show gmail_query field"
+
+
+async def test_options_flow_imap_saves_imap_search(hass, mock_imap_config_entry):
+    """Phase 9 D-07: Submitting IMAP options saves imap_search to entry.options."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        CONF_IMAP_SEARCH,
+        CONF_POLL_INTERVAL,
+    )
+    handler = _make_imap_handler_with_options(options={})
+    user_input = {CONF_POLL_INTERVAL: 60, CONF_IMAP_SEARCH: 'SUBJECT "tracking"'}
+    result = await handler.async_step_init(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"] == user_input
+
+
+async def test_options_flow_gmail_still_shows_gmail_query(hass, mock_config_entry):
+    """Phase 9 backwards compatibility: Gmail entry options form still shows gmail_query field."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        CONF_GMAIL_QUERY,
+        CONF_IMAP_SEARCH,
+    )
+    # Gmail entry: no connection_type or connection_type="gmail"
+    handler = _make_handler_with_options(options={})
+    # The existing _make_handler_with_options creates a MagicMock entry where
+    # fake_entry.data is a MagicMock (not a dict). Patch data.get to return "gmail".
+    handler.config_entry.data.get = lambda key, default=None: "gmail" if key == "connection_type" else default
+    result = await handler.async_step_init(user_input=None)
+    schema = result["data_schema"]
+    schema_keys = [str(k) for k in schema.schema]
+    assert CONF_GMAIL_QUERY in schema_keys, "Gmail entry must still show gmail_query field"
+    assert CONF_IMAP_SEARCH not in schema_keys, "Gmail entry must NOT show imap_search field"
