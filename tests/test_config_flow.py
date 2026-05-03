@@ -1,7 +1,9 @@
 """Tests for Shop2Parcel config flow — covers CONF-01 through CONF-07.
 
-HA and Google libraries are mocked at sys.modules level so tests run without
-a real Home Assistant installation or google-api-python-client installed.
+Google API libraries are mocked at sys.modules level to prevent real API calls.
+These tests require pytest-homeassistant-custom-component; real HA modules are
+loaded by the pytest plugin before collection and the sys.modules.setdefault calls
+for homeassistant.* are no-ops.
 
 Threat mitigation T-03-03-01/02: api_key and access_token values in tests are
 always fake literals — never real credentials.
