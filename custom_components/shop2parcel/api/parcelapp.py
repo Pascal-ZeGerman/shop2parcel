@@ -87,6 +87,10 @@ class ParcelAppClient:
                     raise ParcelAppInvalidTrackingError(msg)
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
+                if 400 <= resp.status < 500:
+                    raise ParcelAppTransientError(
+                        f"Unexpected client error: HTTP {resp.status}"
+                    )
                 resp.raise_for_status()
         except (
             TimeoutError,
@@ -117,6 +121,10 @@ class ParcelAppClient:
                     raise ParcelAppTransientError("View-deliveries rate limit (20/hr) exceeded")
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
+                if 400 <= resp.status < 500:
+                    raise ParcelAppTransientError(
+                        f"Unexpected client error: HTTP {resp.status}"
+                    )
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 return data.get("deliveries", [])
