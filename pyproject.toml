@@ -1,5 +1,7 @@
 [project]
 name = "shop2parcel"
+# IMPORTANT: keep this version in sync with custom_components/shop2parcel/manifest.json "version".
+# Only manifest.json is read by HACS and Home Assistant; pyproject.toml is for dev tooling only.
 version = "0.1.3"
 description = "Home Assistant custom integration: Shopify → Parcel App tracking via Gmail"
 requires-python = ">=3.14"
