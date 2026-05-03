@@ -1184,3 +1184,59 @@ async def test_imap_quota_blocked_does_not_advance_last_uid(hass, mock_imap_conf
     assert "101" not in coord._forwarded_ids
     # No delivery was attempted — all quota-blocked
     mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# IN-04: _last_email_timestamp advancement for no_html_body skips (WR-02 behavior)
+# ---------------------------------------------------------------------------
+
+
+async def test_last_email_timestamp_advances_for_no_html_body(hass, mock_config_entry):
+    """IN-04 / WR-02: _last_email_timestamp must advance even when message has no HTML body.
+
+    Before the WR-02 fix, a no_html_body message would not advance max_email_date,
+    causing the message to be re-fetched on every poll cycle indefinitely.
+    This test verifies the fix: after a poll with only no_html_body messages,
+    _last_email_timestamp is advanced to the message's internalDate.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body",
+            return_value="",  # empty body triggers no_html_body skip
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=[{"id": "msg_no_html"}]
+        )
+        # internalDate: 1700000000000 ms → 1700000000 seconds
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = Shop2ParcelCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        # Pre-poll: timestamp is None (first run)
+        assert coord._last_email_timestamp is None
+        await coord._async_update_data()
+
+    # WR-02 fix: _last_email_timestamp must advance to the no_html_body message's date
+    assert coord._last_email_timestamp == 1700000000, (
+        "WR-02: _last_email_timestamp must advance for no_html_body skips to prevent "
+        "the message from being re-fetched indefinitely on subsequent polls."
+    )
+    # The message was not forwarded (no shipment extracted)
+    assert "msg_no_html" not in coord._forwarded_ids
