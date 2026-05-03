@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.shop2parcel.api.email_parser import ShipmentData
