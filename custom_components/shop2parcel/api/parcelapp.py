@@ -113,6 +113,8 @@ class ParcelAppClient:
             ) as resp:
                 if resp.status in (401, 403):
                     raise ParcelAppAuthError(f"Auth failed: HTTP {resp.status}")
+                if resp.status == 429:
+                    raise ParcelAppTransientError("View-deliveries rate limit (20/hr) exceeded")
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 resp.raise_for_status()
