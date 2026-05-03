@@ -48,7 +48,6 @@ class _FakeAbstractOAuth2FlowHandler:
 
     DOMAIN = ""
     hass: Any = None
-    source: str = "user"
 
     def __init_subclass__(cls, domain: str = "", **kwargs: Any) -> None:
         """Accept domain keyword argument required by AbstractOAuth2FlowHandler."""
@@ -57,6 +56,12 @@ class _FakeAbstractOAuth2FlowHandler:
     def __init__(self) -> None:
         self._data: dict = {}
         self._title: str = ""
+        self.context: dict = {"source": "user"}  # instance attribute
+
+    @property
+    def source(self) -> str:
+        """Mirror real HA FlowHandler.source property."""
+        return self.context.get("source", "user")
 
     def async_show_form(self, *, step_id, data_schema=None, errors=None):
         return {
