@@ -62,14 +62,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         timedelta(hours=24),
         name="shop2parcel_cleanup",
     )
+    # Register via async_on_unload so HA cancels the timer on all teardown paths
+    # (clean unload, exception from async_forward_entry_setups, or HA shutdown).
+    # This prevents the orphaned-timer leak described in RESEARCH.md WR-03.
+    entry.async_on_unload(cancel_cleanup)
 
     hass.data.setdefault(DOMAIN, {})
-    # Phase 5 D-10: dict-shaped value — sensor.py / binary_sensor.py read
-    # ["coordinator"] and async_unload_entry pops + invokes ["cancel_cleanup"].
-    hass.data[DOMAIN][entry.entry_id] = {
-        "coordinator": coordinator,
-        "cancel_cleanup": cancel_cleanup,
-    }
+    # Phase 5 D-10: dict-shaped value — sensor.py / binary_sensor.py read ["coordinator"].
+    hass.data[DOMAIN][entry.entry_id] = {"coordinator": coordinator}
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -83,9 +83,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        entry_data = hass.data[DOMAIN].pop(entry.entry_id, {})
-        # Cancel the scheduled cleanup task — without this, the callback continues
-        # firing after the integration is unloaded (RESEARCH.md anti-pattern).
-        if cancel_callback := entry_data.get("cancel_cleanup"):
-            cancel_callback()
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        # cancel_cleanup is registered via entry.async_on_unload in async_setup_entry
+        # so HA cancels it automatically — no explicit call needed here.
     return unload_ok
