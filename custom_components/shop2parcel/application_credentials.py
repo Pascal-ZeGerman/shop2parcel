@@ -2,6 +2,10 @@
 
 Declares the Google OAuth2 authorization server for HA's application_credentials platform.
 The authorization_url and token_url are Google's standard OAuth2 v2 endpoints.
+
+# Required OAuth2 scope enforced in config_flow.py via extra_authorize_data:
+# GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+# strings.json application_credentials.description references gmail.readonly — keep in sync.
 """
 
 from __future__ import annotations
