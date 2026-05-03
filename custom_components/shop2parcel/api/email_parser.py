@@ -326,8 +326,8 @@ class EmailParser:
         )
         order = re.search(r"order\s*#?\s*(\d+)", text, re.IGNORECASE)
         carrier = re.search(
-            r"(?:via|carrier)\s+(?:by\s+)?([A-Za-z][A-Za-z]{2,20})(?:\s|$|\.)"
-            r"|shipped\s+by\s+([A-Za-z][A-Za-z]{2,20})(?:\s|$|\.)",
+            r"(?:via|carrier)\s+(?:by\s+)?([A-Za-z][A-Za-z ]{2,29})(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)"
+            r"|shipped\s+by\s+([A-Za-z][A-Za-z ]{2,29})(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
             text,
             re.IGNORECASE,
         )
