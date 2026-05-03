@@ -5,11 +5,11 @@
 
 # Shop2Parcel
 
-A Home Assistant custom integration that monitors your Gmail inbox for Shopify shipping confirmation emails and automatically forwards tracking information to [Parcel](https://parcelapp.net). Each shipment appears as a sensor entity in Home Assistant — no manual entry required.
+A Home Assistant custom integration that monitors your email inbox (Gmail OAuth2 or IMAP) for Shopify shipping confirmation emails and automatically forwards tracking information to [Parcel](https://parcelapp.net). Each shipment appears as a sensor entity in Home Assistant — no manual entry required.
 
 ## What it does
 
-1. Polls your Gmail inbox on a configurable schedule (default: every 30 minutes).
+1. Polls your email inbox on a configurable schedule (default: every 30 minutes) via Gmail OAuth2 or IMAP.
 2. Finds Shopify shipping confirmation emails (from `no-reply@shopify.com`, subject contains "shipped").
 3. Extracts the tracking number and carrier from the email.
 4. Posts the shipment to parcelapp.net via its API so you can track it in the Parcel app.
@@ -17,8 +17,19 @@ A Home Assistant custom integration that monitors your Gmail inbox for Shopify s
 
 ## Prerequisites
 
+### Gmail OAuth2
+
 - Gmail account that receives Shopify shipping confirmation emails
 - Google Cloud project with Gmail API enabled (see setup below)
+
+### IMAP
+
+- Any email account accessible via IMAP (Gmail, Outlook, iCloud, self-hosted, etc.)
+- IMAP access enabled for the account
+- App password if your provider requires two-factor authentication (recommended for Gmail IMAP)
+
+### Common
+
 - Parcel account with API key (`web.parcelapp.net`)
 - Home Assistant 2025.1 or later
 - HACS installed in Home Assistant
@@ -33,12 +44,20 @@ A Home Assistant custom integration that monitors your Gmail inbox for Shopify s
 
 ## Configuration
 
-After restarting, go to **Settings → Devices & Services → + Add Integration** and search for **Shop2Parcel**. The setup wizard will ask for:
+After restarting, go to **Settings → Devices & Services → + Add Integration** and search for **Shop2Parcel**. The setup wizard will first ask you to choose a connection type:
+
+### Option A: Gmail OAuth2
 
 1. **Google OAuth2 Client ID and Client Secret** — see setup guide below.
+2. Home Assistant will open a Google OAuth2 consent screen in your browser. You may see an "unverified app" warning — this is expected for a personal OAuth2 app. Click **Advanced → Go to Shop2Parcel (unsafe)** to proceed and grant the `gmail.readonly` scope.
+3. **Parcel API key** — see setup guide below.
+
+### Option B: IMAP
+
+1. Enter your **IMAP server hostname** (e.g. `imap.gmail.com`, `imap.outlook.com`), **port** (993 for SSL), **username** (your email address), **password** (or app password), and **TLS mode**.
 2. **Parcel API key** — see setup guide below.
 
-Once entered, Home Assistant will open a Google OAuth2 consent screen in your browser. You may see an "unverified app" warning — this is expected for a personal OAuth2 app. Click **Advanced → Go to Shop2Parcel (unsafe)** to proceed and grant the `gmail.readonly` scope.
+You can run setup again to add a second account (Gmail or IMAP) as a separate integration entry.
 
 ---
 
@@ -92,8 +111,9 @@ After the integration is configured you can adjust settings via **Settings → D
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| Poll interval (minutes) | 30 | How often to check Gmail. Minimum 5 minutes. |
-| Gmail search query | `from:no-reply@shopify.com subject:shipped` | Advanced: customise the Gmail filter for non-standard senders. |
+| Poll interval (minutes) | 30 | How often to check the inbox. Minimum 5 minutes. |
+| Gmail search query | `from:no-reply@shopify.com subject:shipped` | (Gmail only) Advanced: customise the Gmail filter for non-standard senders. |
+| IMAP search criteria | `SUBJECT "shipped"` | (IMAP only) Standard IMAP SEARCH criteria string for filtering messages. |
 
 ---
 
@@ -111,7 +131,7 @@ Delivered shipments are removed from the sensor list automatically after 24 hour
 
 ## Known limitations
 
-- **Single Gmail account:** v0.1.0 supports one Gmail account per HA instance.
+- **Multiple accounts:** You can add multiple Gmail or IMAP accounts by running setup again.
 - **Parcel quota:** 20 new shipments per day maximum on the free Parcel tier.
 - **Poll interval:** Near-real-time tracking requires a shorter poll interval; 30 minutes is the default to avoid Gmail API quota.
 - **Carrier mapping:** Unknown carriers are mapped to a placeholder; tracking in Parcel may show limited status.
