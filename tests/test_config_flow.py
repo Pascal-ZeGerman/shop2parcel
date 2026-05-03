@@ -277,15 +277,22 @@ async def test_reauth_confirm_none_input_shows_form():
     assert result["type"] == "form"
 
 
-async def test_reauth_confirm_with_input_calls_async_step_user():
-    """async_step_reauth_confirm with user_input={} → delegates to async_step_user."""
+async def test_reauth_confirm_with_input_goes_to_oauth2_not_picker():
+    """async_step_reauth_confirm with user_input={} → calls super().async_step_user, not picker.
+
+    WR-01: reauth must bypass the connection type picker by delegating to the base
+    class OAuth2 method, not the overridden picker form.
+    """
     handler = _make_handler()
-    handler.async_step_user = AsyncMock(return_value={"type": "form", "step_id": "user"})
+    with patch.object(
+        _FakeAbstractOAuth2FlowHandler,
+        "async_step_user",
+        new=AsyncMock(return_value={"type": "external", "step_id": "auth"}),
+    ) as mock_super_user:
+        result = await handler.async_step_reauth_confirm(user_input={})
 
-    result = await handler.async_step_reauth_confirm(user_input={})
-
-    handler.async_step_user.assert_called_once()
-    assert result["step_id"] == "user"
+    mock_super_user.assert_called_once()
+    assert result.get("step_id") != "user", "Must NOT show the connection type picker during reauth"
 
 
 # ---------------------------------------------------------------------------

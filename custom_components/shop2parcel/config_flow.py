@@ -291,7 +291,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
         """
         if user_input is None:
             return self.async_show_form(step_id="reauth_confirm")
-        return await self.async_step_user()
+        return await super().async_step_user()
 
     async def async_step_reauth_imap(
         self, user_input: dict[str, Any] | None = None
