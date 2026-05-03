@@ -337,9 +337,17 @@ class EmailParser:
             "carrier_regex": carrier is not None,
         }
         if tracking and order:
+            raw_tracking = tracking.group(1).upper()   # normalize case
+            if not _looks_like_tracking(raw_tracking):
+                return ParseResult(
+                    shipment=None,
+                    skip_reason="no_regex_match",
+                    strategy_used=None,
+                    keyword_hits=hits,
+                )
             return ParseResult(
                 shipment=ShipmentData(
-                    tracking_number=tracking.group(1),
+                    tracking_number=raw_tracking,
                     carrier_name=(
                         next(
                             (g for g in (carrier.group(1), carrier.group(2)) if g),
