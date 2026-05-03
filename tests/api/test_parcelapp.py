@@ -193,12 +193,14 @@ async def test_add_delivery_request_body_shape(client):
 
 
 async def test_add_delivery_api_key_not_in_url(client):
-    """POST succeeds → URL does not contain api-key value (header only, never query param)."""
+    """POST succeeds → actual request URL does not contain api-key value (header only, never query param)."""
     with aioresponses() as mock:
         mock.post(ADD_DELIVERY_URL, payload={"success": True}, status=200)
         await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
-        # The ADD_DELIVERY_URL constant should not contain the api_key value
-        assert "test-key-123" not in ADD_DELIVERY_URL
+        import yarl
+        requests = mock.requests[("POST", yarl.URL(ADD_DELIVERY_URL))]
+        actual_url = str(requests[0].url)
+        assert "test-key-123" not in actual_url
 
 
 # ---------------------------------------------------------------------------
