@@ -329,7 +329,11 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                 errors["base"] = "imap_cannot_connect"
             else:
                 new_data = dict(reauth_entry.data)
+                new_data[CONF_IMAP_HOST] = host
+                new_data[CONF_IMAP_PORT] = port
+                new_data[CONF_IMAP_USERNAME] = username
                 new_data[CONF_IMAP_PASSWORD] = password
+                new_data[CONF_IMAP_TLS] = tls_mode
                 return self.async_update_reload_and_abort(reauth_entry, data=new_data)
 
         # Pre-fill with existing values except password (never pre-fill credentials)
