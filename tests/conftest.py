@@ -45,10 +45,44 @@ sys.modules.setdefault("googleapiclient.errors", _ERRORS_MOCK)
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.const import DOMAIN
 
 # NOTE: `hass` fixture is provided automatically by pytest-homeassistant-custom-component
+
+
+async def setup_coordinator_with_data(
+    hass, mock_config_entry, data: dict[str, ShipmentData]
+):
+    """Shared helper: set up the coordinator with pre-seeded data and forward to platforms.
+
+    Patches all coordinator dependencies (GmailClient, ParcelAppClient, EmailParser,
+    Store, config_entry_oauth2_flow) so no real I/O occurs during setup.  After
+    async_setup, coordinator.data is replaced with the supplied ``data`` dict and
+    hass.async_block_till_done() drains any resulting listener callbacks.
+
+    Returns the configured coordinator instance.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+        coordinator.async_set_updated_data(data)
+        await hass.async_block_till_done()
+        return coordinator
 
 
 @pytest.fixture(autouse=True)
