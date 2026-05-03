@@ -90,7 +90,7 @@ class ImapClient:
                 raise ImapTransientError(f"Failed to select INBOX: {ok}")
 
             if since_uid is not None:
-                uid_arg = f"UID {since_uid + 1}:* {search_criteria}"
+                uid_arg = f"{since_uid + 1}:* {search_criteria}"
             else:
                 uid_arg = search_criteria
 
