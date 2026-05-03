@@ -14,6 +14,8 @@ from custom_components.shop2parcel.api.email_parser import ParseResult, Shipment
 from custom_components.shop2parcel.api.exceptions import (
     GmailAuthError,
     GmailTransientError,
+    ImapAuthError,
+    ImapTransientError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -907,3 +909,178 @@ async def test_coordinator_uses_gmail_client_for_gmail_entry(hass, mock_config_e
     assert isinstance(coordinator._email_client, GmailClient), (
         "Gmail entry must create GmailClient"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: IMAP poll-cycle tests (WR-04 + CR-01 regression guard)
+# ---------------------------------------------------------------------------
+
+
+def _make_imap_raw_message(uid: int, html: str = "<html><body>shipped</body></html>") -> dict:
+    """Build a minimal raw IMAP message dict as returned by ImapClient."""
+    import email as email_lib  # noqa: PLC0415
+    from email.mime.text import MIMEText  # noqa: PLC0415
+    msg = MIMEText(html, "html")
+    return {"uid": uid, "raw": msg.as_bytes()}
+
+
+async def test_imap_basic_poll_cycle(hass, mock_imap_config_entry):
+    """IMAP FWRD-01: ImapClient returns one message → parsed → forwarded → UID in _forwarded_ids."""
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msg = _make_imap_raw_message(100)
+    shipment = _make_shipment("100")
+
+    with (
+        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
+            return_value=([raw_msg], 100)
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = Shop2ParcelCoordinator(hass, mock_imap_config_entry)
+        await coord.async_load_store()
+        data = await coord._async_update_data()
+
+    assert "100" in data
+    assert "100" in coord._forwarded_ids
+    mock_parcel_cls.return_value.async_add_delivery.assert_called_once()
+
+
+async def test_imap_uid_dedup_skips_seen(hass, mock_imap_config_entry):
+    """IMAP FWRD-02: message with already-seen UID → not re-POSTed."""
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msg = _make_imap_raw_message(101)
+
+    with (
+        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={"forwarded_ids": ["101"], "quota_exhausted_until": None, "last_email_timestamp": None, "last_imap_uid": None}
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
+            return_value=([raw_msg], 101)
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = Shop2ParcelCoordinator(hass, mock_imap_config_entry)
+        await coord.async_load_store()
+        await coord._async_update_data()
+
+    # Already seen — must not POST again
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
+
+
+async def test_imap_auth_error_raises_config_entry_auth_failed(hass, mock_imap_config_entry):
+    """IMAP FWRD-05: ImapAuthError → ConfigEntryAuthFailed."""
+    mock_imap_config_entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
+            side_effect=ImapAuthError("auth failed")
+        )
+
+        coord = Shop2ParcelCoordinator(hass, mock_imap_config_entry)
+        await coord.async_load_store()
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coord._async_update_data()
+
+
+async def test_imap_transient_error_raises_update_failed(hass, mock_imap_config_entry):
+    """IMAP FWRD-05: ImapTransientError → UpdateFailed."""
+    mock_imap_config_entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
+            side_effect=ImapTransientError("connection reset")
+        )
+
+        coord = Shop2ParcelCoordinator(hass, mock_imap_config_entry)
+        await coord.async_load_store()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+
+
+async def test_imap_quota_blocked_does_not_advance_last_uid(hass, mock_imap_config_entry):
+    """CR-01 regression: when quota blocked, _last_imap_uid must NOT advance.
+
+    Two messages (UIDs 100, 101) arrive while quota is exhausted.
+    After the poll, _last_imap_uid must remain at its pre-poll value (None)
+    and neither UID must be in _forwarded_ids, so the next poll re-includes them.
+    """
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msgs = [_make_imap_raw_message(100), _make_imap_raw_message(101)]
+    shipment_100 = _make_shipment("100")
+    shipment_101 = _make_shipment("101")
+
+    # Set quota_exhausted_until to a future timestamp
+    future_ts = int(time_module.time()) + 3600
+
+    with (
+        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "forwarded_ids": [],
+                "quota_exhausted_until": future_ts,
+                "last_email_timestamp": None,
+                "last_imap_uid": None,
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
+            return_value=(raw_msgs, 101)
+        )
+        mock_parser_cls.return_value.parse.side_effect = [
+            _make_parse_result(shipment_100),
+            _make_parse_result(shipment_101),
+        ]
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = Shop2ParcelCoordinator(hass, mock_imap_config_entry)
+        await coord.async_load_store()
+        await coord._async_update_data()
+
+    # CR-01: UID must NOT advance when quota was blocked
+    assert coord._last_imap_uid is None, (
+        "CR-01: _last_imap_uid must stay None when quota was blocked this cycle"
+    )
+    # UIDs must NOT be in forwarded_ids — they were never successfully POSTed
+    assert "100" not in coord._forwarded_ids
+    assert "101" not in coord._forwarded_ids
+    # No delivery was attempted — all quota-blocked
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
