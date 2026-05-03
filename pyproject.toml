@@ -45,6 +45,7 @@ python_version = "3.14"
 strict = false
 ignore_missing_imports = true
 follow_imports = "silent"
+mypy_path = "."
 exclude = [
     "^tests/",
     "^\\.venv/",
@@ -52,16 +53,16 @@ exclude = [
 ]
 
 [[tool.mypy.overrides]]
-module = "shop2parcel.options_flow"
+module = "custom_components.shop2parcel.options_flow"
 # HA generic types (OptionsFlowWithReload, ConfigFlowResult) lack complete stubs
-disable_error_codes = ["misc", "no-untyped-def", "no-untyped-call"]
+disable_error_code = ["misc", "no-untyped-def", "no-untyped-call"]
 
 [[tool.mypy.overrides]]
-module = "shop2parcel.config_flow"
+module = "custom_components.shop2parcel.config_flow"
 # HA generic types (ConfigFlow, ConfigFlowResult) lack complete stubs
-disable_error_codes = ["misc", "no-untyped-def", "no-untyped-call"]
+disable_error_code = ["misc", "no-untyped-def", "no-untyped-call"]
 
 [[tool.mypy.overrides]]
-module = "shop2parcel.coordinator"
+module = "custom_components.shop2parcel.coordinator"
 # HA generic types (DataUpdateCoordinator, OAuth2Session) lack complete stubs
-disable_error_codes = ["misc", "no-untyped-def", "no-untyped-call", "attr-defined"]
+disable_error_code = ["misc", "no-untyped-def", "no-untyped-call", "attr-defined"]
