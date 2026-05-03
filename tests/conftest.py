@@ -5,12 +5,11 @@ from __future__ import annotations
 import sys
 from unittest.mock import MagicMock
 
-# IMPORTANT: Mock google/googleapiclient BEFORE importing any custom_components.shop2parcel
-# module. Phase 4 __init__.py imports coordinator.py at module level, which imports
-# gmail_client.py, which imports from google.oauth2.credentials and googleapiclient.
-# Python executes __init__.py when first accessing the shop2parcel package, so the mocks
-# MUST be in sys.modules before `from custom_components.shop2parcel.const import DOMAIN`
-# runs below (that import triggers the package __init__.py).
+# Mock google/googleapiclient before any shop2parcel import. The lazy import
+# inside async_setup_entry fires when the hass fixture runs async_setup_entry,
+# which imports coordinator.py, which imports gmail_client.py. The mocks must
+# be in sys.modules before `from custom_components.shop2parcel.const import DOMAIN`
+# (below) triggers the package __init__.py on first access.
 _GOOGLE_MOCK = MagicMock()
 sys.modules.setdefault("google", _GOOGLE_MOCK)
 sys.modules.setdefault("google.oauth2", _GOOGLE_MOCK)
