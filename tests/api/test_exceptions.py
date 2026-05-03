@@ -14,6 +14,8 @@ import pytest
 from custom_components.shop2parcel.api.exceptions import (
     GmailAuthError,
     GmailTransientError,
+    ImapAuthError,
+    ImapTransientError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -55,6 +57,18 @@ def test_parcelapp_transient_error_is_exception():
 def test_parcelapp_invalid_tracking_error_is_exception():
     err = ParcelAppInvalidTrackingError("bad number")
     assert isinstance(err, Exception)
+
+
+def test_imap_auth_error_is_exception():
+    err = ImapAuthError("login failed")
+    assert isinstance(err, Exception)
+    assert str(err) == "login failed"
+
+
+def test_imap_transient_error_is_exception():
+    err = ImapTransientError("connection reset")
+    assert isinstance(err, Exception)
+    assert str(err) == "connection reset"
 
 
 def test_no_ha_imports_in_exceptions():
