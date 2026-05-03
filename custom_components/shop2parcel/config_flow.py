@@ -39,6 +39,7 @@ from .api.exceptions import ImapAuthError, ImapTransientError, ParcelAppAuthErro
 from .api.imap_client import ImapClient
 from .api.parcelapp import ParcelAppClient
 from .const import (
+    CONF_API_KEY,
     CONF_CONNECTION_TYPE,
     CONF_IMAP_HOST,
     CONF_IMAP_PASSWORD,
@@ -53,7 +54,6 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-CONF_API_KEY = "api_key"
 CONF_NAME = "name"
 
 

@@ -45,6 +45,7 @@ from .api.gmail_client import GmailClient, extract_html_body
 from .api.imap_client import ImapClient, extract_html_body_imap
 from .api.parcelapp import ParcelAppClient
 from .const import (
+    CONF_API_KEY,
     CONF_CONNECTION_TYPE,
     CONF_GMAIL_QUERY,
     CONF_IMAP_HOST,
@@ -228,7 +229,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         parser = EmailParser()
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
-            api_key=self._entry.data["api_key"],
+            api_key=self._entry.data[CONF_API_KEY],
         )
         current_data: dict[str, ShipmentData] = dict(self.data or {})
         now = int(time.time())
@@ -421,7 +422,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         parser = EmailParser()
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
-            api_key=entry.data["api_key"],
+            api_key=entry.data[CONF_API_KEY],
         )
         current_data: dict[str, ShipmentData] = dict(self.data or {})
         now = int(time.time())
@@ -564,7 +565,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
-            api_key=self._entry.data["api_key"],
+            api_key=self._entry.data[CONF_API_KEY],
         )
         try:
             deliveries = await parcel_client.async_get_deliveries(filter_mode="recent")

@@ -28,3 +28,6 @@ CONF_IMAP_PASSWORD = "imap_password"       # str (encrypted in entry.data)
 CONF_IMAP_TLS = "imap_tls"                 # str: "ssl" | "starttls" | "none"
 CONF_IMAP_SEARCH = "imap_search"           # str: IMAP SEARCH criteria
 DEFAULT_IMAP_SEARCH = 'SUBJECT "shipped"'
+
+# Parcel API key (stored in config entry data, shared between config_flow and coordinator)
+CONF_API_KEY = "api_key"
