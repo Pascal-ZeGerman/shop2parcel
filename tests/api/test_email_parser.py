@@ -66,18 +66,10 @@ def test_html_strategy_used_first(shopify_html: str) -> None:
 
 
 def test_dual_strategy_fallback_used() -> None:
-    """When HTML strategy finds no 'via Carrier', regex fallback must succeed.
+    """HTML strategy only scans <p> elements; div-only HTML forces regex fallback.
 
-    This HTML has no 'via UPS' pattern so _parse_html_template fails the carrier
-    extraction — but it still finds tracking + order in a <p>, so the HTML strategy
-    WOULD succeed with carrier_name='Unknown'. We need HTML that has NO tracking
-    number in a CSS-matchable pattern so the HTML strategy returns None entirely.
-    Use a format where tracking is embedded in text as 'Tracking number: X' but
-    without the '#order' in a separate paragraph — forcing regex path.
-
-    Actually: we need HTML where _parse_html_template returns None (no tracking+order
-    pair). So: tracking in a <div> (not <p>), order in a <div>. But the regex fallback
-    works on full text. Let's use HTML with no <p> elements at all.
+    Verifies _parse_html_template returns shipment=None for div-only input,
+    and that parse() succeeds via _parse_regex_fallback.
     """
     html = "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>"
     parser = EmailParser()
