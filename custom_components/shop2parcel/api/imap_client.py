@@ -172,11 +172,17 @@ def extract_html_body_imap(raw_bytes: bytes) -> str | None:
                 payload = part.get_payload(decode=True)
                 if payload:
                     charset = part.get_content_charset() or "utf-8"
-                    return payload.decode(charset, errors="replace")
+                    try:
+                        return payload.decode(charset, errors="replace")
+                    except (LookupError, TypeError):
+                        return payload.decode("utf-8", errors="replace")
     else:
         if msg.get_content_type() == "text/html":
             payload = msg.get_payload(decode=True)
             if payload:
                 charset = msg.get_content_charset() or "utf-8"
-                return payload.decode(charset, errors="replace")
+                try:
+                    return payload.decode(charset, errors="replace")
+                except (LookupError, TypeError):
+                    return payload.decode("utf-8", errors="replace")
     return None
