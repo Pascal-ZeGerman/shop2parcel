@@ -10,14 +10,14 @@ from pathlib import Path
 import pytest
 
 from custom_components.shop2parcel.api.email_parser import (
-    EmailParser,
-    ParseResult,
-    ShipmentData,
     STRATEGY_FEDEX,
     STRATEGY_HTML,
     STRATEGY_REGEX,
     STRATEGY_UPS,
     STRATEGY_USPS,
+    EmailParser,
+    ParseResult,
+    ShipmentData,
 )
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"

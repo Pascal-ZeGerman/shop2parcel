@@ -43,9 +43,10 @@ _ERRORS_MOCK = MagicMock()
 _ERRORS_MOCK.HttpError = _StubHttpError
 sys.modules.setdefault("googleapiclient.errors", _ERRORS_MOCK)
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.const import DOMAIN

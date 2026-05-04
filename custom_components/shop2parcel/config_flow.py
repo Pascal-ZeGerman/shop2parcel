@@ -24,7 +24,10 @@ Security:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .options_flow import OptionsFlowHandler
 
 import voluptuous as vol
 from google.oauth2.credentials import Credentials
@@ -35,7 +38,12 @@ from homeassistant.core import callback
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api.exceptions import ImapAuthError, ImapTransientError, ParcelAppAuthError, ParcelAppTransientError
+from .api.exceptions import (
+    ImapAuthError,
+    ImapTransientError,
+    ParcelAppAuthError,
+    ParcelAppTransientError,
+)
 from .api.imap_client import ImapClient
 from .api.parcelapp import ParcelAppClient
 from .const import (
@@ -92,7 +100,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> "OptionsFlowHandler":
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlowHandler:
         """Return options flow handler — registers the gear icon in HA UI.
 
         Lazy import avoids circular dependency: options_flow.py imports from

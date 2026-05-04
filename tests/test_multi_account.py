@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from custom_components.shop2parcel.const import DOMAIN
 
-
 # ---------------------------------------------------------------------------
 # Stub: MULT-01 — two entries coexist in same HA instance
 # ---------------------------------------------------------------------------
@@ -30,10 +29,10 @@ async def test_two_entries_can_be_added_to_hass(hass, mock_config_entry, mock_im
 
 async def test_two_imap_entries_have_separate_store_keys(hass, mock_imap_config_entry):
     """D-10: Each config entry creates a coordinator with Store key scoped to entry_id."""
-    from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
-
     # Create a second IMAP entry with a different account
     from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: PLC0415
+
+    from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
     entry_b = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -67,8 +66,8 @@ async def test_two_imap_entries_have_separate_store_keys(hass, mock_imap_config_
 
 async def test_imap_coordinator_instantiates_imap_client(hass, mock_imap_config_entry):
     """D-10: Coordinator with connection_type='imap' must instantiate ImapClient, not GmailClient."""
-    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
     from custom_components.shop2parcel.api.gmail_client import GmailClient  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
     from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
 
     mock_imap_config_entry.add_to_hass(hass)

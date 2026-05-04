@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Inline executor helper (mirrors test_gmail_client.py pattern)
 # ---------------------------------------------------------------------------
@@ -164,7 +163,9 @@ def test_imap_login_failure_raises_imap_auth_error():
 
 def test_extract_html_body_imap_extracts_html():
     """D-06: extract_html_body_imap(raw_bytes) returns HTML string from RFC822 bytes."""
-    from custom_components.shop2parcel.api.imap_client import extract_html_body_imap  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import (
+        extract_html_body_imap,  # noqa: PLC0415
+    )
 
     # Minimal multipart/alternative message with text/html part
     raw = (

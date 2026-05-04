@@ -51,6 +51,7 @@ sys.modules.setdefault("google", MagicMock())
 sys.modules.setdefault("google.oauth2", _mock_google_oauth2)
 sys.modules.setdefault("google.oauth2.credentials", _mock_credentials_module)
 
+import custom_components.shop2parcel.api.gmail_client as _gmail_client_module  # noqa: E402
 from custom_components.shop2parcel.api.exceptions import (  # noqa: E402
     GmailAuthError,
     GmailTransientError,
@@ -60,7 +61,6 @@ from custom_components.shop2parcel.api.gmail_client import (  # noqa: E402
     build_incremental_query,
     extract_html_body,
 )
-import custom_components.shop2parcel.api.gmail_client as _gmail_client_module  # noqa: E402
 
 # Re-bind HttpError in gmail_client's module namespace so that isinstance() checks
 # in _classify_gmail_error use _MockHttpError (not whatever conftest registered).
