@@ -8,10 +8,6 @@ All tests are xfail until coordinator IMAP dispatch is implemented (Plan 09-04).
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-
 from custom_components.shop2parcel.const import DOMAIN
 
 

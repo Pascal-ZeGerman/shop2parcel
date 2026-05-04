@@ -19,7 +19,6 @@ which avoids false statistics anomalies on restart (RESEARCH.md Open Questions Â
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
@@ -30,8 +29,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import Shop2ParcelCoordinator
-
-_LOGGER = logging.getLogger(__name__)
 
 
 class DiagnosticSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
