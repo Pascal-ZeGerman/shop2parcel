@@ -258,8 +258,12 @@ class EmailParser:
         """
         for detect_fn, parse_fn in CARRIER_REGISTRY:
             if detect_fn(html):
-                return parse_fn(html, message_id, email_date)
-        # No registry match — fall through to existing Shopify dual-strategy.
+                carrier_result = parse_fn(html, message_id, email_date)
+                if carrier_result.shipment is not None:
+                    return carrier_result
+                break  # detected but extraction failed — fall through to regex
+        # No registry match (or carrier detected but extraction failed) —
+        # fall through to existing Shopify dual-strategy.
         html_result = self._parse_html_template(html, message_id, email_date)
         if html_result.shipment is not None:
             return html_result
