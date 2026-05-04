@@ -63,7 +63,10 @@ class ParcelAppClient:
             "send_push_confirmation": False,
         }
         try:
-            async with self._session.post(ADD_DELIVERY_URL, headers=headers, json=body) as resp:
+            async with self._session.post(
+                ADD_DELIVERY_URL, headers=headers, json=body,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
                 if resp.status in (401, 403):
                     raise ParcelAppAuthError(f"Auth failed: HTTP {resp.status}")
                 if resp.status == 429:
@@ -114,6 +117,7 @@ class ParcelAppClient:
                 VIEW_DELIVERIES_URL,
                 headers=headers,
                 params={"filter_mode": filter_mode},
+                timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status in (401, 403):
                     raise ParcelAppAuthError(f"Auth failed: HTTP {resp.status}")

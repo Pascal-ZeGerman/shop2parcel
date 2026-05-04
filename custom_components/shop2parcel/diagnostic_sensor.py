@@ -25,6 +25,7 @@ from typing import Any
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -38,6 +39,7 @@ class DiagnosticSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
 
     _attr_should_poll = False
     _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     # D-12: counters reset on HA restart — MEASUREMENT avoids
     # false statistics anomalies on restart (RESEARCH.md A1).
     _attr_state_class = SensorStateClass.MEASUREMENT

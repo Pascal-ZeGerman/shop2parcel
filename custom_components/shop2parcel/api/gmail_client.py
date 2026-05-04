@@ -41,14 +41,25 @@ class GmailClient:
 
         EMAIL-02: query is configurable (default: from:no-reply@shopify.com subject:shipped).
         EMAIL-08: after_timestamp appended as 'after:{ts}' for incremental polling.
+        Paginates through all result pages — Gmail caps each page at 100 messages.
         """
         full_query = build_incremental_query(query, after_timestamp)
         try:
             creds = Credentials(token=access_token)
             service = await self._executor(partial(build, "gmail", "v1", credentials=creds))
-            request = service.users().messages().list(userId="me", q=full_query)
-            result = await self._executor(request.execute)
-            return result.get("messages", [])
+            all_messages: list[dict[str, Any]] = []
+            page_token: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {"userId": "me", "q": full_query}
+                if page_token:
+                    kwargs["pageToken"] = page_token
+                request = service.users().messages().list(**kwargs)
+                result = await self._executor(request.execute)
+                all_messages.extend(result.get("messages", []))
+                page_token = result.get("nextPageToken")
+                if not page_token:
+                    break
+            return all_messages
         except Exception as err:
             _classify_gmail_error(err)
 

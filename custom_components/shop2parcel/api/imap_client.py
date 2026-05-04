@@ -80,9 +80,9 @@ class ImapClient:
         conn: imaplib.IMAP4 | None = None
         try:
             if tls_mode == "ssl":
-                conn = imaplib.IMAP4_SSL(host, port)
+                conn = imaplib.IMAP4_SSL(host, port, timeout=30)
             else:
-                conn = imaplib.IMAP4(host, port)
+                conn = imaplib.IMAP4(host, port, timeout=30)
                 if tls_mode == "starttls":
                     conn.starttls()
 
