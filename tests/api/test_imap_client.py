@@ -215,7 +215,7 @@ def test_starttls_failure_does_not_leak_socket():
                 "starttls", 'SUBJECT "shipped"', None
             )
 
-    mock_conn.logout.assert_called_once(), (
+    assert mock_conn.logout.call_count == 1, (
         "conn.logout() must be called even when starttls() raises "
         "(CR-02: connection setup was outside try block before fix)"
     )
