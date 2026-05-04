@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import cast
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 
@@ -176,6 +177,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
+        assert self.config_entry is not None
         # Phase 9 (D-05): dispatch to IMAP path if connection_type == "imap".
         if self.config_entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_IMAP:
             return await self._async_update_data_imap()
@@ -199,7 +201,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raise ConfigEntryAuthFailed("OAuth2 token missing access_token field") from None
 
         # 2. List Gmail messages matching the configured query.
-        gmail = self._email_client
+        gmail = cast(GmailClient, self._email_client)
         query = self.config_entry.options.get(CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY)
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
@@ -256,7 +258,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # _last_email_timestamp indefinitely (WR-02 fix).
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
@@ -423,6 +425,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Does NOT perform OAuth2 token refresh (IMAP uses entry.data credentials directly).
         """
         entry = self.config_entry
+        assert entry is not None
+        imap_client = cast(ImapClient, self._email_client)
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
@@ -439,7 +443,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         # Fetch messages from IMAP (whole session in one executor call per D-05/Pitfall 6).
         try:
-            raw_messages, max_uid = await self._email_client.fetch_shipping_emails(
+            raw_messages, max_uid = await imap_client.fetch_shipping_emails(
                 host=entry.data[CONF_IMAP_HOST],
                 port=entry.data[CONF_IMAP_PORT],
                 username=entry.data[CONF_IMAP_USERNAME],
@@ -623,6 +627,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not self.data:
             return  # Nothing to clean up — skip the API call entirely
 
+        assert self.config_entry is not None
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
             api_key=self.config_entry.data[CONF_API_KEY],
