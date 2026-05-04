@@ -78,7 +78,10 @@ STRATEGY_REGEX = "regex_fallback"
 # T-ReDoS mitigation: every quantifier is bounded; no `+` or `*` on character classes.
 _UPS_TRACKING_RE = re.compile(r"\b(1Z[0-9A-Z]{16})\b")
 _USPS_TRACKING_RE = re.compile(r"\b(9[2345][0-9]{15,24})\b")
-_FEDEX_TRACKING_RE = re.compile(r"\b([0-9]{12,20})\b")
+_FEDEX_TRACKING_RE = re.compile(
+    r"(?:tracking\s+(?:number|#|no\.?)\s*:?\s*)([0-9]{12,20})\b",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_tracking(s: str) -> bool:
