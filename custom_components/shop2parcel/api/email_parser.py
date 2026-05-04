@@ -26,14 +26,14 @@ class ShipmentData:
 
     carrier_name: raw Shopify string (e.g. "UPS", "Canada Post").
     Caller passes carrier_name to carrier_codes.normalize_carrier() before POSTing.
-    message_id: Gmail message ID — used as stable unique entity ID in Phase 5.
-    email_date: Unix timestamp (seconds) from Gmail internalDate.
+    message_id: stable identifier — Gmail message ID or IMAP UID as string.
+    email_date: Unix timestamp (seconds) from Gmail internalDate (0 for IMAP).
     """
 
     tracking_number: str
     carrier_name: str
     order_name: str  # e.g. "#1234"
-    message_id: str  # Gmail message ID for deduplication
+    message_id: str  # stable message identifier — Gmail message ID (Gmail path) or IMAP UID as string (IMAP path)
     email_date: int  # Unix timestamp (seconds)
 
 
@@ -169,8 +169,8 @@ def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
 def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
     """Extract tracking number from USPS shipping notification email.
 
-    USPS uses 22-26 digit tracking numbers starting with 9[2345]; the
-    _USPS_TRACKING_RE pattern is the carrier-specific extractor and
+    USPS uses 17-26 digit tracking numbers starting with 9[12345] (IMpb format);
+    the _USPS_TRACKING_RE pattern is the carrier-specific extractor and
     _TRACKING_PATTERNS USPS entry was widened in Task 1 so _looks_like_tracking
     accepts the full 26-digit form.
     """

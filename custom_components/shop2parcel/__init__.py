@@ -64,7 +64,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     # Register via async_on_unload so HA cancels the timer on all teardown paths
     # (clean unload, exception from async_forward_entry_setups, or HA shutdown).
-    # This prevents the orphaned-timer leak described in RESEARCH.md WR-03.
+    # This prevents the orphaned-timer leak from async_track_time_interval.
     entry.async_on_unload(cancel_cleanup)
 
     hass.data.setdefault(DOMAIN, {})

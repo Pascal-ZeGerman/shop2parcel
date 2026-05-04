@@ -106,7 +106,11 @@ class ImapClient:
             max_uid: int | None = None
 
             for uid_str in uid_list:
-                uid_int = int(uid_str)
+                try:
+                    uid_int = int(uid_str)
+                except ValueError:
+                    _LOGGER.warning("IMAP server returned non-integer UID %r; skipping", uid_str)
+                    continue
                 typ, msg_data = conn.uid("FETCH", uid_str, "(BODY.PEEK[])")
                 if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
                     _LOGGER.warning(
@@ -133,8 +137,8 @@ class ImapClient:
             if conn is not None:
                 try:
                     conn.logout()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as logout_err:  # noqa: BLE001
+                    _LOGGER.debug("IMAP logout failed (ignored): %s", logout_err)
 
 
 def _classify_imap_error(err: Exception) -> NoReturn:

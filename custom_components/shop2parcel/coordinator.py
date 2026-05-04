@@ -7,7 +7,7 @@ api/*.py — this module only sequences them.
 Locked decisions (CONTEXT.md):
 - D-01: data is dict[str, ShipmentData] keyed by Gmail message_id.
 - D-02: data accumulates all ever-seen shipments — no status filtering here.
-- D-04: Store schema {"forwarded_ids": [...], "quota_exhausted_until": int | None, "last_email_timestamp": int | None}.
+- D-04: Store schema {"forwarded_ids": [...], "quota_exhausted_until": int | None, "last_email_timestamp": int | None, "last_imap_uid": int | None}.
 - D-05: Quota exhausted -> Gmail polls continue, POST step skipped.
 - D-06: quota_exhausted_until = err.reset_at OR next_midnight_utc().
 """
@@ -152,7 +152,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         MUST be called before async_config_entry_first_refresh().  Failing to do so
         leaves _forwarded_ids empty, causing every previously forwarded shipment to be
-        re-POSTed on startup (RESEARCH.md Pitfall 1).
+        re-POSTed on startup.
 
         async_setup_entry in __init__.py is the canonical caller; do not call this
         method from any other site without careful thought about sequencing.
@@ -334,6 +334,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # current_data or max_email_date here would cause the message to be skipped
             # by the after_timestamp filter and never forwarded (FWRD-02 violation).
             if quota_blocked:
+                _LOGGER.debug("Skipping forward of %s — quota exhausted", msg_id)
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -528,6 +529,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             shipment = result.shipment
 
             if quota_blocked:
+                _LOGGER.debug("Skipping forward of IMAP UID %s — quota exhausted", uid_str)
                 any_quota_blocked = True
                 continue
 
@@ -603,7 +605,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     async def async_cleanup_delivered(self, now: datetime) -> None:
         """Remove delivered shipments from coordinator.data and the entity registry.
 
-        Phase 5 D-08/D-09/D-11: scheduled hourly via async_track_time_interval
+        Phase 5 D-08/D-09/D-11: scheduled once daily via async_track_time_interval
         (24h period set in __init__.py). Match parcelapp deliveries to
         coordinator entries by tracking_number; status_code == 0 means
         Completed (parcelapp-api.md). Removal is immediate.
@@ -612,7 +614,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         signature even though we ignore it (RESEARCH.md Pitfall 2).
 
         Exceptions are caught + logged + return early — DO NOT raise
-        ConfigEntryAuthFailed or UpdateFailed from here (RESEARCH.md Pitfall 5):
+        ConfigEntryAuthFailed or UpdateFailed from here:
         those are only meaningful inside _async_update_data.
         """
         if not self.data:
@@ -631,14 +633,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             _LOGGER.warning("parcelapp transient error during cleanup: %s", err)
             return
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Unexpected error during cleanup: %s", err)
+            _LOGGER.error("Unexpected error during cleanup: %s", err)
             return
 
         # D-11: O(1) reverse lookup {tracking_number: message_id}
         tracking_to_msg_id = {
             shipment.tracking_number: msg_id for msg_id, shipment in self.data.items()
         }
-        # Use .get() — guard against missing 'status_code' (RESEARCH.md Security V5)
+        # Use .get() — guard against missing 'status_code' in delivery objects
         delivered_tracking = {
             d["tracking_number"]
             for d in deliveries
@@ -656,7 +658,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self.async_set_updated_data(new_data)
 
         # Explicit entity registry removal — HA does NOT auto-remove entities
-        # when their key disappears from coordinator.data (RESEARCH.md Pitfall 1).
+        # when their key disappears from coordinator.data.
         entity_registry = er.async_get(self.hass)
         entry_entities = entity_registry.entities.get_entries_for_config_entry_id(
             self.config_entry.entry_id
