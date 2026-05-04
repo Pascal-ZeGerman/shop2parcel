@@ -300,8 +300,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
             # Keyword hit accumulation (D-08): always — HTML strategy gives all-False.
             for key, hit in result.keyword_hits.items():
-                if hit:
-                    d.keyword_hits_per_key.setdefault(key, 0)
+                if hit and key in d.keyword_hits_per_key:
                     d.keyword_hits_per_key[key] += 1
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
@@ -484,8 +483,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     }
                 )
             for key, hit in result.keyword_hits.items():
-                if hit:
-                    d.keyword_hits_per_key.setdefault(key, 0)
+                if hit and key in d.keyword_hits_per_key:
                     d.keyword_hits_per_key[key] += 1
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
