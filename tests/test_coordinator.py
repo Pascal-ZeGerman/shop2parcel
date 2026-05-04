@@ -1242,3 +1242,130 @@ async def test_last_email_timestamp_advances_for_no_html_body(hass, mock_config_
     )
     # The message was not forwarded (no shipment extracted)
     assert "msg_no_html" not in coord._forwarded_ids
+
+
+# ---------------------------------------------------------------------------
+# I-05, I-06, I-07: Missing tests added by PR #2 review
+# ---------------------------------------------------------------------------
+
+
+async def test_parcelapp_auth_error_mid_loop_raises_config_entry_auth_failed(
+    hass, mock_config_entry
+):
+    """I-05: ParcelAppAuthError mid-loop must propagate as ConfigEntryAuthFailed.
+
+    Exercises the path where async_add_delivery raises ParcelAppAuthError after
+    some messages may have already been processed — the coordinator must raise
+    ConfigEntryAuthFailed to trigger HA reauth, not swallow the error.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body",
+            return_value="<html/>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=[{"id": "msg1"}]
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            _make_shipment("msg1")
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAuthError("api key revoked")
+        )
+        coord = Shop2ParcelCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coord._async_update_data()
+
+
+async def test_oauth2_token_refresh_failure_raises_config_entry_auth_failed(
+    hass, mock_config_entry
+):
+    """I-06: async_ensure_token_valid raising must translate to ConfigEntryAuthFailed.
+
+    Every other coordinator test mocks async_ensure_token_valid as a no-op.
+    This test exercises the branch at coordinator.py that catches the exception
+    and re-raises as ConfigEntryAuthFailed.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(
+            side_effect=Exception("token refresh network error")
+        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = Shop2ParcelCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(ConfigEntryAuthFailed, match="token refresh"):
+            await coord._async_update_data()
+
+
+async def test_imap_no_html_body_does_not_advance_uid(hass, mock_imap_config_entry):
+    """I-07: IMAP path — extract_html_body_imap returning None must NOT advance
+    _last_imap_uid and must record no_html_body in diagnostics.
+
+    Unlike the Gmail path, the IMAP path does not have a timestamp to advance;
+    UID advancement only happens AFTER the loop when the whole batch is processed.
+    The key requirement is that no_html_body messages are skipped and the
+    diagnostics skip_reasons list is updated correctly.
+    """
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msg = _make_imap_raw_message(200)
+
+    with (
+        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body_imap",
+            return_value=None,  # triggers no_html_body skip
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
+            return_value=([raw_msg], 200)
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = Shop2ParcelCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    # UID 200 has no HTML body — it was skipped at the html check, before parse.
+    # _last_imap_uid must advance to 200 (the batch completed; no transient/quota block).
+    assert coord._last_imap_uid == 200, (
+        "I-07: _last_imap_uid must advance after a no_html_body batch "
+        "so the UID is not re-fetched on the next poll"
+    )
+    # No shipment was forwarded
+    assert "200" not in coord._forwarded_ids
+    # Diagnostics must record the skip reason
+    assert coord._diagnostics.emails_scanned_total == 1
+    assert {"message_id": "200", "reason": "no_html_body"} in (
+        coord._diagnostics.last_poll_skip_reasons
+    )
+    # No delivery attempt
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
