@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import sys
 import time
+from functools import partial
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -37,14 +38,20 @@ class _MockHttpError(Exception):
 
 _mock_errors.HttpError = _MockHttpError
 
-# Patch sys.modules before importing gmail_client
+# Patch sys.modules before importing gmail_client.
+# Use direct assignment (not setdefault) for googleapiclient.errors so that
+# _MockHttpError is always the HttpError class used in gmail_client.py —
+# even when conftest.py has already registered a stub HttpError for coordinator
+# test isolation. Direct assignment re-registers the module and the already-imported
+# gmail_client module will have HttpError patched at the namespace level below.
 sys.modules.setdefault("googleapiclient", _mock_googleapiclient)
 sys.modules.setdefault("googleapiclient.discovery", _mock_discovery)
-sys.modules.setdefault("googleapiclient.errors", _mock_errors)
+sys.modules["googleapiclient.errors"] = _mock_errors  # direct assignment — see comment above
 sys.modules.setdefault("google", MagicMock())
 sys.modules.setdefault("google.oauth2", _mock_google_oauth2)
 sys.modules.setdefault("google.oauth2.credentials", _mock_credentials_module)
 
+import custom_components.shop2parcel.api.gmail_client as _gmail_client_module  # noqa: E402
 from custom_components.shop2parcel.api.exceptions import (  # noqa: E402
     GmailAuthError,
     GmailTransientError,
@@ -54,6 +61,10 @@ from custom_components.shop2parcel.api.gmail_client import (  # noqa: E402
     build_incremental_query,
     extract_html_body,
 )
+
+# Re-bind HttpError in gmail_client's module namespace so that isinstance() checks
+# in _classify_gmail_error use _MockHttpError (not whatever conftest registered).
+_gmail_client_module.HttpError = _MockHttpError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -94,8 +105,13 @@ class _CapturingExecutor:
     """Async executor that runs callables inline and records calls.
 
     Call sequence from gmail_client:
-      1st call: partial(build, "gmail", "v1", credentials=creds) → returns service mock
-      2nd call: request.execute (bound method of request) → returns execute_return dict
+      build call:  partial(build, "gmail", "v1", credentials=creds) → returns service mock
+      execute call: request.execute (bound method of request) → returns execute_return dict
+
+    Distinguishes the two call types by checking isinstance(func, partial) — the
+    gmail_client always wraps build() in functools.partial, while request.execute is
+    a plain bound method. This avoids the fragile parity-based (call_count % 2)
+    approach which breaks if the production code adds or removes executor calls.
     """
 
     def __init__(self, service=None, execute_return=None, raise_on_execute=None):
@@ -103,18 +119,14 @@ class _CapturingExecutor:
         self.execute_return = execute_return
         self.raise_on_execute = raise_on_execute
         self.calls: list[Any] = []
-        self._call_count = 0
 
     async def __call__(self, func, *args):
         self.calls.append((func, args))
-        self._call_count += 1
-        if self._call_count % 2 == 1:
-            # Odd calls: build() partial → return service mock
-            if self.service is not None:
-                return self.service
-            return MagicMock()
+        if isinstance(func, partial):
+            # build() call — return service mock
+            return self.service if self.service is not None else MagicMock()
         else:
-            # Even calls: request.execute → return result or raise
+            # request.execute call — return result or raise
             if self.raise_on_execute:
                 raise self.raise_on_execute
             return self.execute_return if self.execute_return is not None else {}

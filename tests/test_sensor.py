@@ -11,11 +11,11 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.const import DOMAIN
+from tests.conftest import setup_coordinator_with_data as _setup_with_data
 
 
 def _make_shipment(message_id: str, tracking: str, order: str = "#1234") -> ShipmentData:
@@ -26,29 +26,6 @@ def _make_shipment(message_id: str, tracking: str, order: str = "#1234") -> Ship
         message_id=message_id,
         email_date=1745452800,
     )
-
-
-async def _setup_with_data(hass, mock_config_entry, data: dict[str, ShipmentData]):
-    """Set up the coordinator with a pre-seeded data dict and forward to platforms."""
-    mock_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
-    ):
-        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
-        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        # Make _async_update_data return the seeded data
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
-        await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
-        coordinator.async_set_updated_data(data)
-        await hass.async_block_till_done()
-        return coordinator
 
 
 async def test_sensor_created_for_each_shipment(hass, mock_config_entry):

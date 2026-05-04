@@ -1,7 +1,9 @@
 """Tests for Shop2Parcel config flow — covers CONF-01 through CONF-07.
 
-HA and Google libraries are mocked at sys.modules level so tests run without
-a real Home Assistant installation or google-api-python-client installed.
+Google API libraries are mocked at sys.modules level to prevent real API calls.
+These tests require pytest-homeassistant-custom-component; real HA modules are
+loaded by the pytest plugin before collection and the sys.modules.setdefault calls
+for homeassistant.* are no-ops.
 
 Threat mitigation T-03-03-01/02: api_key and access_token values in tests are
 always fake literals — never real credentials.
@@ -48,7 +50,6 @@ class _FakeAbstractOAuth2FlowHandler:
 
     DOMAIN = ""
     hass: Any = None
-    source: str = "user"
 
     def __init_subclass__(cls, domain: str = "", **kwargs: Any) -> None:
         """Accept domain keyword argument required by AbstractOAuth2FlowHandler."""
@@ -57,6 +58,12 @@ class _FakeAbstractOAuth2FlowHandler:
     def __init__(self) -> None:
         self._data: dict = {}
         self._title: str = ""
+        self.context: dict = {"source": "user"}  # instance attribute
+
+    @property
+    def source(self) -> str:
+        """Mirror real HA FlowHandler.source property."""
+        return self.context.get("source", "user")
 
     def async_show_form(self, *, step_id, data_schema=None, errors=None):
         return {
@@ -69,10 +76,21 @@ class _FakeAbstractOAuth2FlowHandler:
     def async_create_entry(self, *, title, data):
         return {"type": "create_entry", "title": title, "data": data}
 
-    def async_update_reload_and_abort(self, entry, *, data):
+    def async_update_reload_and_abort(self, entry, *, data=None, data_updates=None):
         return {"type": "abort", "reason": "reauth_successful"}
 
-    def _abort_if_unique_id_configured(self):
+    def async_abort(self, *, reason):
+        return {"type": "abort", "reason": reason}
+
+    def _abort_if_unique_id_configured(
+        self,
+        updates=None,
+        reload_on_update=True,
+        *,
+        error="already_configured",
+        description_placeholders=None,
+    ):
+        """No-op stub — mirrors the real HA method signature."""
         pass
 
     def _abort_if_unique_id_mismatch(self, reason=None):
@@ -105,6 +123,8 @@ sys.modules.setdefault("googleapiclient", _mock_googleapiclient)
 sys.modules.setdefault("googleapiclient.discovery", _mock_discovery)
 
 from custom_components.shop2parcel.api.exceptions import (  # noqa: E402
+    ImapAuthError,
+    ImapTransientError,
     ParcelAppAuthError,
     ParcelAppTransientError,
 )
@@ -277,15 +297,29 @@ async def test_reauth_confirm_none_input_shows_form():
     assert result["type"] == "form"
 
 
-async def test_reauth_confirm_with_input_calls_async_step_user():
-    """async_step_reauth_confirm with user_input={} → delegates to async_step_user."""
+async def test_reauth_confirm_with_input_goes_to_oauth2_not_picker():
+    """async_step_reauth_confirm with user_input={} → calls super().async_step_user, not picker.
+
+    WR-01: reauth must bypass the connection type picker by delegating to the base
+    class OAuth2 method, not the overridden picker form.
+
+    Patch the base class async_step_user at the real import path (works in both
+    isolated test_config_flow.py runs and pytest-ha runs where real HA is loaded).
+    """
+    from custom_components.shop2parcel.config_flow import OAuth2FlowHandler
+
+    # Find the actual base class in the real MRO (second entry after OAuth2FlowHandler itself)
+    base_cls = OAuth2FlowHandler.__mro__[1]
     handler = _make_handler()
-    handler.async_step_user = AsyncMock(return_value={"type": "form", "step_id": "user"})
+    with patch.object(
+        base_cls,
+        "async_step_user",
+        new=AsyncMock(return_value={"type": "external", "step_id": "auth"}),
+    ) as mock_super_user:
+        result = await handler.async_step_reauth_confirm(user_input={})
 
-    result = await handler.async_step_reauth_confirm(user_input={})
-
-    handler.async_step_user.assert_called_once()
-    assert result["step_id"] == "user"
+    mock_super_user.assert_called_once()
+    assert result.get("step_id") != "user", "Must NOT show the connection type picker during reauth"
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +356,7 @@ async def test_reauth_oauth_create_entry_calls_update_reload_and_abort():
     # Reauth entry was looked up and used
     handler._get_reauth_entry.assert_called_once()
     handler.async_update_reload_and_abort.assert_called_once_with(
-        fake_reauth_entry, data=FAKE_TOKEN_DATA
+        fake_reauth_entry, data_updates=FAKE_TOKEN_DATA
     )
     # Result is the abort dict (does NOT proceed to async_step_finish)
     assert result == {"type": "abort", "reason": "reauth_successful"}
@@ -360,3 +394,230 @@ def test_handler_defines_async_step_reauth():
 def test_handler_defines_async_step_reauth_confirm():
     """async_step_reauth_confirm must be defined in OAuth2FlowHandler."""
     assert "async_step_reauth_confirm" in OAuth2FlowHandler.__dict__
+
+
+# ---------------------------------------------------------------------------
+# IMAP config flow stubs — D-01, D-02, D-03, D-04
+# All xfail until Plan 09-03 implements the IMAP flow steps.
+# ---------------------------------------------------------------------------
+
+
+async def test_async_step_user_shows_picker():
+    """D-01: async_step_user with None input returns a form with step_id='user'."""
+    handler = _make_handler()
+    result = await handler.async_step_user(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "user"
+
+
+async def test_async_step_user_routes_imap_to_async_step_imap():
+    """D-01: async_step_user with connection_type='imap' delegates to async_step_imap."""
+    handler = _make_handler()
+    handler.async_step_imap = AsyncMock(return_value={"type": "form", "step_id": "imap"})
+    result = await handler.async_step_user(user_input={"connection_type": "imap"})
+    handler.async_step_imap.assert_called_once()
+    assert result["step_id"] == "imap"
+
+
+async def test_async_step_imap_returns_form():
+    """D-02: async_step_imap with None input returns a form with step_id='imap'."""
+    handler = _make_handler()
+    result = await handler.async_step_imap(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "imap"
+
+
+async def test_async_step_imap_on_success_stores_credentials_in_data():
+    """D-02/D-03: Successful async_step_imap stores credentials in entry.data (not options).
+
+    Credentials (host, port, username, password, tls_mode) must be in handler._data
+    so they land in entry.data (encrypted) rather than entry.options.
+    """
+    handler = _make_handler()
+    handler.async_set_unique_id = AsyncMock()
+    handler.async_step_finish = AsyncMock(
+        return_value={
+            "type": "create_entry",
+            "title": "Shop2Parcel (user@imap.example.com)",
+            "data": {},
+        }
+    )
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=([], None))
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "app-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    # Credentials must be in handler._data (goes to entry.data, not entry.options)
+    assert handler._data.get("imap_host") == "imap.example.com"
+    assert handler._data.get("imap_username") == "user@example.com"
+    assert handler._data.get("imap_password") == "app-password"
+    assert "connection_type" in handler._data
+    assert handler._data["connection_type"] == "imap"
+
+
+async def test_async_step_imap_sets_unique_id_to_username_at_host():
+    """D-03: async_step_imap sets unique_id to 'username@host' after successful connection."""
+    handler = _make_handler()
+    handler.async_set_unique_id = AsyncMock()
+    handler.async_step_finish = AsyncMock(return_value={"type": "create_entry"})
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=([], None))
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "app-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    handler.async_set_unique_id.assert_awaited_once_with("user@example.com@imap.example.com")
+
+
+async def test_async_step_reauth_routes_imap_entry_to_reauth_imap():
+    """D-04: async_step_reauth routes IMAP entries to async_step_reauth_imap."""
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {"connection_type": "imap"}
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+    handler.async_step_reauth_imap = AsyncMock(
+        return_value={"type": "form", "step_id": "reauth_imap"}
+    )
+
+    result = await handler.async_step_reauth(entry_data=fake_entry.data)
+
+    handler.async_step_reauth_imap.assert_called_once()
+    assert result["step_id"] == "reauth_imap"
+
+
+# ---------------------------------------------------------------------------
+# Gap closure regression tests — 09-05-PLAN.md
+# ---------------------------------------------------------------------------
+
+
+async def test_reauth_imap_form_uses_step_id_reauth_imap():
+    """CR-01 regression: async_step_reauth_imap must use step_id='reauth_imap'.
+
+    HA data_entry_flow dispatches the next form submission to
+    async_step_{step_id}. The method is named async_step_reauth_imap,
+    so step_id MUST be 'reauth_imap' — not 'reauth_confirm_imap'.
+    This test fails if the bug is re-introduced.
+    """
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+
+    # Call with None input — handler should return the form (no user_input provided)
+    result = await handler.async_step_reauth_imap(user_input=None)
+
+    assert result["type"] == "form", f"Expected form result but got: {result['type']}"
+    assert result["step_id"] == "reauth_imap", (
+        f"step_id MUST be 'reauth_imap' (got '{result['step_id']}'). "
+        "HA dispatches the next submission to async_step_{step_id} — "
+        "'reauth_confirm_imap' has no matching handler method (CR-01)."
+    )
+
+
+async def test_reauth_imap_step_id_not_reauth_confirm_imap():
+    """CR-01 regression (negative): step_id must NOT be 'reauth_confirm_imap'.
+
+    Confirms the exact bug from CR-01 cannot regress: if step_id were
+    'reauth_confirm_imap', HA would call async_step_reauth_confirm_imap
+    on the next submission — a method that does not exist.
+    """
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+
+    result = await handler.async_step_reauth_imap(user_input=None)
+
+    assert result.get("step_id") != "reauth_confirm_imap", (
+        "step_id='reauth_confirm_imap' is the CR-01 bug — no handler method exists for that step_id."
+    )
+
+
+# ---------------------------------------------------------------------------
+# IN-03: IMAP error path tests — ImapAuthError and ImapTransientError
+# ---------------------------------------------------------------------------
+
+
+async def test_async_step_imap_auth_error_shows_invalid_auth():
+    """IN-03: ImapAuthError in async_step_imap → errors["base"] == "invalid_auth"."""
+    handler = _make_handler()
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(side_effect=ImapAuthError("bad credentials"))
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        result = await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "wrong-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "invalid_auth"
+
+
+async def test_async_step_imap_transient_error_shows_cannot_connect():
+    """IN-03: ImapTransientError in async_step_imap → errors["base"] == "imap_cannot_connect"."""
+    handler = _make_handler()
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(
+        side_effect=ImapTransientError("connection timeout")
+    )
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        result = await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.unreachable.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "imap_cannot_connect"

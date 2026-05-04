@@ -41,3 +41,11 @@ class ParcelAppInvalidTrackingError(Exception):
     Coordinator logs and skips. Does NOT count as a forwarding success.
     NOTE: Still consumes one of the 20/day quota slots — minimize these.
     """
+
+
+class ImapAuthError(Exception):
+    """IMAP login failure (bad credentials, account locked) — coordinator raises ConfigEntryAuthFailed."""
+
+
+class ImapTransientError(Exception):
+    """IMAP connection failure, timeout, socket error — coordinator raises UpdateFailed."""

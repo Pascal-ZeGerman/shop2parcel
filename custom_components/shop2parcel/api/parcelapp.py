@@ -63,7 +63,12 @@ class ParcelAppClient:
             "send_push_confirmation": False,
         }
         try:
-            async with self._session.post(ADD_DELIVERY_URL, headers=headers, json=body) as resp:
+            async with self._session.post(
+                ADD_DELIVERY_URL,
+                headers=headers,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
                 if resp.status in (401, 403):
                     raise ParcelAppAuthError(f"Auth failed: HTTP {resp.status}")
                 if resp.status == 429:
@@ -71,24 +76,31 @@ class ParcelAppClient:
                     try:
                         data = await resp.json(content_type=None)
                         reset_at = data.get("reset_at")
-                    except (ValueError, aiohttp.ContentTypeError):
-                        # Non-JSON or wrong content-type body — reset_at stays None.
-                        pass
+                    except ValueError:
+                        pass  # Non-JSON body — reset_at stays None.
+                    except aiohttp.ContentTypeError:
+                        pass  # Wrong content-type body — reset_at stays None.
                     raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
                 if resp.status == 400:
                     try:
                         data = await resp.json(content_type=None)
                         msg = data.get("error_message", "Bad request")
-                    except (ValueError, aiohttp.ContentTypeError):
-                        # Non-JSON body; do not swallow unexpected exceptions such as
-                        # ServerDisconnectedError which would mis-classify a transient
-                        # network failure as a permanent bad-tracking error.
+                    except ValueError:
+                        msg = "Bad request (non-JSON body)"
+                    except aiohttp.ContentTypeError:
                         msg = "Bad request (non-JSON body)"
                     raise ParcelAppInvalidTrackingError(msg)
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
+                if 400 <= resp.status < 500:
+                    raise ParcelAppTransientError(f"Unexpected client error: HTTP {resp.status}")
                 resp.raise_for_status()
-        except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as err:
+        except (
+            TimeoutError,
+            aiohttp.ClientConnectionError,
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ServerTimeoutError,
+        ) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
 
     async def async_get_deliveries(self, filter_mode: str = "recent") -> list[dict]:
@@ -105,13 +117,23 @@ class ParcelAppClient:
                 VIEW_DELIVERIES_URL,
                 headers=headers,
                 params={"filter_mode": filter_mode},
+                timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status in (401, 403):
                     raise ParcelAppAuthError(f"Auth failed: HTTP {resp.status}")
+                if resp.status == 429:
+                    raise ParcelAppTransientError("View-deliveries rate limit (20/hr) exceeded")
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
+                if 400 <= resp.status < 500:
+                    raise ParcelAppTransientError(f"Unexpected client error: HTTP {resp.status}")
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 return data.get("deliveries", [])
-        except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as err:
+        except (
+            TimeoutError,
+            aiohttp.ClientConnectionError,
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ServerTimeoutError,
+        ) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err

@@ -2,7 +2,8 @@
 
 Verifies async_setup_entry instantiates Shop2ParcelCoordinator, hydrates Store
 before first refresh, and that hass.data[DOMAIN][entry_id] holds a dict with
-"coordinator" and "cancel_cleanup" keys (Phase 5 dict shape).
+"coordinator" key (Phase 5 dict shape). cancel_cleanup is registered via
+entry.async_on_unload rather than stored in hass.data (WR-03 fix).
 """
 
 from __future__ import annotations
@@ -18,7 +19,11 @@ from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
 
 
 async def test_setup_entry_wires_coordinator(hass, mock_config_entry):
-    """Phase 5 setup stores dict with coordinator + cancel_cleanup in hass.data."""
+    """Phase 5 setup stores dict with coordinator in hass.data.
+
+    cancel_cleanup is registered via entry.async_on_unload (WR-03) and is
+    therefore NOT stored in hass.data — HA calls it automatically on unload.
+    """
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
@@ -39,8 +44,8 @@ async def test_setup_entry_wires_coordinator(hass, mock_config_entry):
     entry_data = hass.data[DOMAIN][mock_config_entry.entry_id]
     assert isinstance(entry_data, dict)
     assert isinstance(entry_data["coordinator"], Shop2ParcelCoordinator)
-    assert "cancel_cleanup" in entry_data
-    assert callable(entry_data["cancel_cleanup"])
+    # cancel_cleanup is registered via entry.async_on_unload, not stored in hass.data
+    assert "cancel_cleanup" not in entry_data
 
 
 async def test_setup_entry_calls_load_store_before_first_refresh(hass, mock_config_entry):
