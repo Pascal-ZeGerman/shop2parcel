@@ -76,18 +76,18 @@ class ParcelAppClient:
                     try:
                         data = await resp.json(content_type=None)
                         reset_at = data.get("reset_at")
-                    except (ValueError, aiohttp.ContentTypeError):
-                        # Non-JSON or wrong content-type body — reset_at stays None.
-                        pass
+                    except ValueError:
+                        pass  # Non-JSON body — reset_at stays None.
+                    except aiohttp.ContentTypeError:
+                        pass  # Wrong content-type body — reset_at stays None.
                     raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
                 if resp.status == 400:
                     try:
                         data = await resp.json(content_type=None)
                         msg = data.get("error_message", "Bad request")
-                    except (ValueError, aiohttp.ContentTypeError):
-                        # Non-JSON body; do not swallow unexpected exceptions such as
-                        # ServerDisconnectedError which would mis-classify a transient
-                        # network failure as a permanent bad-tracking error.
+                    except ValueError:
+                        msg = "Bad request (non-JSON body)"
+                    except aiohttp.ContentTypeError:
                         msg = "Bad request (non-JSON body)"
                     raise ParcelAppInvalidTrackingError(msg)
                 if resp.status >= 500:

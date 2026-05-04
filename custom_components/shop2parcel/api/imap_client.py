@@ -55,7 +55,9 @@ class ImapClient:
                 search_criteria,
                 since_uid,
             )
-        except (ImapAuthError, ImapTransientError):
+        except ImapAuthError:
+            raise  # already classified — do not re-wrap
+        except ImapTransientError:
             raise  # already classified — do not re-wrap
         except Exception as err:
             _classify_imap_error(err)
@@ -133,7 +135,9 @@ class ImapClient:
                     max_uid = uid_int
 
             return results, max_uid
-        except (ImapAuthError, ImapTransientError):
+        except ImapAuthError:
+            raise  # already classified — re-raise without double-wrapping
+        except ImapTransientError:
             raise  # already classified — re-raise without double-wrapping
         except Exception as err:
             _classify_imap_error(err)
@@ -185,7 +189,9 @@ def extract_html_body_imap(raw_bytes: bytes) -> str | None:
                     charset = part.get_content_charset() or "utf-8"
                     try:
                         return payload.decode(charset, errors="replace")
-                    except (LookupError, TypeError):
+                    except LookupError:
+                        return payload.decode("utf-8", errors="replace")
+                    except TypeError:
                         return payload.decode("utf-8", errors="replace")
     else:
         if msg.get_content_type() == "text/html":
@@ -194,6 +200,8 @@ def extract_html_body_imap(raw_bytes: bytes) -> str | None:
                 charset = msg.get_content_charset() or "utf-8"
                 try:
                     return payload.decode(charset, errors="replace")
-                except (LookupError, TypeError):
+                except LookupError:
+                    return payload.decode("utf-8", errors="replace")
+                except TypeError:
                     return payload.decode("utf-8", errors="replace")
     return None

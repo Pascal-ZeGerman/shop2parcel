@@ -17,9 +17,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import cast
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
+from typing import cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -258,7 +258,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # _last_email_timestamp indefinitely (WR-02 fix).
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
-            except (ValueError, TypeError):
+            except ValueError:
+                _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+            except TypeError:
                 _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
