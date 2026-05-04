@@ -347,3 +347,11 @@ def test_regex_fallback_extracts_carrier_shipped_via() -> None:
     result = parser.parse(html, "msg_carrier", 0)
     assert result.shipment is not None
     assert result.shipment.carrier_name == "UPS"
+
+
+def test_usps_91xxx_tracking_recognized() -> None:
+    """WR-05: USPS Priority Mail Express 91xxx (22-digit IMpb) is recognized by _looks_like_tracking."""
+    from custom_components.shop2parcel.api.email_parser import _looks_like_tracking
+
+    # 91 prefix + 20 digits = 22 digits total (standard USPS Priority Mail Express)
+    assert _looks_like_tracking("9102901000857730777669") is True
