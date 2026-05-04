@@ -241,6 +241,28 @@ def test_imap4_ssl_constructor_failure_does_not_leak_socket():
     # If we get here without AttributeError on NoneType.logout(), the guard works.
 
 
+def test_fetch_with_since_uid_uses_uid_range():
+    """WR-01: since_uid non-None path sends UID range '(since_uid+1):* {criteria}' to SEARCH."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com", 993, "user@example.com", "password",
+            "ssl", 'SUBJECT "shipped"', since_uid=99,
+        )
+
+    search_call = mock_conn.uid.call_args_list[0]
+    uid_arg = search_call[0][1]
+    assert uid_arg.startswith("100:"), f"Expected UID range '100:*...', got: {uid_arg!r}"
+
+
 def test_select_non_ok_raises_imap_transient_error():
     """WR-03 regression: conn.select() returning non-OK status must raise ImapTransientError.
 
