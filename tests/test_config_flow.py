@@ -82,7 +82,15 @@ class _FakeAbstractOAuth2FlowHandler:
     def async_abort(self, *, reason):
         return {"type": "abort", "reason": reason}
 
-    def _abort_if_unique_id_configured(self):
+    def _abort_if_unique_id_configured(
+        self,
+        updates=None,
+        reload_on_update=True,
+        *,
+        error="already_configured",
+        description_placeholders=None,
+    ):
+        """No-op stub — mirrors the real HA method signature."""
         pass
 
     def _abort_if_unique_id_mismatch(self, reason=None):
