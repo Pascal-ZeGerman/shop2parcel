@@ -21,7 +21,9 @@ from custom_components.shop2parcel.api.email_parser import (
 )
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
-FIXTURE_PATH = FIXTURE_DIR / "shopify_shipping_email.html"  # backward compat for existing tests/fixtures
+FIXTURE_PATH = (
+    FIXTURE_DIR / "shopify_shipping_email.html"
+)  # backward compat for existing tests/fixtures
 
 
 @pytest.fixture
@@ -170,9 +172,7 @@ def test_html_strategy_success_strategy_used(shopify_html: str) -> None:
 def test_regex_fallback_success_strategy_used() -> None:
     """DIAG-03: Regex fallback success -> strategy_used='regex_fallback', skip_reason=None,
     tracking_regex and order_regex hits are True."""
-    html = (
-        "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>"
-    )
+    html = "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>"
     parser = EmailParser()
     result = parser.parse(html, "msg2", 0)
     assert result.shipment is not None
@@ -262,24 +262,28 @@ def test_fedex_template_extracts_tracking(fedex_html: str) -> None:
 def test_ups_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> None:
     """PARSE-09 / T-Spoof mitigation: _detect_ups must NOT fire on Shopify fixture (contains ups.com link but also 'shopify')."""
     from custom_components.shop2parcel.api.email_parser import _detect_ups
+
     assert _detect_ups(shopify_html) is False
 
 
 def test_usps_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> None:
     """PARSE-09 / T-Spoof mitigation: _detect_usps must NOT fire on the Shopify fixture (no usps.com present)."""
     from custom_components.shop2parcel.api.email_parser import _detect_usps
+
     assert _detect_usps(shopify_html) is False
 
 
 def test_fedex_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> None:
     """PARSE-09 / T-Spoof mitigation: _detect_fedex must NOT fire on the Shopify fixture (no fedex.com present)."""
     from custom_components.shop2parcel.api.email_parser import _detect_fedex
+
     assert _detect_fedex(shopify_html) is False
 
 
 def test_usps_detect_fn_not_triggered_on_shopify_usps_merchant_email() -> None:
     """_detect_usps must NOT fire on a Shopify merchant email that includes a USPS tracking URL."""
     from custom_components.shop2parcel.api.email_parser import _detect_usps
+
     html = (
         "<html><body>"
         "<p>Your order #1234 has shipped. shopify.com</p>"
@@ -292,6 +296,7 @@ def test_usps_detect_fn_not_triggered_on_shopify_usps_merchant_email() -> None:
 def test_fedex_detect_fn_not_triggered_on_shopify_fedex_merchant_email() -> None:
     """_detect_fedex must NOT fire on a Shopify merchant email that includes a FedEx tracking URL."""
     from custom_components.shop2parcel.api.email_parser import _detect_fedex
+
     html = (
         "<html><body>"
         "<p>Your order #5678 has shipped. shopify.com</p>"

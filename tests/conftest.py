@@ -32,8 +32,10 @@ sys.modules.setdefault("googleapiclient.discovery", _GOOGLE_MOCK)
 # When test_coordinator.py runs alone, the class below is used — coordinator tests
 # mock GmailClient entirely so HttpError is never exercised in those tests.
 
+
 class _StubHttpError(Exception):
     """Stub HttpError for coordinator-test isolation — not used in isinstance() path."""
+
     def __init__(self, resp=None, content=b""):
         self.resp = resp
         self.content = content
@@ -54,9 +56,7 @@ from custom_components.shop2parcel.const import DOMAIN
 # NOTE: `hass` fixture is provided automatically by pytest-homeassistant-custom-component
 
 
-async def setup_coordinator_with_data(
-    hass, mock_config_entry, data: dict[str, ShipmentData]
-):
+async def setup_coordinator_with_data(hass, mock_config_entry, data: dict[str, ShipmentData]):
     """Shared helper: set up the coordinator with pre-seeded data and forward to platforms.
 
     Patches all coordinator dependencies (GmailClient, ParcelAppClient, EmailParser,

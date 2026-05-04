@@ -3,6 +3,7 @@
 All tests are xfail until api/imap_client.py is implemented (Plan 09-02).
 imaplib is Python stdlib — no sys.modules patching required.
 """
+
 from __future__ import annotations
 
 import imaplib
@@ -14,6 +15,7 @@ import pytest
 # Inline executor helper (mirrors test_gmail_client.py pattern)
 # ---------------------------------------------------------------------------
 
+
 async def _inline_executor(func, *args):
     """Run sync function inline for testing (replaces hass.async_add_executor_job)."""
     return func(*args)
@@ -23,15 +25,18 @@ async def _inline_executor(func, *args):
 # Stub: ImapClient class existence and constructor signature
 # ---------------------------------------------------------------------------
 
+
 def test_imap_client_is_importable():
     """D-06: ImapClient must be importable from api/imap_client.py."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
     assert ImapClient is not None
 
 
 def test_imap_client_constructor_accepts_executor():
     """D-05: ImapClient.__init__ accepts a single Callable (executor injection)."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
     client = ImapClient(async_add_executor_job=_inline_executor)
     assert hasattr(client, "_executor")
 
@@ -39,6 +44,7 @@ def test_imap_client_constructor_accepts_executor():
 # ---------------------------------------------------------------------------
 # Stub: D-09 read-only contract — STORE/EXPUNGE/COPY/MOVE never called
 # ---------------------------------------------------------------------------
+
 
 def test_imap_client_never_calls_mutating_commands():
     """D-09: ImapClient MUST NEVER call store(), expunge(), copy() or uid(MOVE/STORE/EXPUNGE/COPY).
@@ -58,8 +64,13 @@ def test_imap_client_never_calls_mutating_commands():
         client = ImapClient(_inline_executor)
         # Call _fetch_sync directly (synchronous path) with ssl mode
         client._fetch_sync(
-            "imap.example.com", 993, "user@example.com", "password",
-            "ssl", 'SUBJECT "shipped"', None
+            "imap.example.com",
+            993,
+            "user@example.com",
+            "password",
+            "ssl",
+            'SUBJECT "shipped"',
+            None,
         )
 
     mock_conn.store.assert_not_called()
@@ -74,6 +85,7 @@ def test_imap_client_never_calls_mutating_commands():
 # ---------------------------------------------------------------------------
 # Stub: D-06 — fetch_shipping_emails return shape
 # ---------------------------------------------------------------------------
+
 
 async def test_fetch_shipping_emails_returns_tuple():
     """D-06: fetch_shipping_emails returns (list[dict], int|None) tuple."""
@@ -108,6 +120,7 @@ async def test_fetch_shipping_emails_returns_tuple():
 # Stub: D-08 — EXAMINE (select readonly=True) is called, not SELECT
 # ---------------------------------------------------------------------------
 
+
 def test_imap_client_uses_examine_not_select():
     """D-08/D-09: select() must be called with readonly=True (issues EXAMINE command)."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
@@ -121,8 +134,13 @@ def test_imap_client_uses_examine_not_select():
     with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
         client = ImapClient(_inline_executor)
         client._fetch_sync(
-            "imap.example.com", 993, "user@example.com", "password",
-            "ssl", 'SUBJECT "shipped"', None
+            "imap.example.com",
+            993,
+            "user@example.com",
+            "password",
+            "ssl",
+            'SUBJECT "shipped"',
+            None,
         )
 
     # imaplib.IMAP4.select(mailbox, readonly=True) issues EXAMINE at protocol level
@@ -139,6 +157,7 @@ def test_imap_client_uses_examine_not_select():
 # Stub: D-05 — auth error raises ImapAuthError
 # ---------------------------------------------------------------------------
 
+
 def test_imap_login_failure_raises_imap_auth_error():
     """D-04/D-05: Login failures must raise ImapAuthError (coordinator maps to ConfigEntryAuthFailed)."""
     from custom_components.shop2parcel.api.exceptions import ImapAuthError  # noqa: PLC0415
@@ -152,14 +171,20 @@ def test_imap_login_failure_raises_imap_auth_error():
         client = ImapClient(_inline_executor)
         with pytest.raises(ImapAuthError):
             client._fetch_sync(
-                "imap.example.com", 993, "user@example.com", "wrong-password",
-                "ssl", 'SUBJECT "shipped"', None
+                "imap.example.com",
+                993,
+                "user@example.com",
+                "wrong-password",
+                "ssl",
+                'SUBJECT "shipped"',
+                None,
             )
 
 
 # ---------------------------------------------------------------------------
 # Stub: extract_html_body_imap function
 # ---------------------------------------------------------------------------
+
 
 def test_extract_html_body_imap_extracts_html():
     """D-06: extract_html_body_imap(raw_bytes) returns HTML string from RFC822 bytes."""
@@ -212,8 +237,13 @@ def test_starttls_failure_does_not_leak_socket():
             # Any exception escaping _fetch_sync is acceptable;
             # the key requirement is that logout() was called despite starttls() failing.
             client._fetch_sync(
-                "imap.example.com", 143, "user@example.com", "password",
-                "starttls", 'SUBJECT "shipped"', None
+                "imap.example.com",
+                143,
+                "user@example.com",
+                "password",
+                "starttls",
+                'SUBJECT "shipped"',
+                None,
             )
 
     mock_conn.logout.assert_called_once()
@@ -233,8 +263,13 @@ def test_imap4_ssl_constructor_failure_does_not_leak_socket():
         client = ImapClient(_inline_executor)
         with pytest.raises(Exception):
             client._fetch_sync(
-                "imap.example.com", 993, "user@example.com", "password",
-                "ssl", 'SUBJECT "shipped"', None
+                "imap.example.com",
+                993,
+                "user@example.com",
+                "password",
+                "ssl",
+                'SUBJECT "shipped"',
+                None,
             )
     # If we get here without AttributeError on NoneType.logout(), the guard works.
 
@@ -252,8 +287,13 @@ def test_fetch_with_since_uid_uses_uid_range():
     with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
         client = ImapClient(_inline_executor)
         client._fetch_sync(
-            "imap.example.com", 993, "user@example.com", "password",
-            "ssl", 'SUBJECT "shipped"', since_uid=99,
+            "imap.example.com",
+            993,
+            "user@example.com",
+            "password",
+            "ssl",
+            'SUBJECT "shipped"',
+            since_uid=99,
         )
 
     search_call = mock_conn.uid.call_args_list[0]
@@ -280,6 +320,11 @@ def test_select_non_ok_raises_imap_transient_error():
         client = ImapClient(_inline_executor)
         with pytest.raises(ImapTransientError, match="Failed to select INBOX"):
             client._fetch_sync(
-                "imap.example.com", 993, "user@example.com", "password",
-                "ssl", 'SUBJECT "shipped"', None
+                "imap.example.com",
+                993,
+                "user@example.com",
+                "password",
+                "ssl",
+                'SUBJECT "shipped"',
+                None,
             )

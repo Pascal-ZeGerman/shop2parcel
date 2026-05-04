@@ -64,7 +64,9 @@ class ParcelAppClient:
         }
         try:
             async with self._session.post(
-                ADD_DELIVERY_URL, headers=headers, json=body,
+                ADD_DELIVERY_URL,
+                headers=headers,
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status in (401, 403):
@@ -74,7 +76,7 @@ class ParcelAppClient:
                     try:
                         data = await resp.json(content_type=None)
                         reset_at = data.get("reset_at")
-                    except (ValueError, aiohttp.ContentTypeError):
+                    except ValueError, aiohttp.ContentTypeError:
                         # Non-JSON or wrong content-type body — reset_at stays None.
                         pass
                     raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
@@ -82,7 +84,7 @@ class ParcelAppClient:
                     try:
                         data = await resp.json(content_type=None)
                         msg = data.get("error_message", "Bad request")
-                    except (ValueError, aiohttp.ContentTypeError):
+                    except ValueError, aiohttp.ContentTypeError:
                         # Non-JSON body; do not swallow unexpected exceptions such as
                         # ServerDisconnectedError which would mis-classify a transient
                         # network failure as a permanent bad-tracking error.
@@ -91,9 +93,7 @@ class ParcelAppClient:
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 if 400 <= resp.status < 500:
-                    raise ParcelAppTransientError(
-                        f"Unexpected client error: HTTP {resp.status}"
-                    )
+                    raise ParcelAppTransientError(f"Unexpected client error: HTTP {resp.status}")
                 resp.raise_for_status()
         except (
             TimeoutError,
@@ -126,9 +126,7 @@ class ParcelAppClient:
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 if 400 <= resp.status < 500:
-                    raise ParcelAppTransientError(
-                        f"Unexpected client error: HTTP {resp.status}"
-                    )
+                    raise ParcelAppTransientError(f"Unexpected client error: HTTP {resp.status}")
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 return data.get("deliveries", [])

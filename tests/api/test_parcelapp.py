@@ -202,6 +202,7 @@ async def test_add_delivery_api_key_not_in_url(client):
         mock.post(ADD_DELIVERY_URL, payload={"success": True}, status=200)
         await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
         import yarl
+
         # aioresponses keyed requests by (method, yarl.URL); verify no captured
         # URL contains the api-key value (guards against future query-param leak).
         for (method, url), _calls in mock.requests.items():

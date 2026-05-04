@@ -111,9 +111,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
 
         return OptionsFlowHandler()
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show connection type picker; route to Gmail OAuth2 or IMAP.
 
         D-01: Override inherited async_step_user to inject connection type selection.
@@ -141,9 +139,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             ),
         )
 
-    async def async_step_imap(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_imap(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Collect IMAP credentials and validate connection.
 
         D-02: Collects host, port, username, password, tls_mode in one form.
@@ -203,9 +199,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                     vol.Required(CONF_IMAP_PORT, default=993): int,
                     vol.Required(CONF_IMAP_USERNAME): str,
                     vol.Required(CONF_IMAP_PASSWORD): str,
-                    vol.Required(CONF_IMAP_TLS, default="ssl"): vol.In(
-                        ["ssl", "starttls", "none"]
-                    ),
+                    vol.Required(CONF_IMAP_TLS, default="ssl"): vol.In(["ssl", "starttls", "none"]),
                 }
             ),
             errors=errors,
@@ -324,7 +318,9 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
         if user_input is not None:
             host = user_input.get(CONF_IMAP_HOST, reauth_entry.data.get(CONF_IMAP_HOST, ""))
             port = user_input.get(CONF_IMAP_PORT, reauth_entry.data.get(CONF_IMAP_PORT, 993))
-            username = user_input.get(CONF_IMAP_USERNAME, reauth_entry.data.get(CONF_IMAP_USERNAME, ""))
+            username = user_input.get(
+                CONF_IMAP_USERNAME, reauth_entry.data.get(CONF_IMAP_USERNAME, "")
+            )
             password = user_input[CONF_IMAP_PASSWORD]
             tls_mode = user_input.get(CONF_IMAP_TLS, reauth_entry.data.get(CONF_IMAP_TLS, "ssl"))
 

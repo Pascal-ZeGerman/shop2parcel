@@ -6,6 +6,7 @@ unique ID namespaces, no data leakage between entries.
 
 All tests are xfail until coordinator IMAP dispatch is implemented (Plan 09-04).
 """
+
 from __future__ import annotations
 
 from custom_components.shop2parcel.const import DOMAIN
@@ -13,6 +14,7 @@ from custom_components.shop2parcel.const import DOMAIN
 # ---------------------------------------------------------------------------
 # Stub: MULT-01 — two entries coexist in same HA instance
 # ---------------------------------------------------------------------------
+
 
 async def test_two_entries_can_be_added_to_hass(hass, mock_config_entry, mock_imap_config_entry):
     """MULT-01: Gmail and IMAP entries can both be added to hass without conflict."""
@@ -27,12 +29,14 @@ async def test_two_entries_can_be_added_to_hass(hass, mock_config_entry, mock_im
 # Stub: D-10 — each entry gets its own coordinator with its own Store key
 # ---------------------------------------------------------------------------
 
+
 async def test_two_imap_entries_have_separate_store_keys(hass, mock_imap_config_entry):
     """D-10: Each config entry creates a coordinator with Store key scoped to entry_id."""
     # Create a second IMAP entry with a different account
     from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: PLC0415
 
     from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
+
     entry_b = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -64,6 +68,7 @@ async def test_two_imap_entries_have_separate_store_keys(hass, mock_imap_config_
 # Stub: MULT-02 — entities from different accounts are under separate devices
 # ---------------------------------------------------------------------------
 
+
 async def test_imap_coordinator_instantiates_imap_client(hass, mock_imap_config_entry):
     """D-10: Coordinator with connection_type='imap' must instantiate ImapClient, not GmailClient."""
     from custom_components.shop2parcel.api.gmail_client import GmailClient  # noqa: PLC0415
@@ -82,6 +87,7 @@ async def test_imap_coordinator_instantiates_imap_client(hass, mock_imap_config_
 # ---------------------------------------------------------------------------
 # Stub: D-11 — entity unique IDs do not collide between two entries
 # ---------------------------------------------------------------------------
+
 
 async def test_two_entries_produce_non_colliding_entity_unique_ids(
     hass, mock_config_entry, mock_imap_config_entry

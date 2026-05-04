@@ -435,7 +435,13 @@ async def test_async_step_imap_on_success_stores_credentials_in_data():
     """
     handler = _make_handler()
     handler.async_set_unique_id = AsyncMock()
-    handler.async_step_finish = AsyncMock(return_value={"type": "create_entry", "title": "Shop2Parcel (user@imap.example.com)", "data": {}})
+    handler.async_step_finish = AsyncMock(
+        return_value={
+            "type": "create_entry",
+            "title": "Shop2Parcel (user@imap.example.com)",
+            "data": {},
+        }
+    )
 
     mock_imap_client = AsyncMock()
     mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=([], None))
@@ -531,9 +537,7 @@ async def test_reauth_imap_form_uses_step_id_reauth_imap():
     # Call with None input — handler should return the form (no user_input provided)
     result = await handler.async_step_reauth_imap(user_input=None)
 
-    assert result["type"] == "form", (
-        f"Expected form result but got: {result['type']}"
-    )
+    assert result["type"] == "form", f"Expected form result but got: {result['type']}"
     assert result["step_id"] == "reauth_imap", (
         f"step_id MUST be 'reauth_imap' (got '{result['step_id']}'). "
         "HA dispatches the next submission to async_step_{step_id} — "
@@ -575,9 +579,7 @@ async def test_async_step_imap_auth_error_shows_invalid_auth():
     """IN-03: ImapAuthError in async_step_imap → errors["base"] == "invalid_auth"."""
     handler = _make_handler()
     mock_imap_client = AsyncMock()
-    mock_imap_client.fetch_shipping_emails = AsyncMock(
-        side_effect=ImapAuthError("bad credentials")
-    )
+    mock_imap_client.fetch_shipping_emails = AsyncMock(side_effect=ImapAuthError("bad credentials"))
     with patch(
         "custom_components.shop2parcel.config_flow.ImapClient",
         return_value=mock_imap_client,

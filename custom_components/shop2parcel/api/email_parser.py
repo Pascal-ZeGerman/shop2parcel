@@ -48,19 +48,19 @@ class ParseResult:
     """
 
     shipment: ShipmentData | None
-    skip_reason: str | None          # "no_template_match" | "no_regex_match" | None
-    strategy_used: str | None        # "html_template" | "regex_fallback" | None
-    keyword_hits: dict[str, bool]    # keys always: tracking_regex, order_regex, carrier_regex
+    skip_reason: str | None  # "no_template_match" | "no_regex_match" | None
+    strategy_used: str | None  # "html_template" | "regex_fallback" | None
+    keyword_hits: dict[str, bool]  # keys always: tracking_regex, order_regex, carrier_regex
 
 
 # Known tracking number format patterns (EMAIL-04).
 # Patterns are bounded quantifiers — no ReDoS risk (ASVS V5).
 _TRACKING_PATTERNS = [
-    re.compile(r"^1Z[A-Z0-9]{16}$"),          # UPS: 1Z999AA10123456784
-    re.compile(r"^9[12345][0-9]{15,24}$"),      # USPS domestic: IMpb 91-95 (91=Priority Mail Express)
-    re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"), # USPS international
-    re.compile(r"^[0-9]{12,20}$"),             # FedEx (Phase 8: extended for SmartPost up to 20 digits)
-    re.compile(r"^[0-9]{10,11}$"),             # DHL (assumed)
+    re.compile(r"^1Z[A-Z0-9]{16}$"),  # UPS: 1Z999AA10123456784
+    re.compile(r"^9[12345][0-9]{15,24}$"),  # USPS domestic: IMpb 91-95 (91=Priority Mail Express)
+    re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"),  # USPS international
+    re.compile(r"^[0-9]{12,20}$"),  # FedEx (Phase 8: extended for SmartPost up to 20 digits)
+    re.compile(r"^[0-9]{10,11}$"),  # DHL (assumed)
 ]
 
 
@@ -271,9 +271,7 @@ class EmailParser:
         # supersedes the HTML strategy's all-False placeholder.
         return self._parse_regex_fallback(html, message_id, email_date)
 
-    def _parse_html_template(
-        self, html: str, message_id: str, email_date: int
-    ) -> ParseResult:
+    def _parse_html_template(self, html: str, message_id: str, email_date: int) -> ParseResult:
         """Strategy 1: BeautifulSoup on <p> text patterns.
 
         Shopify standard template embeds tracking info as prose in <p> elements.
@@ -312,7 +310,11 @@ class EmailParser:
                 ),
                 skip_reason=None,
                 strategy_used=STRATEGY_HTML,
-                keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+                keyword_hits={
+                    "tracking_regex": False,
+                    "order_regex": False,
+                    "carrier_regex": False,
+                },
             )
         return ParseResult(
             shipment=None,
@@ -321,9 +323,7 @@ class EmailParser:
             keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
         )
 
-    def _parse_regex_fallback(
-        self, html: str, message_id: str, email_date: int
-    ) -> ParseResult:
+    def _parse_regex_fallback(self, html: str, message_id: str, email_date: int) -> ParseResult:
         """Strategy 2: strip HTML, apply keyword regex to plain text.
 
         Handles custom merchant templates and non-Shopify shipping emails.
@@ -348,7 +348,7 @@ class EmailParser:
             "carrier_regex": carrier is not None,
         }
         if tracking and order:
-            raw_tracking = tracking.group(1).upper()   # normalize case
+            raw_tracking = tracking.group(1).upper()  # normalize case
             if not _looks_like_tracking(raw_tracking):
                 return ParseResult(
                     shipment=None,
@@ -364,7 +364,8 @@ class EmailParser:
                             (g for g in (carrier.group(1), carrier.group(2)) if g),
                             "Unknown",
                         ).strip()
-                        if carrier else "Unknown"
+                        if carrier
+                        else "Unknown"
                     ),
                     order_name=f"#{order.group(1)}",
                     message_id=message_id,

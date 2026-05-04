@@ -94,7 +94,7 @@ def extract_html_body(payload: dict) -> str | None:
     """
     mime_type = payload.get("mimeType", "")
     if mime_type == "text/html":
-        body = payload.get("body") or {}          # guards body=None
+        body = payload.get("body") or {}  # guards body=None
         data = body.get("data", "")
         if data:
             try:

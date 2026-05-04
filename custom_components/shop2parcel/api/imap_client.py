@@ -55,7 +55,7 @@ class ImapClient:
                 search_criteria,
                 since_uid,
             )
-        except (ImapAuthError, ImapTransientError):
+        except ImapAuthError, ImapTransientError:
             raise  # already classified — do not re-wrap
         except Exception as err:
             _classify_imap_error(err)
@@ -88,7 +88,9 @@ class ImapClient:
 
             conn.login(username, password)
 
-            ok, _ = conn.select("INBOX", readonly=True)  # Issues EXAMINE — read-only at protocol level
+            ok, _ = conn.select(
+                "INBOX", readonly=True
+            )  # Issues EXAMINE — read-only at protocol level
             if ok != "OK":
                 raise ImapTransientError(f"Failed to select INBOX: {ok}")
 
@@ -116,19 +118,22 @@ class ImapClient:
                     _LOGGER.warning(
                         "IMAP FETCH failed for UID %s (server returned typ=%r); "
                         "message cannot be retried after this poll cycle",
-                        uid_str, typ,
+                        uid_str,
+                        typ,
                     )
                     continue
                 raw_bytes = msg_data[0][1]
                 if not isinstance(raw_bytes, bytes):
-                    _LOGGER.warning("IMAP FETCH returned non-bytes body for UID %s; skipping", uid_str)
+                    _LOGGER.warning(
+                        "IMAP FETCH returned non-bytes body for UID %s; skipping", uid_str
+                    )
                     continue  # Skip malformed FETCH tuple — body must be bytes
                 results.append({"uid": uid_int, "raw": raw_bytes})
                 if max_uid is None or uid_int > max_uid:
                     max_uid = uid_int
 
             return results, max_uid
-        except (ImapAuthError, ImapTransientError):
+        except ImapAuthError, ImapTransientError:
             raise  # already classified — re-raise without double-wrapping
         except Exception as err:
             _classify_imap_error(err)
@@ -180,7 +185,7 @@ def extract_html_body_imap(raw_bytes: bytes) -> str | None:
                     charset = part.get_content_charset() or "utf-8"
                     try:
                         return payload.decode(charset, errors="replace")
-                    except (LookupError, TypeError):
+                    except LookupError, TypeError:
                         return payload.decode("utf-8", errors="replace")
     else:
         if msg.get_content_type() == "text/html":
@@ -189,6 +194,6 @@ def extract_html_body_imap(raw_bytes: bytes) -> str | None:
                 charset = msg.get_content_charset() or "utf-8"
                 try:
                     return payload.decode(charset, errors="replace")
-                except (LookupError, TypeError):
+                except LookupError, TypeError:
                     return payload.decode("utf-8", errors="replace")
     return None

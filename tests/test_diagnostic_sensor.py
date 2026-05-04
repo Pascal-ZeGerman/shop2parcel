@@ -50,9 +50,7 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.coordinator.config_entry_oauth2_flow"
-        ) as mock_oauth,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
             return_value="<html>body</html>" if with_message else "",
@@ -63,20 +61,14 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
             "access_token": "fake-access-token",
             "expires_at": 9999999999.0,
         }
-        mock_oauth.async_get_config_entry_implementation = AsyncMock(
-            return_value=MagicMock()
-        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=gmail_messages
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=gmail_messages)
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
-            _make_shipment("msg1")
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
@@ -112,11 +104,7 @@ async def test_all_four_diagnostic_sensors_registered(hass, mock_config_entry):
         "tracking_numbers_found",
         "keyword_hits",
     }
-    found = {
-        e.unique_id.removeprefix(prefix)
-        for e in entries
-        if e.unique_id.startswith(prefix)
-    }
+    found = {e.unique_id.removeprefix(prefix) for e in entries if e.unique_id.startswith(prefix)}
     missing = expected_suffixes - found
     assert not missing, f"missing diagnostic sensors: {missing}"
 

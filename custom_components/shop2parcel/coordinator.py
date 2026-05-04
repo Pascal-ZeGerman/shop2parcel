@@ -256,11 +256,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # _last_email_timestamp indefinitely (WR-02 fix).
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
-                d.last_poll_skip_reasons.append({"message_id": msg_id, "reason": "invalid_internal_date"})
+                d.last_poll_skip_reasons.append(
+                    {"message_id": msg_id, "reason": "invalid_internal_date"}
+                )
                 continue
 
             html = extract_html_body(msg.get("payload", {}))
@@ -269,9 +271,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # never sees this case because we don't call parser.parse on empty HTML.
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
-                d.last_poll_skip_reasons.append(
-                    {"message_id": msg_id, "reason": "no_html_body"}
-                )
+                d.last_poll_skip_reasons.append({"message_id": msg_id, "reason": "no_html_body"})
                 # Advance max_email_date so this un-parseable message does not block
                 # _last_email_timestamp and cause infinite re-fetching on future polls.
                 if email_date > max_email_date:
@@ -284,13 +284,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             except Exception as parse_err:  # noqa: BLE001
                 _LOGGER.error(
                     "Email parser raised an unexpected error for message %s: %s",
-                    msg_id, parse_err,
+                    msg_id,
+                    parse_err,
                 )
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
-                d.last_poll_skip_reasons.append(
-                    {"message_id": msg_id, "reason": "parse_exception"}
-                )
+                d.last_poll_skip_reasons.append({"message_id": msg_id, "reason": "parse_exception"})
                 if email_date > max_email_date:
                     max_email_date = email_date
                 continue
@@ -368,7 +367,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(
                     "Invalid tracking for message %s (permanent 400 — suppressing retries): %s",
-                    msg_id, err,
+                    msg_id,
+                    err,
                 )
                 # Add to forwarded_ids to prevent infinite retry loop draining quota.
                 # The tracking data is invalid; re-POSTing will always fail with 400.
@@ -480,9 +480,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 _LOGGER.debug("IMAP UID %s: no HTML body found, skipping", uid_str)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
-                d.last_poll_skip_reasons.append(
-                    {"message_id": uid_str, "reason": "no_html_body"}
-                )
+                d.last_poll_skip_reasons.append({"message_id": uid_str, "reason": "no_html_body"})
                 continue
 
             # Assign a synthetic email_date (0 = unknown — IMAP does not guarantee internalDate).
@@ -493,7 +491,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             except Exception as parse_err:  # noqa: BLE001
                 _LOGGER.error(
                     "Email parser raised an unexpected error for IMAP UID %s: %s",
-                    uid_str, parse_err,
+                    uid_str,
+                    parse_err,
                 )
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
@@ -557,7 +556,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(
                     "Invalid tracking for IMAP UID %s (permanent 400 — suppressing retries): %s",
-                    uid_str, err,
+                    uid_str,
+                    err,
                 )
                 # Add to forwarded_ids to prevent infinite retry draining quota.
                 self._forwarded_ids.add(uid_str)
@@ -582,8 +582,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # SEARCH on the next poll re-includes those messages — mirrors the Gmail
         # path which does not advance max_email_date when quota_blocked (line 310).
         store_dirty = any_forwarded
-        if not any_quota_blocked and not any_transient_error and max_uid is not None and (
-            self._last_imap_uid is None or max_uid > self._last_imap_uid
+        if (
+            not any_quota_blocked
+            and not any_transient_error
+            and max_uid is not None
+            and (self._last_imap_uid is None or max_uid > self._last_imap_uid)
         ):
             self._last_imap_uid = max_uid
             store_dirty = True  # UID advanced — persist even if no shipments forwarded this cycle

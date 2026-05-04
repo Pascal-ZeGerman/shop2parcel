@@ -211,7 +211,9 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock()
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("sentinel_msg"))
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            _make_shipment("sentinel_msg")
+        )
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         # Load store first — this is the contract
         await coord._async_load_store()
@@ -408,7 +410,9 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("new_msg"))
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            _make_shipment("new_msg")
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
@@ -459,7 +463,9 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg_recover"))
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            _make_shipment("msg_recover")
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
@@ -811,9 +817,7 @@ async def test_diagnostics_emails_scanned_increments(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.coordinator.config_entry_oauth2_flow"
-        ) as mock_oauth,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
             return_value="<html>body</html>",
@@ -824,20 +828,14 @@ async def test_diagnostics_emails_scanned_increments(hass, mock_config_entry):
             "access_token": "fake-access-token",
             "expires_at": 9999999999.0,
         }
-        mock_oauth.async_get_config_entry_implementation = AsyncMock(
-            return_value=MagicMock()
-        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "msg1"}]
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
-            _make_shipment("msg1")
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
@@ -859,9 +857,7 @@ async def test_diagnostics_last_poll_fields_reset_per_cycle(hass, mock_config_en
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.coordinator.config_entry_oauth2_flow"
-        ) as mock_oauth,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
             return_value="<html>body</html>",
@@ -872,9 +868,7 @@ async def test_diagnostics_last_poll_fields_reset_per_cycle(hass, mock_config_en
             "access_token": "fake-access-token",
             "expires_at": 9999999999.0,
         }
-        mock_oauth.async_get_config_entry_implementation = AsyncMock(
-            return_value=MagicMock()
-        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
@@ -915,9 +909,7 @@ async def test_diagnostics_no_html_body_skip_reason(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.coordinator.config_entry_oauth2_flow"
-        ) as mock_oauth,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
             return_value="",  # empty body triggers no_html_body
@@ -928,14 +920,10 @@ async def test_diagnostics_no_html_body_skip_reason(hass, mock_config_entry):
             "access_token": "fake-access-token",
             "expires_at": 9999999999.0,
         }
-        mock_oauth.async_get_config_entry_implementation = AsyncMock(
-            return_value=MagicMock()
-        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "msg1"}]
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -945,10 +933,10 @@ async def test_diagnostics_no_html_body_skip_reason(hass, mock_config_entry):
         await coord._async_update_data()
         assert coord._diagnostics.emails_scanned_total == 1
         assert coord._diagnostics.last_poll_emails_scanned == 1
-        assert (
-            {"message_id": "msg1", "reason": "no_html_body"}
-            in coord._diagnostics.last_poll_skip_reasons
-        )
+        assert {
+            "message_id": "msg1",
+            "reason": "no_html_body",
+        } in coord._diagnostics.last_poll_skip_reasons
         # Parser was NOT invoked because html was empty
         mock_parser_cls.return_value.parse.assert_not_called()
         # _last_email_timestamp must advance even for no_html_body skips (WR-02 fix)
@@ -964,26 +952,20 @@ async def test_diagnostics_already_forwarded_not_scanned(hass, mock_config_entry
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.coordinator.config_entry_oauth2_flow"
-        ) as mock_oauth,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
             "expires_at": 9999999999.0,
         }
-        mock_oauth.async_get_config_entry_implementation = AsyncMock(
-            return_value=MagicMock()
-        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         # Pre-load forwarded_ids with msg1 — coordinator must skip it.
         mock_store_cls.return_value.async_load = AsyncMock(
             return_value={"forwarded_ids": ["msg1"], "quota_exhausted_until": None}
         )
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "msg1"}]
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
         mock_gmail_cls.return_value.async_get_message = AsyncMock()
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
@@ -1006,11 +988,10 @@ async def test_diagnostics_already_forwarded_not_scanned(hass, mock_config_entry
 async def test_coordinator_uses_gmail_client_for_gmail_entry(hass, mock_config_entry):
     """Phase 9 D-10: Gmail entry (no connection_type or 'gmail') instantiates GmailClient."""
     from custom_components.shop2parcel.api.gmail_client import GmailClient  # noqa: PLC0415
+
     mock_config_entry.add_to_hass(hass)
     coordinator = Shop2ParcelCoordinator(hass, mock_config_entry)
-    assert isinstance(coordinator._email_client, GmailClient), (
-        "Gmail entry must create GmailClient"
-    )
+    assert isinstance(coordinator._email_client, GmailClient), "Gmail entry must create GmailClient"
 
 
 # ---------------------------------------------------------------------------
@@ -1022,6 +1003,7 @@ def _make_imap_raw_message(uid: int, html: str = "<html><body>shipped</body></ht
     """Build a minimal raw IMAP message dict as returned by ImapClient."""
     import email as email_lib  # noqa: PLC0415
     from email.mime.text import MIMEText  # noqa: PLC0415
+
     msg = MIMEText(html, "html")
     return {"uid": uid, "raw": msg.as_bytes()}
 
@@ -1044,9 +1026,7 @@ async def test_imap_basic_poll_cycle(hass, mock_imap_config_entry):
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
-            return_value=([raw_msg], 100)
-        )
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([raw_msg], 100))
         mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
@@ -1074,12 +1054,15 @@ async def test_imap_uid_dedup_skips_seen(hass, mock_imap_config_entry):
         ),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(
-            return_value={"forwarded_ids": ["101"], "quota_exhausted_until": None, "last_email_timestamp": None, "last_imap_uid": None}
+            return_value={
+                "forwarded_ids": ["101"],
+                "quota_exhausted_until": None,
+                "last_email_timestamp": None,
+                "last_imap_uid": None,
+            }
         )
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
-            return_value=([raw_msg], 101)
-        )
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([raw_msg], 101))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = Shop2ParcelCoordinator(hass, mock_imap_config_entry)
@@ -1164,9 +1147,7 @@ async def test_imap_quota_blocked_does_not_advance_last_uid(hass, mock_imap_conf
             }
         )
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
-            return_value=(raw_msgs, 101)
-        )
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=(raw_msgs, 101))
         mock_parser_cls.return_value.parse.side_effect = [
             _make_parse_result(shipment_100),
             _make_parse_result(shipment_101),
@@ -1278,15 +1259,11 @@ async def test_parcelapp_auth_error_mid_loop_raises_config_entry_auth_failed(
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "msg1"}]
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
-            _make_shipment("msg1")
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
             side_effect=ParcelAppAuthError("api key revoked")
         )
@@ -1345,9 +1322,7 @@ async def test_imap_no_html_body_does_not_advance_uid(hass, mock_imap_config_ent
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
-            return_value=([raw_msg], 200)
-        )
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([raw_msg], 200))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = Shop2ParcelCoordinator(hass, mock_imap_config_entry)

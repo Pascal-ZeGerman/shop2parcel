@@ -132,6 +132,7 @@ async def test_options_flow_imap_shows_imap_search_field(hass, mock_imap_config_
         CONF_IMAP_SEARCH,
         DEFAULT_IMAP_SEARCH,
     )
+
     handler, fake_entry = _make_imap_handler_with_options(options={})
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
@@ -151,6 +152,7 @@ async def test_options_flow_imap_saves_imap_search(hass, mock_imap_config_entry)
         CONF_IMAP_SEARCH,
         CONF_POLL_INTERVAL,
     )
+
     handler, fake_entry = _make_imap_handler_with_options(options={})
     user_input = {CONF_POLL_INTERVAL: 60, CONF_IMAP_SEARCH: 'SUBJECT "tracking"'}
     with patch.object(
@@ -167,6 +169,7 @@ async def test_options_flow_gmail_still_shows_gmail_query(hass, mock_config_entr
         CONF_GMAIL_QUERY,
         CONF_IMAP_SEARCH,
     )
+
     # Gmail entry: connection_type="gmail" explicitly set in fake_entry.data
     handler, fake_entry = _make_handler_with_options(options={})
     with patch.object(
