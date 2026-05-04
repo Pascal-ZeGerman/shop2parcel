@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import email
 import imaplib
+import logging
 from collections.abc import Callable
 from typing import Any, NoReturn
 
 from .exceptions import ImapAuthError, ImapTransientError
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ImapClient:
@@ -104,9 +107,15 @@ class ImapClient:
                 uid_int = int(uid_str)
                 typ, msg_data = conn.uid("FETCH", uid_str, "(BODY.PEEK[])")
                 if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+                    _LOGGER.warning(
+                        "IMAP FETCH failed for UID %s (server returned typ=%r); "
+                        "message cannot be retried after this poll cycle",
+                        uid_str, typ,
+                    )
                     continue
                 raw_bytes = msg_data[0][1]
                 if not isinstance(raw_bytes, bytes):
+                    _LOGGER.warning("IMAP FETCH returned non-bytes body for UID %s; skipping", uid_str)
                     continue  # Skip malformed FETCH tuple — body must be bytes
                 results.append({"uid": uid_int, "raw": raw_bytes})
                 if max_uid is None or uid_int > max_uid:
