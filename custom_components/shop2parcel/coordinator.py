@@ -611,7 +611,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Completed (parcelapp-api.md). Removal is immediate.
 
         The 'now' parameter is required by async_track_time_interval's callback
-        signature even though we ignore it (RESEARCH.md Pitfall 2).
+        signature even though we ignore it (required by async_track_time_interval contract).
 
         Exceptions are caught + logged + return early — DO NOT raise
         ConfigEntryAuthFailed or UpdateFailed from here:
