@@ -210,7 +210,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.last_poll_skip_reasons = []
         d.last_poll_found = []
         d.last_poll_keyword_hits = 0
-        d.last_poll_time = None
+        d.last_poll_time = poll_start  # record attempt time even if poll fails mid-cycle
         d.last_poll_duration_ms = None
         d.last_poll_query = query
 
@@ -410,7 +410,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.last_poll_skip_reasons = []
         d.last_poll_found = []
         d.last_poll_keyword_hits = 0
-        d.last_poll_time = None
+        d.last_poll_time = poll_start  # record attempt time even if poll fails mid-cycle
         d.last_poll_duration_ms = None
         d.last_poll_query = query
 
