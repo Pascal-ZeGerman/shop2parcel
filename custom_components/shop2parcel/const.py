@@ -13,7 +13,8 @@ DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
 # User can override via Options flow at any time.
 DEFAULT_GMAIL_QUERY = (
     "(from:no-reply@shopify.com OR from:mcinfo@ups.com OR "
-    "from:inform@informeddelivery.usps.com OR from:TrackingUpdates@fedex.com) "
+    "from:inform@informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR "
+    "from:TrackingUpdates@fedex.com) "
     "subject:(shipped OR delivered OR tracking OR package)"
 )
 
