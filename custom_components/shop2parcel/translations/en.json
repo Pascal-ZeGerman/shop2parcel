@@ -83,6 +83,23 @@
       "missing_configuration": "Google OAuth2 credentials are not configured. Add them in Settings > Credentials."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Shop2Parcel Options",
+        "data": {
+          "poll_interval": "Poll Interval (minutes)",
+          "gmail_query": "Gmail Search Query",
+          "imap_search": "IMAP Search Criteria"
+        },
+        "data_description": {
+          "poll_interval": "How often to check for new shipping emails (5–1440 minutes).",
+          "gmail_query": "Gmail search query to find shipping emails.",
+          "imap_search": "IMAP SEARCH criteria (e.g. SUBJECT \"shipped\")."
+        }
+      }
+    }
+  },
   "issues": {
     "reauth_required": {
       "title": "Shop2Parcel: Gmail access expired",
