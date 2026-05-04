@@ -59,6 +59,10 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(
             return_value=MagicMock()
         )
