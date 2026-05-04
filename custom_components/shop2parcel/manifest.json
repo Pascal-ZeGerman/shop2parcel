@@ -1,7 +1,6 @@
 {
   "domain": "shop2parcel",
   "name": "Shop2Parcel",
-  "homeassistant": "2025.1.0",
   "codeowners": ["@Pascal-ZeGerman"],
   "config_flow": true,
   "dependencies": ["application_credentials"],
