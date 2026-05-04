@@ -55,6 +55,8 @@ class ImapClient:
                 search_criteria,
                 since_uid,
             )
+        except (ImapAuthError, ImapTransientError):
+            raise  # already classified — do not re-wrap
         except Exception as err:
             _classify_imap_error(err)
             raise  # unreachable, but prevents implicit None return

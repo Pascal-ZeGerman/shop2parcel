@@ -86,7 +86,10 @@ def extract_html_body(payload: dict) -> str | None:
         body = payload.get("body") or {}          # guards body=None
         data = body.get("data", "")
         if data:
-            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+            try:
+                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001 — binascii.Error or similar
+                return None
     for part in payload.get("parts", []):
         result = extract_html_body(part)
         if result:

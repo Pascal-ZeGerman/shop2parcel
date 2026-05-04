@@ -597,7 +597,12 @@ async def test_missing_access_token_raises_config_entry_auth_failed(hass, mock_c
 
 
 async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
-    """FWRD-05: ParcelAppInvalidTrackingError logged; message_id NOT added to forwarded_ids."""
+    """FWRD-05 / C-05: ParcelAppInvalidTrackingError is a permanent 400.
+
+    C-05 fix: message IS added to forwarded_ids to prevent infinite retry loop
+    draining the 20/day quota. Re-POSTing a 400 will always fail — suppressing
+    retries is the correct behavior.
+    """
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
@@ -630,12 +635,9 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         await coord._async_update_data()
-        # msg1 NOT in forwarded_ids — invalid tracking is not a forwarding success.
-        # This is the canonical assertion: forwarded_ids is the source of truth for
-        # whether a message will be re-POSTed.  Do not assert save_mock.assert_not_called()
-        # here — that would over-constrain the test and break if future coordinator logic
-        # saves for other events (e.g., updating last_email_timestamp in the store).
-        assert "msg1" not in coord._forwarded_ids
+        # C-05 fix: msg1 IS in forwarded_ids — permanent 400 suppresses retries to
+        # protect the 20/day quota from being drained by the same invalid message.
+        assert "msg1" in coord._forwarded_ids
 
 
 # -------- Phase 5 async_cleanup_delivered tests --------------------------

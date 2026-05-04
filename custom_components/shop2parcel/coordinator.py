@@ -279,7 +279,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
-            result: ParseResult = parser.parse(html, msg_id, email_date)
+            try:
+                result: ParseResult = parser.parse(html, msg_id, email_date)
+            except Exception as parse_err:  # noqa: BLE001
+                _LOGGER.error(
+                    "Email parser raised an unexpected error for message %s: %s",
+                    msg_id, parse_err,
+                )
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": msg_id, "reason": "parse_exception"}
+                )
+                if email_date > max_email_date:
+                    max_email_date = email_date
+                continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
             if result.shipment is None:
@@ -351,8 +365,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 quota_blocked = True
                 continue
             except ParcelAppInvalidTrackingError as err:
-                _LOGGER.error("Invalid tracking for message %s: %s", msg_id, err)
-                # NOT added to forwarded_ids per CONTEXT.md "Claude's Discretion".
+                _LOGGER.error(
+                    "Invalid tracking for message %s (permanent 400 — suppressing retries): %s",
+                    msg_id, err,
+                )
+                # Add to forwarded_ids to prevent infinite retry loop draining quota.
+                # The tracking data is invalid; re-POSTing will always fail with 400.
+                self._forwarded_ids.add(msg_id)
+                if email_date > max_email_date:
+                    max_email_date = email_date
+                any_forwarded = True  # triggers store save so suppression is persisted
                 continue
             except ParcelAppTransientError as err:
                 _LOGGER.warning("parcelapp.net transient error for %s: %s", msg_id, err)
@@ -443,6 +465,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         )
         any_forwarded = False
         any_quota_blocked = False
+        any_transient_error = False
 
         for msg_info in raw_messages:
             # IMAP uid used as message_id for deduplication (D-08).
@@ -464,7 +487,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # Assign a synthetic email_date (0 = unknown — IMAP does not guarantee internalDate).
             # Phase 9 does not track IMAP email timestamps in _last_email_timestamp (that is
             # a Gmail-specific pattern). IMAP uses UID-based dedup instead.
-            result: ParseResult = parser.parse(html, uid_str, 0)
+            try:
+                result: ParseResult = parser.parse(html, uid_str, 0)
+            except Exception as parse_err:  # noqa: BLE001
+                _LOGGER.error(
+                    "Email parser raised an unexpected error for IMAP UID %s: %s",
+                    uid_str, parse_err,
+                )
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": uid_str, "reason": "parse_exception"}
+                )
+                continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
             if result.shipment is None:
@@ -518,10 +553,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 any_quota_blocked = True
                 continue
             except ParcelAppInvalidTrackingError as err:
-                _LOGGER.error("Invalid tracking for UID %s: %s", uid_str, err)
+                _LOGGER.error(
+                    "Invalid tracking for IMAP UID %s (permanent 400 — suppressing retries): %s",
+                    uid_str, err,
+                )
+                # Add to forwarded_ids to prevent infinite retry draining quota.
+                self._forwarded_ids.add(uid_str)
+                any_forwarded = True  # triggers store save so suppression is persisted
                 continue
             except ParcelAppTransientError as err:
                 _LOGGER.warning("parcelapp.net transient error for UID %s: %s", uid_str, err)
+                any_transient_error = True
                 continue
 
             self._forwarded_ids.add(uid_str)
@@ -538,7 +580,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # SEARCH on the next poll re-includes those messages — mirrors the Gmail
         # path which does not advance max_email_date when quota_blocked (line 310).
         store_dirty = any_forwarded
-        if not any_quota_blocked and max_uid is not None and (
+        if not any_quota_blocked and not any_transient_error and max_uid is not None and (
             self._last_imap_uid is None or max_uid > self._last_imap_uid
         ):
             self._last_imap_uid = max_uid
