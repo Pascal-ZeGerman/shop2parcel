@@ -100,14 +100,15 @@ def _looks_like_tracking(s: str) -> bool:
 def _detect_ups(html: str) -> bool:
     """Return True if html is a UPS shipping notification email.
 
-    Primary marker: 'mcinfo@ups.com' (UPS My Choice transactional sender).
-    Fallback marker: 'ups.com' in html AND 'shopify' not in html — prevents
+    Marker: 'ups.com' in html AND 'shopify' not in html — prevents
     misclassifying Shopify merchant emails for UPS-fulfilled orders (Pitfall 1
     in RESEARCH.md). T-Spoof mitigation.
+
+    The 'mcinfo@ups.com' sender check was removed because extract_html_body()
+    returns only the MIME text/html part (never email headers), so the sender
+    address is never present in the html argument passed here.
     """
     html_lower = html.lower()
-    if "mcinfo@ups.com" in html_lower:
-        return True
     return "ups.com" in html_lower and "shopify" not in html_lower
 
 
