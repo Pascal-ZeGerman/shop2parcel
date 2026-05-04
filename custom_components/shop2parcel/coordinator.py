@@ -453,11 +453,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raw_bytes: bytes = msg_info["raw"]
             html = extract_html_body_imap(raw_bytes)
             if not html:
-                _LOGGER.debug(
-                    "IMAP UID %s: no HTML body found; message will not be retried "
-                    "(UID-based dedup — advancing past this UID on next poll)",
-                    uid_str,
-                )
+                _LOGGER.debug("IMAP UID %s: no HTML body found, skipping", uid_str)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
                 d.last_poll_skip_reasons.append(

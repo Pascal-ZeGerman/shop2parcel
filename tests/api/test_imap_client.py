@@ -215,10 +215,7 @@ def test_starttls_failure_does_not_leak_socket():
                 "starttls", 'SUBJECT "shipped"', None
             )
 
-    assert mock_conn.logout.call_count == 1, (
-        "conn.logout() must be called even when starttls() raises "
-        "(CR-02: connection setup was outside try block before fix)"
-    )
+    mock_conn.logout.assert_called_once()
 
 
 def test_imap4_ssl_constructor_failure_does_not_leak_socket():
@@ -242,7 +239,7 @@ def test_imap4_ssl_constructor_failure_does_not_leak_socket():
 
 
 def test_fetch_with_since_uid_uses_uid_range():
-    """WR-01: since_uid non-None path sends UID range '(since_uid+1):* {criteria}' to SEARCH."""
+    """since_uid non-None path sends UID range '(since_uid+1):*' prefix to SEARCH."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
 
     mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
