@@ -296,9 +296,9 @@ class EmailParser:
                 if m:
                     carrier_name = m.group(1).strip()
             if not tracking_number:
-                for candidate in re.findall(r"\b([A-Z0-9]{10,40})\b", text):
-                    if _looks_like_tracking(candidate):
-                        tracking_number = candidate
+                for candidate in re.findall(r"\b([A-Za-z0-9]{10,40})\b", text, re.IGNORECASE):
+                    if _looks_like_tracking(candidate.upper()):
+                        tracking_number = candidate.upper()
                         break
 
         if tracking_number and order_name:
