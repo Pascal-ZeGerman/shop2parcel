@@ -57,7 +57,9 @@ async def async_get_config_entry_diagnostics(
             "(integration may not be loaded or setup failed)",
             entry.entry_id,
         )
-        return {"error": "Coordinator not loaded — setup may have failed or entry is in re-auth state"}
+        return {
+            "error": "Coordinator not loaded — setup may have failed or entry is in re-auth state"
+        }
     coordinator = domain_data["coordinator"]
 
     # Build config section — credentials stripped via TO_REDACT.
