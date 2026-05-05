@@ -9,7 +9,6 @@ import pytest
 from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.const import DOMAIN
 from custom_components.shop2parcel.diagnostics import async_get_config_entry_diagnostics
-
 from tests.conftest import setup_coordinator_with_data
 
 
