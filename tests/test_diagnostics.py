@@ -34,12 +34,43 @@ async def test_diagnostics_output_shape(hass, mock_config_entry):
 
 @pytest.mark.asyncio
 async def test_diagnostics_config_redaction(hass, mock_config_entry):
-    """API key and OAuth token must not appear in the diagnostic output."""
+    """Gmail credentials must not appear anywhere in the diagnostic output."""
     await setup_coordinator_with_data(hass, mock_config_entry, {})
     result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
-    dumped = str(result)
-    assert "test-parcelapp-key" not in dumped
-    assert "fake-access-token" not in dumped
+    # Check against the fixture's actual credential values so the test stays correct
+    # if the fixture values change.
+    for secret in (
+        mock_config_entry.data.get("api_key", ""),
+        mock_config_entry.data.get("token", {}).get("access_token", ""),
+        mock_config_entry.data.get("token", {}).get("refresh_token", ""),
+    ):
+        assert secret not in str(result), f"Secret value leaked into diagnostics: {secret!r}"
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_imap_redaction(hass, mock_imap_config_entry):
+    """IMAP credentials (imap_password, api_key) must not appear in diagnostic output."""
+    mock_imap_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([], None))
+        await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
+        coordinator.async_set_updated_data({})
+        await hass.async_block_till_done()
+
+    result = await async_get_config_entry_diagnostics(hass, mock_imap_config_entry)
+    for secret in (
+        mock_imap_config_entry.data.get("imap_password", ""),
+        mock_imap_config_entry.data.get("api_key", ""),
+    ):
+        assert secret not in str(result), f"Secret value leaked into diagnostics: {secret!r}"
 
 
 @pytest.mark.asyncio
@@ -87,6 +118,15 @@ async def test_diagnostics_recent_shipments_capped(hass, mock_config_entry):
 async def test_diagnostics_recent_shipments_empty(hass, mock_config_entry):
     """When coordinator.data is empty, recent_shipments is an empty list."""
     await setup_coordinator_with_data(hass, mock_config_entry, {})
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    assert result["recent_shipments"] == []
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_none_coordinator_data(hass, mock_config_entry):
+    """coordinator.data=None (pre-first-poll state) returns empty recent_shipments without crashing."""
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
+    coordinator.data = None
     result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
     assert result["recent_shipments"] == []
 
