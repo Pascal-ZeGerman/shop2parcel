@@ -294,6 +294,15 @@ class EmailParser:
     EMAIL-03: HTML template strategy first, Tier 1 regex second, Tier 2 broad scan third.
     """
 
+    def __init__(self, enable_broad_scan: bool = False) -> None:
+        """Initialize parser with optional Tier 2 broad-scan gate (PR4-C2).
+
+        Tier 2 sweeps all alphanumeric tracking-shaped tokens with no keyword
+        anchor, so it produces false positives. Default OFF — opt-in via
+        config entry option CONF_ENABLE_BROAD_SCAN.
+        """
+        self._enable_broad_scan = enable_broad_scan
+
     def parse(self, html: str, message_id: str, email_date: int) -> ParseResult:
         """Parse email HTML. Returns ParseResult always — never None.
 
@@ -304,18 +313,31 @@ class EmailParser:
         shipment is None when all strategies fail; skip_reason indicates which
         stage failed (D-02).
         """
+        carrier_detected = False
         for detect_fn, parse_fn in CARRIER_REGISTRY:
             if detect_fn(html):
                 carrier_result = parse_fn(html, message_id, email_date)
                 if carrier_result.shipment is not None:
                     return carrier_result
-                break  # detected but extraction failed — fall through to tiered strategies
+                carrier_detected = True
+                break  # detected but extraction failed — fall through to Shopify HTML + Tier 1 only
         html_result = self._parse_html_template(html, message_id, email_date)
         if html_result.shipment is not None:
             return html_result
         tier1_result = self._parse_regex_tier1(html, message_id, email_date)
         if tier1_result.shipment is not None:
             return tier1_result
+        # PR4-I2: when a carrier was detected, do NOT fall through to Tier 2
+        # broad scan — the email is carrier-specific and broad scan would pick
+        # up order numbers, phone numbers, etc.
+        # PR4-C2: Tier 2 broad scan is opt-in (default OFF).
+        if carrier_detected or not self._enable_broad_scan:
+            return ParseResult(
+                shipment=None,
+                skip_reason="no_tracking_pattern",
+                strategy_used=None,
+                keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+            )
         return self._parse_regex_tier2(html, message_id, email_date)
 
     def _parse_html_template(self, html: str, message_id: str, email_date: int) -> ParseResult:

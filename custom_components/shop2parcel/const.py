@@ -37,3 +37,8 @@ DEFAULT_IMAP_SEARCH = (
 
 # Parcel API key (stored in config entry data, shared between config_flow and coordinator)
 CONF_API_KEY = "api_key"
+
+# PR4-C2: opt-in gate for Tier 2 broad-scan. OFF by default to prevent
+# false-positive forwards to ParcelApp consuming the 20/day quota.
+CONF_ENABLE_BROAD_SCAN = "enable_broad_scan"
+DEFAULT_ENABLE_BROAD_SCAN = False
