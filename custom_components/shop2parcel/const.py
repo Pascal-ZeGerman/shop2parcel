@@ -11,15 +11,29 @@ DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
 # because real UPS/USPS/FedEx subjects use 'out for delivery' / 'scheduled
 # for delivery' rather than 'shipped' (RESEARCH.md Gmail Query Update Research).
 # User can override via Options flow at any time.
+#
+# QF-01 fix: removed 'label:inbox' from the broad-fallback arm. Users who
+# auto-archive shipping mail (via Gmail filters) never had those messages in
+# the inbox, so 'label:inbox' silently excluded them. Removing the token
+# broadens recall to archived messages while '-label:spam' retains the spam
+# guard. This restores correct match coverage for auto-archiving users.
 DEFAULT_GMAIL_QUERY = (
     "(from:no-reply@shopify.com OR from:mcinfo@ups.com OR "
     "from:inform@informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR "
     "from:TrackingUpdates@fedex.com) "
     "subject:(shipped OR delivered OR tracking OR package)"
     " OR "
-    "label:inbox -label:spam "
+    "-label:spam "
     "subject:(tracking OR shipped OR shipment OR delivery OR parcel)"
 )
+
+# QF-02: Gmail-only rescan window option. Controls the minimum lookback period
+# used in build_incremental_query. Allows users to widen the after: filter
+# without wiping forwarded_ids (which would cause duplicate ParcelApp POSTs).
+CONF_RESCAN_WINDOW_DAYS = "rescan_window_days"  # int, days; Gmail-only
+DEFAULT_RESCAN_WINDOW_DAYS = 30
+MIN_RESCAN_WINDOW_DAYS = 7
+MAX_RESCAN_WINDOW_DAYS = 365
 
 # Phase 9: IMAP connection + multi-account constants
 CONF_CONNECTION_TYPE = "connection_type"  # str: "gmail" | "imap"
