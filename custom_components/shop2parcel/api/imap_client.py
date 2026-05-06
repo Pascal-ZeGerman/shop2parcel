@@ -187,7 +187,7 @@ def extract_text_body_imap(raw_bytes: bytes) -> str | None:
                     charset = part.get_content_charset() or "utf-8"
                     try:
                         return payload.decode(charset, errors="replace")
-                    except (LookupError, TypeError):
+                    except LookupError, TypeError:
                         return payload.decode("utf-8", errors="replace")
     else:
         if msg.get_content_type() == "text/plain":
@@ -196,7 +196,7 @@ def extract_text_body_imap(raw_bytes: bytes) -> str | None:
                 charset = msg.get_content_charset() or "utf-8"
                 try:
                     return payload.decode(charset, errors="replace")
-                except (LookupError, TypeError):
+                except LookupError, TypeError:
                     return payload.decode("utf-8", errors="replace")
     return None
 

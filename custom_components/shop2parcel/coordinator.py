@@ -301,7 +301,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # _last_email_timestamp indefinitely (WR-02 fix).
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 # PR4-C3: previously the ValueError branch was missing both
                 # `continue` and the skip_reason append, causing an
                 # UnboundLocalError when execution fell through to use

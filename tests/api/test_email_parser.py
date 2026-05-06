@@ -378,12 +378,7 @@ def test_p1_alphanumeric_order_id_not_silently_dropped() -> None:
 
 def test_html_template_alphanumeric_order_captured() -> None:
     """HTML template: alphanumeric order IDs like #SHOP-9999 are captured correctly."""
-    html = (
-        "<html><body>"
-        "<p>Order #SHOP-9999</p>"
-        "<p>1Z999AA10123456784</p>"
-        "</body></html>"
-    )
+    html = "<html><body><p>Order #SHOP-9999</p><p>1Z999AA10123456784</p></body></html>"
     parser = EmailParser()
     result = parser._parse_html_template(html, "msg_alpha", 0)
     assert result.shipment is not None
@@ -438,12 +433,7 @@ def test_tier2_finds_bare_tracking_token_in_h2() -> None:
 
 def test_tier2_candidate_tokens_populated() -> None:
     """Tier 2 populates candidate_tokens with all tracking-shaped tokens found."""
-    html = (
-        "<html><body>"
-        "<h2>1Z999AA10123456784</h2>"
-        "<h2>9261290100830125000029</h2>"
-        "</body></html>"
-    )
+    html = "<html><body><h2>1Z999AA10123456784</h2><h2>9261290100830125000029</h2></body></html>"
     parser = EmailParser()
     result = parser._parse_regex_tier2(html, "msg_candidates", 0)
     assert result.shipment is not None
