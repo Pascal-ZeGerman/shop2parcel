@@ -1,0 +1,6 @@
+Your order has shipped!
+
+Tracking number: 1Z999AA10123456784
+Order #AB-9999
+
+Thank you for your purchase.

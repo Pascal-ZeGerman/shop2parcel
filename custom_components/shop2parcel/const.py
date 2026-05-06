@@ -16,6 +16,9 @@ DEFAULT_GMAIL_QUERY = (
     "from:inform@informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR "
     "from:TrackingUpdates@fedex.com) "
     "subject:(shipped OR delivered OR tracking OR package)"
+    " OR "
+    "label:inbox -label:spam "
+    "subject:(tracking OR shipped OR shipment OR delivery OR parcel)"
 )
 
 # Phase 9: IMAP connection + multi-account constants
@@ -28,7 +31,14 @@ CONF_IMAP_USERNAME = "imap_username"  # str
 CONF_IMAP_PASSWORD = "imap_password"  # str (encrypted in entry.data)
 CONF_IMAP_TLS = "imap_tls"  # str: "ssl" | "starttls" | "none"
 CONF_IMAP_SEARCH = "imap_search"  # str: IMAP SEARCH criteria
-DEFAULT_IMAP_SEARCH = 'SUBJECT "shipped"'
+DEFAULT_IMAP_SEARCH = (
+    'OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "shipment"'
+)
 
 # Parcel API key (stored in config entry data, shared between config_flow and coordinator)
 CONF_API_KEY = "api_key"
+
+# PR4-C2: opt-in gate for Tier 2 broad-scan. OFF by default to prevent
+# false-positive forwards to ParcelApp consuming the 20/day quota.
+CONF_ENABLE_BROAD_SCAN = "enable_broad_scan"
+DEFAULT_ENABLE_BROAD_SCAN = False

@@ -25,11 +25,21 @@ class GmailClient:
 
     In production: pass hass.async_add_executor_job as async_add_executor_job.
     In tests: pass an async callable that runs the sync function inline.
-    Do NOT share build() service objects across calls (not thread-safe).
+    Service object is cached per access_token to avoid repeated discovery doc fetches.
     """
 
     def __init__(self, async_add_executor_job: Callable) -> None:
         self._executor = async_add_executor_job
+        self._service: Any = None
+        self._service_token: str | None = None
+
+    async def _get_service(self, access_token: str) -> Any:
+        """Return cached Gmail service, rebuilding only when token rotates."""
+        if self._service is None or self._service_token != access_token:
+            creds = Credentials(token=access_token)
+            self._service = await self._executor(partial(build, "gmail", "v1", credentials=creds))
+            self._service_token = access_token
+        return self._service
 
     async def async_list_messages(
         self,
@@ -45,8 +55,7 @@ class GmailClient:
         """
         full_query = build_incremental_query(query, after_timestamp)
         try:
-            creds = Credentials(token=access_token)
-            service = await self._executor(partial(build, "gmail", "v1", credentials=creds))
+            service = await self._get_service(access_token)
             all_messages: list[dict[str, Any]] = []
             page_token: str | None = None
             while True:
@@ -66,8 +75,7 @@ class GmailClient:
     async def async_get_message(self, access_token: str, message_id: str) -> dict[str, Any]:
         """Fetch full message payload (format=full for MIME parts with body data)."""
         try:
-            creds = Credentials(token=access_token)
-            service = await self._executor(partial(build, "gmail", "v1", credentials=creds))
+            service = await self._get_service(access_token)
             request = service.users().messages().get(userId="me", id=message_id, format="full")
             return await self._executor(request.execute)
         except Exception as err:
@@ -103,6 +111,28 @@ def extract_html_body(payload: dict) -> str | None:
                 return None
     for part in payload.get("parts", []):
         result = extract_html_body(part)
+        if result:
+            return result
+    return None
+
+
+def extract_text_body(payload: dict) -> str | None:
+    """Recursively extract text/plain body from Gmail MIME payload.
+
+    Mirrors extract_html_body but matches text/plain MIME type.
+    Used as fallback when no HTML body is present.
+    """
+    mime_type = payload.get("mimeType", "")
+    if mime_type == "text/plain":
+        body = payload.get("body") or {}
+        data = body.get("data", "")
+        if data:
+            try:
+                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                return None
+    for part in payload.get("parts", []):
+        result = extract_text_body(part)
         if result:
             return result
     return None

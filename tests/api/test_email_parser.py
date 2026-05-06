@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from custom_components.shop2parcel.api.email_parser import (
+    STRATEGY_BROAD_REGEX,
     STRATEGY_FEDEX,
     STRATEGY_HTML,
     STRATEGY_REGEX,
@@ -68,10 +69,10 @@ def test_html_strategy_used_first(shopify_html: str) -> None:
 
 
 def test_dual_strategy_fallback_used() -> None:
-    """HTML strategy only scans <p> elements; div-only HTML forces regex fallback.
+    """HTML strategy only scans <p> and <td> elements; div-only HTML forces regex fallback.
 
     Verifies _parse_html_template returns shipment=None for div-only input,
-    and that parse() succeeds via _parse_regex_fallback.
+    and that parse() succeeds via _parse_regex_tier1.
     """
     html = "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>"
     parser = EmailParser()
@@ -190,7 +191,7 @@ def test_keyword_hits_always_has_all_three_keys() -> None:
     # Total failure path
     empty = parser.parse("<html><body><p>Hello world</p></body></html>", "x", 0)
     assert empty.shipment is None
-    assert empty.skip_reason == "no_regex_match"
+    assert empty.skip_reason == "no_tracking_pattern"
     assert empty.strategy_used is None
     assert set(empty.keyword_hits.keys()) == expected_keys
     assert all(isinstance(v, bool) for v in empty.keyword_hits.values())
@@ -222,6 +223,7 @@ def test_strategy_constants_are_defined() -> None:
     assert STRATEGY_USPS == "usps_template"
     assert STRATEGY_FEDEX == "fedex_template"
     assert STRATEGY_REGEX == "regex_fallback"
+    assert STRATEGY_BROAD_REGEX == "broad_regex"
 
 
 def test_ups_template_extracts_tracking(ups_html: str) -> None:
@@ -352,3 +354,165 @@ def test_usps_91xxx_tracking_recognized() -> None:
 
     # 91 prefix + 20 digits = 22 digits total (standard USPS Priority Mail Express)
     assert _looks_like_tracking("9102901000857730777669") is True
+
+
+# ---------------------------------------------------------------------------
+# P1 fix + widened search tests
+# ---------------------------------------------------------------------------
+
+
+def test_p1_alphanumeric_order_id_not_silently_dropped() -> None:
+    """P1 fix: emails with alphanumeric order IDs like #AB-1234 are no longer silently dropped."""
+    html = (
+        "<html><body>"
+        "<p>Your order #AB-1234 has shipped via UPS.</p>"
+        "<p>Tracking: 1Z999AA10123456784</p>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "p1_fix_msg", 0)
+    assert result.shipment is not None, "P1: alphanumeric order email must not be dropped"
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.shipment.order_name == "#AB-1234"
+
+
+def test_html_template_alphanumeric_order_captured() -> None:
+    """HTML template: alphanumeric order IDs like #SHOP-9999 are captured correctly."""
+    html = "<html><body><p>Order #SHOP-9999</p><p>1Z999AA10123456784</p></body></html>"
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "msg_alpha", 0)
+    assert result.shipment is not None
+    assert result.shipment.order_name == "#SHOP-9999"
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+
+
+def test_html_template_scans_td_elements() -> None:
+    """HTML template scans <td> elements — tracking in table cells is found."""
+    html = (
+        "<html><body><table><tr>"
+        "<td>Order #5555</td>"
+        "<td>1Z999AA10123456784</td>"
+        "</tr></table></body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "msg_td", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.shipment.order_name == "#5555"
+
+
+def test_html_template_href_fallback_finds_tracking() -> None:
+    """HTML template: href fallback extracts tracking from anchor URL query param."""
+    html = (
+        "<html><body>"
+        "<p>Your order #AB-9999 has shipped.</p>"
+        '<a href="https://parceltracking.example.com/track?num=1Z999AA10123456784">Track</a>'
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "msg_href", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.shipment.order_name == "#AB-9999"
+    assert result.strategy_used == STRATEGY_HTML
+
+
+def test_tier2_finds_bare_tracking_token_in_h2() -> None:
+    """Tier 2 broad scan finds tracking number in <h2> with no keyword label.
+
+    PR4-C2: Tier 2 is now opt-in; enable_broad_scan=True is required to exercise
+    this path via parse(). The test's intent (verify Tier 2 works) is preserved.
+    """
+    html = "<html><body><h2>1Z999AA10123456784</h2></body></html>"
+    parser = EmailParser(enable_broad_scan=True)  # PR4-C2: must opt-in to Tier 2
+    result = parser.parse(html, "msg_tier2", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.strategy_used == STRATEGY_BROAD_REGEX
+
+
+def test_tier2_candidate_tokens_populated() -> None:
+    """Tier 2 populates candidate_tokens with all tracking-shaped tokens found."""
+    html = "<html><body><h2>1Z999AA10123456784</h2><h2>9261290100830125000029</h2></body></html>"
+    parser = EmailParser()
+    result = parser._parse_regex_tier2(html, "msg_candidates", 0)
+    assert result.shipment is not None
+    assert "1Z999AA10123456784" in result.candidate_tokens
+    assert "9261290100830125000029" in result.candidate_tokens
+
+
+def test_tier2_candidate_tokens_empty_on_no_match() -> None:
+    """Tier 2 returns empty candidate_tokens when no tracking-shaped token is found."""
+    parser = EmailParser()
+    result = parser._parse_regex_tier2("<html><body><p>Hello world</p></body></html>", "x", 0)
+    assert result.shipment is None
+    assert result.candidate_tokens == []
+
+
+def test_skip_reason_no_tracking_label_from_tier1() -> None:
+    """Tier 1 returns skip_reason='no_tracking_label' when no labeled tracking is found."""
+    html = "<html><body><h2>No label here, just text</h2></body></html>"
+    parser = EmailParser()
+    result = parser._parse_regex_tier1(html, "x", 0)
+    assert result.shipment is None
+    assert result.skip_reason == "no_tracking_label"
+
+
+def test_skip_reason_tracking_invalid_from_tier1() -> None:
+    """Tier 1 returns skip_reason='tracking_invalid' when labeled token fails _looks_like_tracking.
+
+    The token must be 10+ chars (matches the labeled regex) but not match any carrier pattern.
+    NOTRACK1234 is 11 mixed-alpha chars — long enough to match the labeled regex but not a
+    real tracking number format (not 1Z prefix, not 9x prefix, not pure-digit).
+    """
+    html = "<html><body><div>Tracking number: NOTRACK1234 Order #1234</div></body></html>"
+    parser = EmailParser()
+    result = parser._parse_regex_tier1(html, "x", 0)
+    assert result.shipment is None
+    assert result.skip_reason == "tracking_invalid"
+    assert result.keyword_hits["tracking_regex"] is True
+
+
+def test_skip_reason_no_tracking_pattern_from_full_parse() -> None:
+    """Full parse of plain-text-only email returns skip_reason='no_tracking_pattern' from Tier 2."""
+    parser = EmailParser()
+    result = parser.parse("<html><body><p>Hello world</p></body></html>", "x", 0)
+    assert result.shipment is None
+    assert result.skip_reason == "no_tracking_pattern"
+
+
+def test_infer_carrier_ups() -> None:
+    """_infer_carrier returns 'UPS' for 1Z tracking numbers."""
+    from custom_components.shop2parcel.api.email_parser import _infer_carrier
+
+    assert _infer_carrier("1Z999AA10123456784") == "UPS"
+
+
+def test_infer_carrier_usps_domestic() -> None:
+    """_infer_carrier returns 'USPS' for 9x-prefix IMpb tracking numbers."""
+    from custom_components.shop2parcel.api.email_parser import _infer_carrier
+
+    assert _infer_carrier("9261290100830125000029") == "USPS"
+
+
+def test_infer_carrier_fedex() -> None:
+    """_infer_carrier returns 'FedEx' for pure-digit 12-20 char tracking numbers."""
+    from custom_components.shop2parcel.api.email_parser import _infer_carrier
+
+    assert _infer_carrier("612909123456789123") == "FedEx"
+
+
+def test_infer_carrier_unknown() -> None:
+    """_infer_carrier returns 'Unknown' for unrecognized formats."""
+    from custom_components.shop2parcel.api.email_parser import _infer_carrier
+
+    assert _infer_carrier("ABCDEFGHIJ") == "Unknown"
+
+
+def test_tier2_strategy_used_is_broad_regex() -> None:
+    """Tier 2 success sets strategy_used=STRATEGY_BROAD_REGEX."""
+    html = "<html><body><h2>1Z999AA10123456784</h2></body></html>"
+    parser = EmailParser()
+    result = parser._parse_regex_tier2(html, "msg_strat", 0)
+    assert result.shipment is not None
+    assert result.strategy_used == STRATEGY_BROAD_REGEX
