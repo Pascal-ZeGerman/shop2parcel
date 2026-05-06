@@ -126,6 +126,8 @@ def _extract_tracking_from_hrefs(soup: BeautifulSoup) -> str | None:
     """
     for a in soup.find_all("a", href=True):
         href = a["href"]
+        if not isinstance(href, str):
+            continue
         try:
             parsed = urlparse(href)
             for values in parse_qs(parsed.query).values():
@@ -518,6 +520,8 @@ class EmailParser:
 
         for a in soup.find_all("a", href=True):
             href = a["href"]
+            if not isinstance(href, str):
+                continue
             try:
                 parsed = urlparse(href)
                 for values in parse_qs(parsed.query).values():
