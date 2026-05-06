@@ -46,14 +46,17 @@ class GmailClient:
         access_token: str,
         query: str,
         after_timestamp: int | None = None,
+        rescan_window_days: int = 30,
     ) -> list[dict[str, Any]]:
         """List Gmail messages matching query, optionally filtered by date.
 
         EMAIL-02: query is configurable (default: from:no-reply@shopify.com subject:shipped).
         EMAIL-08: after_timestamp appended as 'after:{ts}' for incremental polling.
+        QF-02: rescan_window_days controls minimum lookback; forwarded_ids dedup prevents
+        re-POSTing previously forwarded shipments when the window widens.
         Paginates through all result pages — Gmail caps each page at 100 messages.
         """
-        full_query = build_incremental_query(query, after_timestamp)
+        full_query = build_incremental_query(query, after_timestamp, rescan_window_days)
         try:
             service = await self._get_service(access_token)
             all_messages: list[dict[str, Any]] = []
@@ -82,15 +85,35 @@ class GmailClient:
             _classify_gmail_error(err)
 
 
-def build_incremental_query(base_query: str, last_timestamp: int | None) -> str:
+def build_incremental_query(
+    base_query: str,
+    last_timestamp: int | None,
+    rescan_window_days: int = 30,
+) -> str:
     """Append after: filter for incremental polling.
 
-    Falls back to last 30 days on first run (no stored timestamp).
+    Effective lower bound = min(last_timestamp, now - rescan_window_days*86400).
+    When last_timestamp is None, falls back to (now - rescan_window_days*86400).
+    rescan_window_days defaults to 30 to preserve historical behavior when
+    callers don't pass it explicitly.
+
     EMAIL-08: stores epoch seconds; Gmail query accepts integer epoch seconds.
+    QF-02: rescan_window_days allows widening the lookback window without
+    clearing forwarded_ids (dedup happens before any ParcelApp POST).
+
+    Cases:
+    - last_timestamp is None → use window_start (first run: scan window_days back).
+    - last_timestamp OLDER than window_start → use last_timestamp (don't refetch
+      pre-window mail unnecessarily).
+    - last_timestamp MORE RECENT than window_start (the bug case) → use window_start
+      (look back further than the stored point to rescan recent mail).
     """
+    window_start = int(time.time()) - rescan_window_days * 86400
     if last_timestamp is None:
-        last_timestamp = int(time.time()) - 30 * 24 * 3600
-    return f"{base_query} after:{last_timestamp}"
+        effective = window_start
+    else:
+        effective = min(last_timestamp, window_start)
+    return f"{base_query} after:{effective}"
 
 
 def extract_html_body(payload: dict) -> str | None:

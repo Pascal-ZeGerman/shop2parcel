@@ -335,15 +335,97 @@ def test_extract_html_body_recurses_into_parts():
 
 
 def test_build_incremental_query_with_timestamp():
-    """build_incremental_query('base', 1000) → 'base after:1000'."""
-    result = build_incremental_query("base", 1000)
+    """build_incremental_query('base', 1000) → 'base after:1000'.
+
+    last_timestamp=1000 is epoch 1970 — far older than now-30*86400, so
+    min(1000, now-window) == 1000. Assertion still holds with new semantics.
+    """
+    result = build_incremental_query("base", 1000, rescan_window_days=30)
     assert result == "base after:1000"
 
 
 def test_build_incremental_query_none_defaults_30_days():
-    """build_incremental_query('base', None) → contains after: with ts > (now - 31*86400)."""
+    """build_incremental_query('base', None, rescan_window_days=30) → after: with ts > (now - 31*86400)."""
     expected_min = int(time.time()) - 31 * 86400
-    result = build_incremental_query("base", None)
+    result = build_incremental_query("base", None, rescan_window_days=30)
     assert "after:" in result
     ts = int(result.split("after:")[1].strip())
     assert ts > expected_min
+
+
+# ---------------------------------------------------------------------------
+# New tests: QF-01 + QF-02 semantics
+# ---------------------------------------------------------------------------
+
+
+def test_default_gmail_query_has_no_label_inbox():
+    """QF-01: DEFAULT_GMAIL_QUERY must not contain 'label:inbox'.
+
+    Auto-archived shipping emails never appear in the inbox, so the old
+    'label:inbox' token excluded them from every query result.
+    """
+    from custom_components.shop2parcel.const import DEFAULT_GMAIL_QUERY  # noqa: PLC0415
+
+    assert "label:inbox" not in DEFAULT_GMAIL_QUERY, (
+        "DEFAULT_GMAIL_QUERY must not contain 'label:inbox' — archived emails "
+        "would be silently excluded (QF-01 fix)"
+    )
+
+
+def test_default_gmail_query_keeps_spam_exclusion():
+    """QF-01: DEFAULT_GMAIL_QUERY must still contain '-label:spam' for the spam guard."""
+    from custom_components.shop2parcel.const import DEFAULT_GMAIL_QUERY  # noqa: PLC0415
+
+    assert "-label:spam" in DEFAULT_GMAIL_QUERY, (
+        "DEFAULT_GMAIL_QUERY must retain '-label:spam' to exclude spam results"
+    )
+
+
+def test_build_incremental_query_with_timestamp_uses_window_start_when_stored_is_more_recent():
+    """QF-02: stored ts is 5 days old, window=30 → after: uses window_start (30 days back).
+
+    last_timestamp is MORE RECENT than window_start → window_start wins (look back further).
+    """
+    now = int(time.time())
+    last_timestamp = now - 5 * 86400  # 5 days old — more recent than window
+    result = build_incremental_query("base", last_timestamp, rescan_window_days=30)
+    assert "after:" in result
+    ts = int(result.split("after:")[1].strip())
+    expected_window_start = now - 30 * 86400
+    # ts should be approximately now - 30*86400 (within ±5s tolerance)
+    assert abs(ts - expected_window_start) <= 5, (
+        f"Expected after: near {expected_window_start} (window_start), got {ts}. "
+        "When stored ts is more recent than window_start, window_start must win."
+    )
+
+
+def test_build_incremental_query_with_timestamp_uses_stored_when_older_than_window():
+    """QF-02: stored ts is 60 days old, window=30 → after: uses stored ts (60 days back).
+
+    last_timestamp is OLDER than window_start → stored ts wins (don't skip pre-window mail).
+    """
+    now = int(time.time())
+    last_timestamp = now - 60 * 86400  # 60 days old — older than 30-day window
+    result = build_incremental_query("base", last_timestamp, rescan_window_days=30)
+    assert "after:" in result
+    ts = int(result.split("after:")[1].strip())
+    assert ts == last_timestamp, (
+        f"Expected after:{last_timestamp} (stored ts wins when older than window), got {ts}"
+    )
+
+
+def test_build_incremental_query_none_uses_window_start():
+    """QF-02: last_timestamp=None, rescan_window_days=14 → after: ≈ now - 14*86400.
+
+    On first run (no stored timestamp), fall back to window_start.
+    """
+    now = int(time.time())
+    result = build_incremental_query("base", None, rescan_window_days=14)
+    assert "after:" in result
+    ts = int(result.split("after:")[1].strip())
+    expected_window_start = now - 14 * 86400
+    # Within ±5s tolerance for test execution time
+    assert abs(ts - expected_window_start) <= 5, (
+        f"Expected after: near {expected_window_start} (now - 14d), got {ts}. "
+        "None last_timestamp must fall back to window_start."
+    )
