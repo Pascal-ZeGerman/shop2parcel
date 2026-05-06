@@ -59,12 +59,14 @@ from .const import (
     CONF_IMAP_TLS,
     CONF_IMAP_USERNAME,
     CONF_POLL_INTERVAL,
+    CONF_RESCAN_WINDOW_DAYS,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_RESCAN_WINDOW_DAYS,
     DOMAIN,
 )
 
@@ -238,6 +240,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # 2. List Gmail messages matching the configured query.
         gmail = cast(GmailClient, self._email_client)
         query = self.config_entry.options.get(CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY)
+        rescan_window_days = self.config_entry.options.get(
+            CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS
+        )
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
@@ -253,7 +258,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         try:
             messages = await gmail.async_list_messages(
-                access_token, query, after_timestamp=self._last_email_timestamp
+                access_token,
+                query,
+                after_timestamp=self._last_email_timestamp,
+                rescan_window_days=rescan_window_days,
             )
         except GmailAuthError as err:
             raise ConfigEntryAuthFailed("Gmail auth error") from err

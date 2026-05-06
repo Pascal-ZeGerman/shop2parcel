@@ -90,12 +90,14 @@
         "data": {
           "poll_interval": "Poll Interval (minutes)",
           "gmail_query": "Gmail Search Query",
-          "imap_search": "IMAP Search Criteria"
+          "imap_search": "IMAP Search Criteria",
+          "rescan_window_days": "Rescan Window (days)"
         },
         "data_description": {
           "poll_interval": "How often to check for new shipping emails (5–1440 minutes).",
           "gmail_query": "Gmail search query to find shipping emails.",
-          "imap_search": "IMAP SEARCH criteria (e.g. SUBJECT \"shipped\")."
+          "imap_search": "IMAP SEARCH criteria (e.g. SUBJECT \"shipped\").",
+          "rescan_window_days": "Always look back at least this many days for shipping emails (7-365). Increase this to rescan recent history without resetting the integration. Already-forwarded shipments are not re-sent."
         }
       }
     }

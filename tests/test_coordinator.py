@@ -24,8 +24,10 @@ from custom_components.shop2parcel.api.exceptions import (
 from custom_components.shop2parcel.const import (
     CONF_GMAIL_QUERY,
     CONF_POLL_INTERVAL,
+    CONF_RESCAN_WINDOW_DAYS,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_RESCAN_WINDOW_DAYS,
     DOMAIN,
 )
 from custom_components.shop2parcel.coordinator import (
@@ -1345,3 +1347,100 @@ async def test_imap_no_html_body_does_not_advance_uid(hass, mock_imap_config_ent
     )
     # No delivery attempt
     mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# QF-02: rescan_window_days wiring through coordinator
+# ---------------------------------------------------------------------------
+
+
+async def test_gmail_poll_passes_rescan_window_to_client(hass, mock_config_entry):
+    """QF-02: Coordinator reads CONF_RESCAN_WINDOW_DAYS from options and passes
+    it as rescan_window_days kwarg to gmail.async_list_messages."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={
+            CONF_POLL_INTERVAL: 30,
+            CONF_GMAIL_QUERY: DEFAULT_GMAIL_QUERY,
+            CONF_RESCAN_WINDOW_DAYS: 60,
+        },
+    )
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(None, skip_reason="no_match")
+
+        coord = Shop2ParcelCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+        # Verify rescan_window_days=60 was passed to the Gmail client
+        call_kwargs = mock_gmail_cls.return_value.async_list_messages.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("rescan_window_days") == 60, (
+            "Coordinator must pass rescan_window_days=60 from options to async_list_messages"
+        )
+
+
+async def test_gmail_poll_uses_default_rescan_window_when_unset(hass, mock_config_entry):
+    """QF-02: When CONF_RESCAN_WINDOW_DAYS is absent from options, coordinator passes
+    DEFAULT_RESCAN_WINDOW_DAYS (30) to gmail.async_list_messages."""
+    mock_config_entry.add_to_hass(hass)
+    # Options do NOT include CONF_RESCAN_WINDOW_DAYS
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={CONF_POLL_INTERVAL: 30, CONF_GMAIL_QUERY: DEFAULT_GMAIL_QUERY},
+    )
+    with (
+        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(None, skip_reason="no_match")
+
+        coord = Shop2ParcelCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+        # Verify default rescan_window_days was passed
+        call_kwargs = mock_gmail_cls.return_value.async_list_messages.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("rescan_window_days") == DEFAULT_RESCAN_WINDOW_DAYS, (
+            f"Coordinator must pass default rescan_window_days={DEFAULT_RESCAN_WINDOW_DAYS} "
+            "when option is absent from entry.options"
+        )

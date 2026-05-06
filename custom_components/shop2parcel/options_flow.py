@@ -21,11 +21,15 @@ from .const import (
     CONF_GMAIL_QUERY,
     CONF_IMAP_SEARCH,
     CONF_POLL_INTERVAL,
+    CONF_RESCAN_WINDOW_DAYS,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_RESCAN_WINDOW_DAYS,
+    MAX_RESCAN_WINDOW_DAYS,
+    MIN_RESCAN_WINDOW_DAYS,
 )
 
 
@@ -76,6 +80,16 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                         # (DoS against Gmail API quota and the HA event loop).
                         # max=500 mirrors Gmail's practical query length limit.
                     ): vol.All(str, vol.Length(min=1, max=500)),
+                    # QF-02: Gmail-only rescan window. Allows widening the after: filter
+                    # without clearing forwarded_ids — already-forwarded shipments are
+                    # deduplicated before any ParcelApp POST, so increasing this value
+                    # is safe (minor extra Gmail API calls at most).
+                    vol.Required(
+                        CONF_RESCAN_WINDOW_DAYS,
+                        default=self.config_entry.options.get(
+                            CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS
+                        ),
+                    ): vol.All(int, vol.Range(min=MIN_RESCAN_WINDOW_DAYS, max=MAX_RESCAN_WINDOW_DAYS)),
                 }
             )
 
