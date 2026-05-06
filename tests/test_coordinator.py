@@ -1387,7 +1387,9 @@ async def test_gmail_poll_passes_rescan_window_to_client(hass, mock_config_entry
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(None, skip_reason="no_match")
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
 
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
@@ -1431,7 +1433,9 @@ async def test_gmail_poll_uses_default_rescan_window_when_unset(hass, mock_confi
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(None, skip_reason="no_match")
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
 
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord._async_load_store()

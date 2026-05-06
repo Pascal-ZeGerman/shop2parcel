@@ -89,7 +89,9 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                         default=self.config_entry.options.get(
                             CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS
                         ),
-                    ): vol.All(int, vol.Range(min=MIN_RESCAN_WINDOW_DAYS, max=MAX_RESCAN_WINDOW_DAYS)),
+                    ): vol.All(
+                        int, vol.Range(min=MIN_RESCAN_WINDOW_DAYS, max=MAX_RESCAN_WINDOW_DAYS)
+                    ),
                 }
             )
 

@@ -210,29 +210,37 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
     )
     # Validate range enforced: too low
     with pytest.raises(vol.Invalid):
-        schema({
-            CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
-            CONF_RESCAN_WINDOW_DAYS: MIN_RESCAN_WINDOW_DAYS - 1,
-        })
+        schema(
+            {
+                CONF_POLL_INTERVAL: 30,
+                CONF_GMAIL_QUERY: "from:test",
+                CONF_RESCAN_WINDOW_DAYS: MIN_RESCAN_WINDOW_DAYS - 1,
+            }
+        )
     # Validate range enforced: too high
     with pytest.raises(vol.Invalid):
-        schema({
+        schema(
+            {
+                CONF_POLL_INTERVAL: 30,
+                CONF_GMAIL_QUERY: "from:test",
+                CONF_RESCAN_WINDOW_DAYS: MAX_RESCAN_WINDOW_DAYS + 1,
+            }
+        )
+    # Valid boundary values
+    schema(
+        {
             CONF_POLL_INTERVAL: 30,
             CONF_GMAIL_QUERY: "from:test",
-            CONF_RESCAN_WINDOW_DAYS: MAX_RESCAN_WINDOW_DAYS + 1,
-        })
-    # Valid boundary values
-    schema({
-        CONF_POLL_INTERVAL: 30,
-        CONF_GMAIL_QUERY: "from:test",
-        CONF_RESCAN_WINDOW_DAYS: MIN_RESCAN_WINDOW_DAYS,
-    })
-    schema({
-        CONF_POLL_INTERVAL: 30,
-        CONF_GMAIL_QUERY: "from:test",
-        CONF_RESCAN_WINDOW_DAYS: MAX_RESCAN_WINDOW_DAYS,
-    })
+            CONF_RESCAN_WINDOW_DAYS: MIN_RESCAN_WINDOW_DAYS,
+        }
+    )
+    schema(
+        {
+            CONF_POLL_INTERVAL: 30,
+            CONF_GMAIL_QUERY: "from:test",
+            CONF_RESCAN_WINDOW_DAYS: MAX_RESCAN_WINDOW_DAYS,
+        }
+    )
 
 
 async def test_imap_options_flow_excludes_rescan_window(hass, mock_imap_config_entry):
