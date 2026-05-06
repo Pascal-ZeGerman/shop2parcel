@@ -173,6 +173,34 @@ def _classify_imap_error(err: Exception) -> NoReturn:
     raise ImapTransientError(str(err)) from err
 
 
+def extract_text_body_imap(raw_bytes: bytes) -> str | None:
+    """Extract text/plain body from raw IMAP message bytes.
+
+    Used as fallback when no HTML body is present, paralleling extract_html_body_imap.
+    """
+    msg = email.message_from_bytes(raw_bytes)
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    charset = part.get_content_charset() or "utf-8"
+                    try:
+                        return payload.decode(charset, errors="replace")
+                    except LookupError, TypeError:
+                        return payload.decode("utf-8", errors="replace")
+    else:
+        if msg.get_content_type() == "text/plain":
+            payload = msg.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                charset = msg.get_content_charset() or "utf-8"
+                try:
+                    return payload.decode(charset, errors="replace")
+                except LookupError, TypeError:
+                    return payload.decode("utf-8", errors="replace")
+    return None
+
+
 def extract_html_body_imap(raw_bytes: bytes) -> str | None:
     """Extract HTML body from raw IMAP message bytes.
 

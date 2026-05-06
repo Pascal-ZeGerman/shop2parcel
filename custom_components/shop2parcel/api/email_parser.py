@@ -1,23 +1,32 @@
-"""Dual-strategy email parser for Shopify shipping confirmation emails.
+"""Tiered email parser for Shopify shipping confirmation emails.
 
-Strategy 1 (primary): BeautifulSoup + lxml HTML parsing.
-  Parses <p> elements by text pattern — Shopify does NOT use CSS classes on tracking data.
-  Pitfall: soup.find(class_="tracking-number") always returns None for Shopify emails.
+Strategy 1 (primary): BeautifulSoup on <p> and <td> text patterns + href fallback.
+  Shopify embeds tracking info as prose in <p>/<td> elements; no CSS classes on
+  tracking data. Href fallback catches tracking numbers embedded in anchor URLs.
 
-Strategy 2 (fallback): stdlib re on plain text.
+Strategy 2 (Tier 1 regex): stdlib re with labeled keyword anchors + href fallback.
   Used when HTML strategy fails (custom merchant templates, non-Shopify shippers).
-  EMAIL-03 locks this dual-strategy requirement.
 
+Strategy 3 (Tier 2 broad scan): bare token sweep — no keyword gate.
+  Used when Tier 1 finds no labeled tracking. Collects all tracking-shaped tokens
+  from full text and hrefs; returns best (longest) match. Maximises recall at the
+  cost of precision — false positives are filtered in a later phase.
+
+EMAIL-03 locks the dual-strategy requirement; Tier 2 is an extension.
 No HA imports (D-01/D-03).
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -32,7 +41,7 @@ class ShipmentData:
 
     tracking_number: str
     carrier_name: str
-    order_name: str  # e.g. "#1234"
+    order_name: str  # e.g. "#1234" or "#AB-1234"; "" for direct carrier emails
     message_id: str  # stable message identifier — Gmail message ID (Gmail path) or IMAP UID as string (IMAP path)
     email_date: int  # Unix timestamp (seconds)
 
@@ -45,12 +54,18 @@ class ParseResult:
     "tracking_regex", "order_regex", "carrier_regex" with bool values, even
     on HTML-strategy parses (all False in that case — D-07). This guarantees
     the coordinator can iterate the dict without key guards.
+
+    `candidate_tokens` is populated by Tier 2 (broad scan) with all tracking-shaped
+    tokens found — used for diagnostic surfacing so skip reasons can be sharpened.
     """
 
     shipment: ShipmentData | None
-    skip_reason: str | None  # "no_template_match" | "no_regex_match" | None
-    strategy_used: str | None  # "html_template" | "regex_fallback" | None
+    skip_reason: (
+        str | None
+    )  # "no_template_match" | "no_tracking_label" | "tracking_invalid" | "no_tracking_pattern" | None
+    strategy_used: str | None  # "html_template" | "regex_fallback" | "broad_regex" | None
     keyword_hits: dict[str, bool]  # keys always: tracking_regex, order_regex, carrier_regex
+    candidate_tokens: list[str] = field(default_factory=list)
 
 
 # Known tracking number format patterns (EMAIL-04).
@@ -71,6 +86,7 @@ STRATEGY_UPS = "ups_template"
 STRATEGY_USPS = "usps_template"
 STRATEGY_FEDEX = "fedex_template"
 STRATEGY_REGEX = "regex_fallback"
+STRATEGY_BROAD_REGEX = "broad_regex"
 
 
 # Carrier-specific extraction regex — compiled at import, bounded quantifiers (ASVS V5).
@@ -87,6 +103,44 @@ _FEDEX_TRACKING_RE = re.compile(
 def _looks_like_tracking(s: str) -> bool:
     """Return True if s matches any known carrier tracking number format."""
     return any(p.match(s) for p in _TRACKING_PATTERNS)
+
+
+def _infer_carrier(tracking: str) -> str:
+    """Infer carrier from tracking number shape. Used by Tier 2 and href fallbacks."""
+    if re.match(r"^1Z[A-Z0-9]{16}$", tracking):
+        return "UPS"
+    if re.match(r"^9[12345][0-9]{15,24}$", tracking):
+        return "USPS"
+    if re.match(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$", tracking):
+        return "USPS"
+    if re.match(r"^[0-9]{12,20}$", tracking):
+        return "FedEx"
+    return "Unknown"
+
+
+def _extract_tracking_from_hrefs(soup: BeautifulSoup) -> str | None:
+    """Scan <a href> tags for tracking numbers in query params or path segments.
+
+    Checks URL query parameters first (e.g. ?tracknum=1Z...), then path segments.
+    Returns the first valid tracking number found, uppercased.
+    """
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        try:
+            parsed = urlparse(href)
+            for values in parse_qs(parsed.query).values():
+                for value in values:
+                    upper = value.upper()
+                    if _looks_like_tracking(upper):
+                        return upper
+            for segment in parsed.path.strip("/").split("/"):
+                upper = segment.upper()
+                if _looks_like_tracking(upper):
+                    return upper
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Failed to parse href %r: %s", href, exc)
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -241,55 +295,84 @@ CARRIER_REGISTRY: list[_CarrierEntry] = [
 
 
 class EmailParser:
-    """Parse Shopify shipping confirmation emails using dual-strategy approach.
+    """Parse Shopify shipping confirmation emails using tiered strategy approach.
 
-    EMAIL-03: HTML template strategy first, regex fallback second.
+    EMAIL-03: HTML template strategy first, Tier 1 regex second, Tier 2 broad scan third.
     """
+
+    def __init__(self, enable_broad_scan: bool = False) -> None:
+        """Initialize parser with optional Tier 2 broad-scan gate (PR4-C2).
+
+        Tier 2 sweeps all alphanumeric tracking-shaped tokens with no keyword
+        anchor, so it produces false positives. Default OFF — opt-in via
+        config entry option CONF_ENABLE_BROAD_SCAN.
+        """
+        self._enable_broad_scan = enable_broad_scan
 
     def parse(self, html: str, message_id: str, email_date: int) -> ParseResult:
         """Parse email HTML. Returns ParseResult always — never None.
 
         Carrier template registry (D-05) is consulted first: each (detect_fn,
         parse_fn) tuple in CARRIER_REGISTRY is evaluated in order, first match
-        wins. If no registry entry matches, falls through to the existing
-        Shopify dual-strategy: HTML template -> regex fallback. shipment is
-        None when all strategies fail; skip_reason indicates which stage failed
-        (D-02).
+        wins. If no registry entry matches, falls through to tiered Shopify
+        strategies: HTML template -> Tier 1 regex -> Tier 2 broad scan.
+        shipment is None when all strategies fail; skip_reason indicates which
+        stage failed (D-02).
         """
+        carrier_detected = False
         for detect_fn, parse_fn in CARRIER_REGISTRY:
             if detect_fn(html):
                 carrier_result = parse_fn(html, message_id, email_date)
                 if carrier_result.shipment is not None:
                     return carrier_result
-                break  # detected but extraction failed — fall through to regex
-        # No registry match (or carrier detected but extraction failed) —
-        # fall through to existing Shopify dual-strategy.
+                carrier_detected = True
+                break  # detected but extraction failed — fall through to Shopify HTML + Tier 1 only
         html_result = self._parse_html_template(html, message_id, email_date)
         if html_result.shipment is not None:
             return html_result
-        # HTML strategy failed; try regex fallback. The fallback's keyword_hits
-        # supersedes the HTML strategy's all-False placeholder.
-        return self._parse_regex_fallback(html, message_id, email_date)
+        tier1_result = self._parse_regex_tier1(html, message_id, email_date)
+        if tier1_result.shipment is not None:
+            return tier1_result
+        # PR4-I2: when a carrier was detected, do NOT fall through to Tier 2
+        # broad scan — the email is carrier-specific and broad scan would pick
+        # up order numbers, phone numbers, etc.
+        # PR4-C2: Tier 2 broad scan is opt-in (default OFF).
+        if carrier_detected or not self._enable_broad_scan:
+            return ParseResult(
+                shipment=None,
+                skip_reason="no_tracking_pattern",
+                strategy_used=None,
+                keyword_hits={
+                    "tracking_regex": False,
+                    "order_regex": False,
+                    "carrier_regex": False,
+                },
+            )
+        return self._parse_regex_tier2(html, message_id, email_date)
 
     def _parse_html_template(self, html: str, message_id: str, email_date: int) -> ParseResult:
-        """Strategy 1: BeautifulSoup on <p> text patterns.
+        """Strategy 1: BeautifulSoup on <p> and <td> text patterns + href fallback.
 
-        Shopify standard template embeds tracking info as prose in <p> elements.
-        No CSS classes or IDs on tracking data — parse by text pattern only.
+        Shopify standard template embeds tracking info as prose in <p> elements;
+        many merchant templates use <td>. No CSS classes or IDs on tracking data —
+        parse by text pattern only. Order is optional (alphanumeric IDs supported).
+        Href fallback catches tracking numbers embedded in anchor URLs.
         """
         soup = BeautifulSoup(html, "lxml")
         tracking_number = carrier_name = order_name = None
 
-        for p in soup.find_all("p"):
-            text = p.get_text(separator=" ", strip=True)
+        for elem in soup.find_all(["p", "td"]):
+            text = elem.get_text(separator=" ", strip=True)
             if not order_name:
-                m = re.search(r"#(\d+)", text)
+                m = re.search(r"#([A-Z0-9][\w\-]{1,30})", text, re.IGNORECASE)
                 if m:
-                    order_name = f"#{m.group(1)}"
+                    order_name = f"#{m.group(1).upper()}"
             if not carrier_name:
+                # PR4-I4: non-greedy quantifier + IGNORECASE to match Tier 1 behavior.
                 m = re.search(
-                    r"\bvia\s+([A-Za-z][A-Za-z ]{1,29})(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
+                    r"\bvia\s+([A-Za-z][A-Za-z ]{1,29}?)(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
                     text,
+                    re.IGNORECASE,
                 )
                 if m:
                     carrier_name = m.group(1).strip()
@@ -299,12 +382,15 @@ class EmailParser:
                         tracking_number = candidate.upper()
                         break
 
-        if tracking_number and order_name:
+        if not tracking_number:
+            tracking_number = _extract_tracking_from_hrefs(soup)
+
+        if tracking_number:
             return ParseResult(
                 shipment=ShipmentData(
                     tracking_number=tracking_number,
                     carrier_name=carrier_name or "Unknown",
-                    order_name=order_name,
+                    order_name=order_name or "",
                     message_id=message_id,
                     email_date=email_date,
                 ),
@@ -323,22 +409,29 @@ class EmailParser:
             keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
         )
 
-    def _parse_regex_fallback(self, html: str, message_id: str, email_date: int) -> ParseResult:
-        """Strategy 2: strip HTML, apply keyword regex to plain text.
+    def _parse_regex_tier1(self, html: str, message_id: str, email_date: int) -> ParseResult:
+        """Strategy 2: labeled keyword regex on full plain text + href fallback.
 
         Handles custom merchant templates and non-Shopify shipping emails.
+        Requires a 'Tracking number:' label anchor for the tracking field.
+        Order is optional; alphanumeric order IDs (e.g. #AB-1234) are supported.
         All quantifiers are bounded (max 40 chars) — no ReDoS risk.
         """
-        text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+        soup = BeautifulSoup(html, "lxml")
+        text = soup.get_text(separator=" ")
         tracking = re.search(
             r"(?:tracking\s+(?:number|#|no\.?)\s*:?\s*)([A-Z0-9]{10,40})\b",
             text,
             re.IGNORECASE,
         )
-        order = re.search(r"order\s*#?\s*(\d+)", text, re.IGNORECASE)
+        # PR4-C1: '#' or ':' is now required after 'order' to prevent false positives
+        # like "Your order has shipped" -> order_name="#HAS".
+        order = re.search(r"order\s*[#:]\s*([A-Z0-9][\w\-]{1,30})", text, re.IGNORECASE)
+        # PR4-I4: non-greedy inner quantifier prevents "shipped via UPS with care"
+        # from yielding carrier_name="UPS with care".
         carrier = re.search(
-            r"(?:via|carrier)\s+(?:by\s+)?([A-Za-z][A-Za-z ]{2,29})(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)"
-            r"|shipped\s+by\s+([A-Za-z][A-Za-z ]{2,29})(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
+            r"(?:via|carrier)\s+(?:by\s+)?([A-Za-z][A-Za-z ]{2,29}?)(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)"
+            r"|shipped\s+by\s+([A-Za-z][A-Za-z ]{2,29}?)(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
             text,
             re.IGNORECASE,
         )
@@ -347,37 +440,123 @@ class EmailParser:
             "order_regex": order is not None,
             "carrier_regex": carrier is not None,
         }
-        if tracking and order:
-            raw_tracking = tracking.group(1).upper()  # normalize case
-            if not _looks_like_tracking(raw_tracking):
+
+        if not tracking:
+            href_tracking = _extract_tracking_from_hrefs(soup)
+            if href_tracking:
                 return ParseResult(
-                    shipment=None,
-                    skip_reason="no_regex_match",
-                    strategy_used=None,
+                    shipment=ShipmentData(
+                        tracking_number=href_tracking,
+                        carrier_name=(
+                            next(
+                                (g for g in (carrier.group(1), carrier.group(2)) if g),
+                                "Unknown",
+                            ).strip()
+                            if carrier
+                            else _infer_carrier(href_tracking)
+                        ),
+                        order_name=f"#{order.group(1).upper()}" if order else "",
+                        message_id=message_id,
+                        email_date=email_date,
+                    ),
+                    skip_reason=None,
+                    strategy_used=STRATEGY_REGEX,
                     keyword_hits=hits,
                 )
             return ParseResult(
-                shipment=ShipmentData(
-                    tracking_number=raw_tracking,
-                    carrier_name=(
-                        next(
-                            (g for g in (carrier.group(1), carrier.group(2)) if g),
-                            "Unknown",
-                        ).strip()
-                        if carrier
-                        else "Unknown"
-                    ),
-                    order_name=f"#{order.group(1)}",
-                    message_id=message_id,
-                    email_date=email_date,
-                ),
-                skip_reason=None,
-                strategy_used=STRATEGY_REGEX,
+                shipment=None,
+                skip_reason="no_tracking_label",
+                strategy_used=None,
                 keyword_hits=hits,
             )
+
+        raw_tracking = tracking.group(1).upper()
+        if not _looks_like_tracking(raw_tracking):
+            return ParseResult(
+                shipment=None,
+                skip_reason="tracking_invalid",
+                strategy_used=None,
+                keyword_hits=hits,
+            )
+
         return ParseResult(
-            shipment=None,
-            skip_reason="no_regex_match",
-            strategy_used=None,
+            shipment=ShipmentData(
+                tracking_number=raw_tracking,
+                carrier_name=(
+                    next(
+                        (g for g in (carrier.group(1), carrier.group(2)) if g),
+                        "Unknown",
+                    ).strip()
+                    if carrier
+                    else "Unknown"
+                ),
+                order_name=f"#{order.group(1).upper()}" if order else "",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_REGEX,
             keyword_hits=hits,
+        )
+
+    def _parse_regex_tier2(self, html: str, message_id: str, email_date: int) -> ParseResult:
+        """Strategy 3: broad token sweep — no keyword gate, maximum recall.
+
+        Collects ALL tracking-shaped tokens from full text and href URLs.
+        Returns the best (longest) match with carrier inferred from shape.
+        Populates candidate_tokens with every token found for diagnostic use.
+        False positives are expected here and filtered in a later phase.
+        """
+        soup = BeautifulSoup(html, "lxml")
+        text = soup.get_text(separator=" ")
+
+        candidates: list[str] = []
+        for token in re.findall(r"\b([A-Za-z0-9]{10,40})\b", text):
+            upper = token.upper()
+            if _looks_like_tracking(upper) and upper not in candidates:
+                candidates.append(upper)
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            try:
+                parsed = urlparse(href)
+                for values in parse_qs(parsed.query).values():
+                    for value in values:
+                        upper = value.upper()
+                        if _looks_like_tracking(upper) and upper not in candidates:
+                            candidates.append(upper)
+                for segment in parsed.path.strip("/").split("/"):
+                    upper = segment.upper()
+                    if _looks_like_tracking(upper) and upper not in candidates:
+                        candidates.append(upper)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug("Failed to parse Tier 2 href %r: %s", href, exc)
+                continue
+
+        if not candidates:
+            return ParseResult(
+                shipment=None,
+                skip_reason="no_tracking_pattern",
+                strategy_used=None,
+                keyword_hits={
+                    "tracking_regex": False,
+                    "order_regex": False,
+                    "carrier_regex": False,
+                },
+                candidate_tokens=[],
+            )
+
+        best = max(candidates, key=len)
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=best,
+                carrier_name=_infer_carrier(best),
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_BROAD_REGEX,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+            candidate_tokens=candidates,
         )

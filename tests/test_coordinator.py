@@ -933,10 +933,10 @@ async def test_diagnostics_no_html_body_skip_reason(hass, mock_config_entry):
         await coord._async_update_data()
         assert coord._diagnostics.emails_scanned_total == 1
         assert coord._diagnostics.last_poll_emails_scanned == 1
-        assert {
-            "message_id": "msg1",
-            "reason": "no_html_body",
-        } in coord._diagnostics.last_poll_skip_reasons
+        assert any(
+            e.get("message_id") == "msg1" and e.get("reason") == "no_html_body"
+            for e in coord._diagnostics.last_poll_skip_reasons
+        )
         # Parser was NOT invoked because html was empty
         mock_parser_cls.return_value.parse.assert_not_called()
         # _last_email_timestamp must advance even for no_html_body skips (WR-02 fix)
@@ -1339,8 +1339,9 @@ async def test_imap_no_html_body_does_not_advance_uid(hass, mock_imap_config_ent
     assert "200" not in coord._forwarded_ids
     # Diagnostics must record the skip reason
     assert coord._diagnostics.emails_scanned_total == 1
-    assert {"message_id": "200", "reason": "no_html_body"} in (
-        coord._diagnostics.last_poll_skip_reasons
+    assert any(
+        e.get("message_id") == "200" and e.get("reason") == "no_html_body"
+        for e in coord._diagnostics.last_poll_skip_reasons
     )
     # No delivery attempt
     mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
