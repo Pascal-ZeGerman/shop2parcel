@@ -423,9 +423,13 @@ def test_html_template_href_fallback_finds_tracking() -> None:
 
 
 def test_tier2_finds_bare_tracking_token_in_h2() -> None:
-    """Tier 2 broad scan finds tracking number in <h2> with no keyword label."""
+    """Tier 2 broad scan finds tracking number in <h2> with no keyword label.
+
+    PR4-C2: Tier 2 is now opt-in; enable_broad_scan=True is required to exercise
+    this path via parse(). The test's intent (verify Tier 2 works) is preserved.
+    """
     html = "<html><body><h2>1Z999AA10123456784</h2></body></html>"
-    parser = EmailParser()
+    parser = EmailParser(enable_broad_scan=True)  # PR4-C2: must opt-in to Tier 2
     result = parser.parse(html, "msg_tier2", 0)
     assert result.shipment is not None
     assert result.shipment.tracking_number == "1Z999AA10123456784"

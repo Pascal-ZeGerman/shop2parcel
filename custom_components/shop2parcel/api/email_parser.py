@@ -60,7 +60,9 @@ class ParseResult:
     """
 
     shipment: ShipmentData | None
-    skip_reason: str | None  # "no_template_match" | "no_tracking_label" | "tracking_invalid" | "no_tracking_pattern" | None
+    skip_reason: (
+        str | None
+    )  # "no_template_match" | "no_tracking_label" | "tracking_invalid" | "no_tracking_pattern" | None
     strategy_used: str | None  # "html_template" | "regex_fallback" | "broad_regex" | None
     keyword_hits: dict[str, bool]  # keys always: tracking_regex, order_regex, carrier_regex
     candidate_tokens: list[str] = field(default_factory=list)
@@ -340,7 +342,11 @@ class EmailParser:
                 shipment=None,
                 skip_reason="no_tracking_pattern",
                 strategy_used=None,
-                keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+                keyword_hits={
+                    "tracking_regex": False,
+                    "order_regex": False,
+                    "carrier_regex": False,
+                },
             )
         return self._parse_regex_tier2(html, message_id, email_date)
 
@@ -532,7 +538,11 @@ class EmailParser:
                 shipment=None,
                 skip_reason="no_tracking_pattern",
                 strategy_used=None,
-                keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+                keyword_hits={
+                    "tracking_regex": False,
+                    "order_regex": False,
+                    "carrier_regex": False,
+                },
                 candidate_tokens=[],
             )
 

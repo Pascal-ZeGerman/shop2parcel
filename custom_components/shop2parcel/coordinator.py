@@ -527,9 +527,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Set up parser + parcelapp client (same as Gmail path).
         # PR4-C2: Tier 2 broad scan is opt-in (default OFF).
         parser = EmailParser(
-            enable_broad_scan=entry.options.get(
-                CONF_ENABLE_BROAD_SCAN, DEFAULT_ENABLE_BROAD_SCAN
-            )
+            enable_broad_scan=entry.options.get(CONF_ENABLE_BROAD_SCAN, DEFAULT_ENABLE_BROAD_SCAN)
         )
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
