@@ -15,6 +15,7 @@ Locked decisions (CONTEXT.md):
 from __future__ import annotations
 
 import email as _email_stdlib
+import html as _html_stdlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_API_KEY,
     CONF_CONNECTION_TYPE,
+    CONF_ENABLE_BROAD_SCAN,
     CONF_GMAIL_QUERY,
     CONF_IMAP_HOST,
     CONF_IMAP_PASSWORD,
@@ -59,6 +61,7 @@ from .const import (
     CONF_POLL_INTERVAL,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
+    DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_POLL_INTERVAL,
@@ -258,7 +261,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raise UpdateFailed(f"Gmail transient error: {err}") from err
 
         # 3. Set up parser + parcelapp client (session injection per HA quality rule).
-        parser = EmailParser()
+        # PR4-C2: Tier 2 broad scan is opt-in (default OFF) to prevent
+        # forwarding false positives that consume ParcelApp's 20/day quota.
+        parser = EmailParser(
+            enable_broad_scan=self.config_entry.options.get(
+                CONF_ENABLE_BROAD_SCAN, DEFAULT_ENABLE_BROAD_SCAN
+            )
+        )
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
             api_key=self.config_entry.data[CONF_API_KEY],
@@ -292,11 +301,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # _last_email_timestamp indefinitely (WR-02 fix).
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
-            except ValueError:
-                _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
-                d.emails_scanned_total += 1
-                d.last_poll_emails_scanned += 1
-            except TypeError:
+            except (ValueError, TypeError):
+                # PR4-C3: previously the ValueError branch was missing both
+                # `continue` and the skip_reason append, causing an
+                # UnboundLocalError when execution fell through to use
+                # email_date below. Both error types now share one handler.
                 _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
@@ -310,7 +319,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if not html:
                 text_body = extract_text_body(payload)
                 if text_body:
-                    html = f"<html><body><p>{text_body}</p></body></html>"
+                    # PR4-I1: escape angle brackets/ampersands so plain-text
+                    # bodies with raw '<', '>', '&' don't produce malformed
+                    # HTML for BeautifulSoup. Use <pre> to preserve newlines
+                    # for downstream regex/text scanning.
+                    html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
             if not html:
                 # Phase 7 (D-02): no_html_body is set by the COORDINATOR — the parser
                 # never sees this case because we don't call parser.parse on empty HTML.
@@ -512,7 +525,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raise UpdateFailed(f"IMAP transient error: {err}") from err
 
         # Set up parser + parcelapp client (same as Gmail path).
-        parser = EmailParser()
+        # PR4-C2: Tier 2 broad scan is opt-in (default OFF).
+        parser = EmailParser(
+            enable_broad_scan=entry.options.get(
+                CONF_ENABLE_BROAD_SCAN, DEFAULT_ENABLE_BROAD_SCAN
+            )
+        )
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
             api_key=entry.data[CONF_API_KEY],
@@ -538,7 +556,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if not html:
                 text_body = extract_text_body_imap(raw_bytes)
                 if text_body:
-                    html = f"<html><body><p>{text_body}</p></body></html>"
+                    # PR4-I1: same escape+<pre> wrap as Gmail path.
+                    html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
             if not html:
                 _LOGGER.debug("IMAP UID %s: no HTML body found, skipping", uid_str)
                 d.emails_scanned_total += 1
