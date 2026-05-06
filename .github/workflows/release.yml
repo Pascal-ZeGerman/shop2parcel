@@ -15,12 +15,34 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Validate manifest.json version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          MANIFEST_VERSION="$(jq -r '.version' custom_components/shop2parcel/manifest.json)"
+          if [[ "$MANIFEST_VERSION" != "$TAG_VERSION" ]]; then
+            echo "ERROR: manifest.json version ($MANIFEST_VERSION) does not match tag ($TAG_VERSION)"
+            echo "Bump manifest.json version to $TAG_VERSION before tagging."
+            exit 1
+          fi
+          echo "manifest.json version matches tag: $TAG_VERSION"
+
+      - name: Detect pre-release
+        id: prerelease
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-rc* || "$GITHUB_REF_NAME" == *-beta* || "$GITHUB_REF_NAME" == *-alpha* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2.3.2  # pinned to specific release tag (supply-chain safety)
         with:
           generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           body: |
