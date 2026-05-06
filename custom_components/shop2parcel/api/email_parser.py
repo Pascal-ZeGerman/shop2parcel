@@ -18,12 +18,15 @@ No HA imports (D-01/D-03).
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -132,7 +135,8 @@ def _extract_tracking_from_hrefs(soup: BeautifulSoup) -> str | None:
                 upper = segment.upper()
                 if _looks_like_tracking(upper):
                     return upper
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Failed to parse href %r: %s", href, exc)
             continue
     return None
 
@@ -358,9 +362,11 @@ class EmailParser:
                 if m:
                     order_name = f"#{m.group(1).upper()}"
             if not carrier_name:
+                # PR4-I4: non-greedy quantifier + IGNORECASE to match Tier 1 behavior.
                 m = re.search(
-                    r"\bvia\s+([A-Za-z][A-Za-z ]{1,29})(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
+                    r"\bvia\s+([A-Za-z][A-Za-z ]{1,29}?)(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
                     text,
+                    re.IGNORECASE,
                 )
                 if m:
                     carrier_name = m.group(1).strip()
@@ -412,10 +418,14 @@ class EmailParser:
             text,
             re.IGNORECASE,
         )
-        order = re.search(r"order\s*[#:]?\s*([A-Z0-9][\w\-]{1,30})", text, re.IGNORECASE)
+        # PR4-C1: '#' or ':' is now required after 'order' to prevent false positives
+        # like "Your order has shipped" -> order_name="#HAS".
+        order = re.search(r"order\s*[#:]\s*([A-Z0-9][\w\-]{1,30})", text, re.IGNORECASE)
+        # PR4-I4: non-greedy inner quantifier prevents "shipped via UPS with care"
+        # from yielding carrier_name="UPS with care".
         carrier = re.search(
-            r"(?:via|carrier)\s+(?:by\s+)?([A-Za-z][A-Za-z ]{2,29})(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)"
-            r"|shipped\s+by\s+([A-Za-z][A-Za-z ]{2,29})(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
+            r"(?:via|carrier)\s+(?:by\s+)?([A-Za-z][A-Za-z ]{2,29}?)(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)"
+            r"|shipped\s+by\s+([A-Za-z][A-Za-z ]{2,29}?)(?:\s+(?:with|on|by|for|to)\b|\s*$|\.)",
             text,
             re.IGNORECASE,
         )
@@ -513,7 +523,8 @@ class EmailParser:
                     upper = segment.upper()
                     if _looks_like_tracking(upper) and upper not in candidates:
                         candidates.append(upper)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug("Failed to parse Tier 2 href %r: %s", href, exc)
                 continue
 
         if not candidates:
