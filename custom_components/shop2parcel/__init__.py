@@ -27,7 +27,7 @@ from .const import DOMAIN
 # Phase 7 (D-13): diagnostic sensors are co-registered under the "sensor" platform
 # via sensor.py::async_setup_entry — "diagnostic_sensor" is not a built-in HA
 # platform domain, so it cannot be forwarded via async_forward_entry_setups.
-PLATFORMS: list[str] = ["sensor", "binary_sensor"]
+PLATFORMS: list[str] = ["sensor", "binary_sensor", "button"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

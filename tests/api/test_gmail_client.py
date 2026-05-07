@@ -177,7 +177,7 @@ async def test_list_messages_no_after_timestamp():
 
 
 async def test_list_messages_returns_message_list():
-    """Executor returns {'messages': [{'id': 'abc'}]} → method returns [{'id': 'abc'}]."""
+    """Executor returns {'messages': [{'id': 'abc'}]} → method returns ([{'id': 'abc'}], query)."""
     service = MagicMock()
     list_request = MagicMock()
     list_request.execute = MagicMock(return_value={"messages": [{"id": "abc"}]})
@@ -185,12 +185,13 @@ async def test_list_messages_returns_message_list():
 
     executor = _CapturingExecutor(service=service, execute_return={"messages": [{"id": "abc"}]})
     client = GmailClient(executor)
-    result = await client.async_list_messages("fake-token", "from:shopify")
-    assert result == [{"id": "abc"}]
+    messages, effective_query = await client.async_list_messages("fake-token", "from:shopify")
+    assert messages == [{"id": "abc"}]
+    assert "after:" in effective_query
 
 
 async def test_list_messages_returns_empty_on_no_results():
-    """Executor returns {} → method returns []."""
+    """Executor returns {} → method returns ([], query)."""
     service = MagicMock()
     list_request = MagicMock()
     list_request.execute = MagicMock(return_value={})
@@ -198,8 +199,9 @@ async def test_list_messages_returns_empty_on_no_results():
 
     executor = _CapturingExecutor(service=service, execute_return={})
     client = GmailClient(executor)
-    result = await client.async_list_messages("fake-token", "from:shopify")
-    assert result == []
+    messages, effective_query = await client.async_list_messages("fake-token", "from:shopify")
+    assert messages == []
+    assert "after:" in effective_query
 
 
 # ---------------------------------------------------------------------------

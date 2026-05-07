@@ -47,7 +47,7 @@ class GmailClient:
         query: str,
         after_timestamp: int | None = None,
         rescan_window_days: int = 30,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str]:
         """List Gmail messages matching query, optionally filtered by date.
 
         EMAIL-02: query is configurable (default: from:no-reply@shopify.com subject:shipped).
@@ -71,7 +71,7 @@ class GmailClient:
                 page_token = result.get("nextPageToken")
                 if not page_token:
                     break
-            return all_messages
+            return all_messages, full_query
         except Exception as err:
             _classify_gmail_error(err)
 

@@ -33,6 +33,7 @@ from .diagnostic_sensor import (
     EmailsMatchedSensor,
     EmailsScannedSensor,
     KeywordHitsSensor,
+    NewEmailsInspectedSensor,
     TrackingNumbersFoundSensor,
 )
 
@@ -59,10 +60,11 @@ async def async_setup_entry(
     """
     coordinator: Shop2ParcelCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
-    # Phase 7 (D-09): register the 4 static diagnostic sensors.
+    # Phase 7 (D-09): register static diagnostic sensors.
     async_add_entities(
         [
             EmailsScannedSensor(coordinator, entry),
+            NewEmailsInspectedSensor(coordinator, entry),
             EmailsMatchedSensor(coordinator, entry),
             TrackingNumbersFoundSensor(coordinator, entry),
             KeywordHitsSensor(coordinator, entry),

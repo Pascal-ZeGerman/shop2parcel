@@ -36,7 +36,7 @@ async def test_setup_entry_wires_coordinator(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         result = await hass.config_entries.async_setup(mock_config_entry.entry_id)
     assert result is True
     assert DOMAIN in hass.data
@@ -66,7 +66,7 @@ async def test_setup_entry_calls_load_store_before_first_refresh(hass, mock_conf
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         # Track call order via parent mock
         store_load = AsyncMock(return_value=None)
-        list_messages = AsyncMock(return_value=[])
+        list_messages = AsyncMock(return_value=([], "q after:0"))
         parent.attach_mock(store_load, "async_load")
         parent.attach_mock(list_messages, "async_list_messages")
         mock_store_cls.return_value.async_load = store_load
@@ -114,7 +114,7 @@ async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         assert mock_config_entry.entry_id in hass.data[DOMAIN]
         await hass.config_entries.async_unload(mock_config_entry.entry_id)
@@ -122,10 +122,10 @@ async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
 
 
 async def test_setup_entry_forwards_to_sensor_platforms(hass, mock_config_entry):
-    """CONTEXT.md D-09: PLATFORMS = ['sensor', 'binary_sensor'] in Phase 5."""
+    """CONTEXT.md D-09: PLATFORMS includes sensor, binary_sensor, and button."""
     from custom_components.shop2parcel import PLATFORMS
 
-    assert PLATFORMS == ["sensor", "binary_sensor"]
+    assert PLATFORMS == ["sensor", "binary_sensor", "button"]
 
 
 async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_config_entry):
@@ -145,7 +145,7 @@ async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_c
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         cancel_cb = MagicMock()
         mock_track.return_value = cancel_cb
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
@@ -175,7 +175,7 @@ async def test_unload_entry_cancels_cleanup_task(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         cancel_cb.assert_not_called()  # Setup does NOT call cancel
         await hass.config_entries.async_unload(mock_config_entry.entry_id)

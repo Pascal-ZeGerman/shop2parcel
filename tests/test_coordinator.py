@@ -117,7 +117,7 @@ async def test_new_shipment_is_posted(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -155,7 +155,7 @@ async def test_no_duplicate_post(hass, mock_config_entry):
             return_value={"forwarded_ids": ["msg1"], "quota_exhausted_until": None}
         )
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock()
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
@@ -209,7 +209,7 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
         mock_store_cls.return_value.async_save = AsyncMock()
         # Gmail returns the same sentinel_msg
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "sentinel_msg"}]
+            return_value=([{"id": "sentinel_msg"}], "q after:0")
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock()
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
@@ -250,7 +250,7 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         save_mock = AsyncMock()
         mock_store_cls.return_value.async_save = save_mock
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "msg1"}, {"id": "msg2"}]
+            return_value=([{"id": "msg1"}, {"id": "msg2"}], "q after:0")
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
@@ -292,7 +292,7 @@ async def test_quota_exhaustion(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -334,7 +334,7 @@ async def test_quota_exhausted_until_midnight(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -370,7 +370,7 @@ async def test_quota_exhausted_until_reset_at(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -407,7 +407,7 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "new_msg"}]
+            return_value=([{"id": "new_msg"}], "q after:0")
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
@@ -460,7 +460,7 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         save_mock = AsyncMock()
         mock_store_cls.return_value.async_save = save_mock
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "msg_recover"}]
+            return_value=([{"id": "msg_recover"}], "q after:0")
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
@@ -513,7 +513,7 @@ async def test_parcelapp_transient_error_skipped(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -632,7 +632,7 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         save_mock = AsyncMock()
         mock_store_cls.return_value.async_save = save_mock
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -669,7 +669,7 @@ async def test_cleanup_no_deliveries_in_data(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
         with patch.object(coordinator, "async_set_updated_data") as set_data:
@@ -700,7 +700,7 @@ async def test_cleanup_removes_delivered_from_data(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
 
@@ -734,7 +734,7 @@ async def test_cleanup_uses_filter_mode_recent(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
         # Seed data so the early-return guard (WR-01) doesn't skip the API call
@@ -772,7 +772,7 @@ async def test_cleanup_handles_auth_error(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         raw = hass.data[DOMAIN][mock_config_entry.entry_id]
         coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
@@ -799,7 +799,7 @@ async def test_cleanup_handles_transient_error(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         raw = hass.data[DOMAIN][mock_config_entry.entry_id]
         coordinator = raw["coordinator"] if isinstance(raw, dict) else raw
@@ -833,7 +833,7 @@ async def test_diagnostics_emails_scanned_increments(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -842,6 +842,11 @@ async def test_diagnostics_emails_scanned_increments(hass, mock_config_entry):
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         await coord._async_update_data()
+        assert coord._diagnostics.emails_returned_total == 1
+        assert coord._diagnostics.last_poll_emails_returned == 1
+        assert coord._diagnostics.last_poll_emails_skipped_dedup == 0
+        assert coord._diagnostics.forwarded_ids_count == 1
+        assert coord._diagnostics.last_poll_effective_query is not None
         assert coord._diagnostics.emails_scanned_total == 1
         assert coord._diagnostics.emails_matched_total == 1
         assert coord._diagnostics.tracking_numbers_found_total == 1
@@ -874,7 +879,7 @@ async def test_diagnostics_last_poll_fields_reset_per_cycle(hass, mock_config_en
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            side_effect=[[{"id": "msg1"}], [{"id": "msg2"}]]
+            side_effect=[([{"id": "msg1"}], "q after:0"), ([{"id": "msg2"}], "q after:0")]
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
@@ -889,17 +894,21 @@ async def test_diagnostics_last_poll_fields_reset_per_cycle(hass, mock_config_en
         # First poll
         await coord._async_update_data()
         assert coord._diagnostics.last_poll_emails_scanned == 1
+        assert coord._diagnostics.last_poll_emails_returned == 1
         assert len(coord._diagnostics.last_poll_found) == 1
         # Cumulative carries over from poll 1
         assert coord._diagnostics.emails_scanned_total == 1
+        assert coord._diagnostics.emails_returned_total == 1
         # Second poll — last_poll_* must reset before processing msg2
         await coord._async_update_data()
         assert coord._diagnostics.last_poll_emails_scanned == 1  # only msg2 this cycle
+        assert coord._diagnostics.last_poll_emails_returned == 1  # only msg2 this cycle
         assert len(coord._diagnostics.last_poll_found) == 1  # only msg2 this cycle
         assert coord._diagnostics.last_poll_found[0]["message_id"] == "msg2"
         # Cumulative now reflects both polls
         assert coord._diagnostics.emails_scanned_total == 2
         assert coord._diagnostics.emails_matched_total == 2
+        assert coord._diagnostics.emails_returned_total == 2
 
 
 async def test_diagnostics_no_html_body_skip_reason(hass, mock_config_entry):
@@ -925,7 +934,7 @@ async def test_diagnostics_no_html_body_skip_reason(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -967,13 +976,16 @@ async def test_diagnostics_already_forwarded_not_scanned(hass, mock_config_entry
             return_value={"forwarded_ids": ["msg1"], "quota_exhausted_until": None}
         )
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock()
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         await coord._async_update_data()
-        # msg1 was skipped by _forwarded_ids guard — not counted.
+        # msg1 was skipped by _forwarded_ids guard — not counted as scanned.
+        assert coord._diagnostics.emails_returned_total == 1
+        assert coord._diagnostics.last_poll_emails_returned == 1
+        assert coord._diagnostics.last_poll_emails_skipped_dedup == 1
         assert coord._diagnostics.emails_scanned_total == 0
         assert coord._diagnostics.last_poll_emails_scanned == 0
         # Parser was never called for msg1
@@ -1204,7 +1216,7 @@ async def test_last_email_timestamp_advances_for_no_html_body(hass, mock_config_
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=[{"id": "msg_no_html"}]
+            return_value=([{"id": "msg_no_html"}], "q after:0")
         )
         # internalDate: 1700000000000 ms → 1700000000 seconds
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
@@ -1261,7 +1273,7 @@ async def test_parcelapp_auth_error_mid_loop_raises_config_entry_auth_failed(
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -1385,7 +1397,7 @@ async def test_gmail_poll_passes_rescan_window_to_client(hass, mock_config_entry
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         mock_parser_cls.return_value.parse.return_value = _make_parse_result(
             None, skip_reason="no_match"
@@ -1431,7 +1443,7 @@ async def test_gmail_poll_uses_default_rescan_window_when_unset(hass, mock_confi
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         mock_parser_cls.return_value.parse.return_value = _make_parse_result(
             None, skip_reason="no_match"

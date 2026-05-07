@@ -130,10 +130,15 @@ class PollStats:
       last_poll_* fields: reset at the top of every _async_update_data call (D-06).
     """
 
+    emails_returned_total: int = 0
     emails_scanned_total: int = 0
     emails_matched_total: int = 0
     tracking_numbers_found_total: int = 0
     keyword_hits_total: int = 0
+    last_poll_emails_returned: int = 0
+    last_poll_emails_skipped_dedup: int = 0
+    forwarded_ids_count: int = 0
+    last_poll_effective_query: str | None = None
     last_poll_emails_scanned: int = 0
     last_poll_emails_matched: int = 0
     last_poll_time: float | None = None
@@ -247,6 +252,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
         d = self._diagnostics
+        d.last_poll_emails_returned = 0
+        d.last_poll_emails_skipped_dedup = 0
+        d.last_poll_effective_query = None
         d.last_poll_emails_scanned = 0
         d.last_poll_emails_matched = 0
         d.last_poll_skip_reasons = []
@@ -257,7 +265,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.last_poll_query = query
 
         try:
-            messages = await gmail.async_list_messages(
+            messages, effective_query = await gmail.async_list_messages(
                 access_token,
                 query,
                 after_timestamp=self._last_email_timestamp,
@@ -267,6 +275,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raise ConfigEntryAuthFailed("Gmail auth error") from err
         except GmailTransientError as err:
             raise UpdateFailed(f"Gmail transient error: {err}") from err
+
+        d.emails_returned_total += len(messages)
+        d.last_poll_emails_returned = len(messages)
+        d.last_poll_effective_query = effective_query
 
         # 3. Set up parser + parcelapp client (session injection per HA quality rule).
         # PR4-C2: Tier 2 broad scan is opt-in (default OFF) to prevent
@@ -292,6 +304,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         for msg_meta in messages:
             msg_id = msg_meta["id"]
             if msg_id in self._forwarded_ids:
+                d.last_poll_emails_skipped_dedup += 1
                 continue
 
             try:
@@ -470,6 +483,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 7: capture per-poll timing (D-04, Specifics).
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
+        d.forwarded_ids_count = len(self._forwarded_ids)
 
         timestamp_advanced = max_email_date > (self._last_email_timestamp or 0)
         if timestamp_advanced:
@@ -507,6 +521,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         poll_start = time.time()
         d = self._diagnostics
         query = entry.options.get(CONF_IMAP_SEARCH, DEFAULT_IMAP_SEARCH)
+        d.last_poll_emails_returned = 0
+        d.last_poll_emails_skipped_dedup = 0
         d.last_poll_emails_scanned = 0
         d.last_poll_emails_matched = 0
         d.last_poll_skip_reasons = []
@@ -515,6 +531,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.last_poll_time = poll_start  # record attempt time even if poll fails mid-cycle
         d.last_poll_duration_ms = None
         d.last_poll_query = query
+        # last_poll_effective_query not set for IMAP (no Gmail after: filter)
 
         # Fetch messages from IMAP (whole session in one executor call per D-05/Pitfall 6).
         try:
@@ -531,6 +548,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raise ConfigEntryAuthFailed("IMAP auth error") from err
         except ImapTransientError as err:
             raise UpdateFailed(f"IMAP transient error: {err}") from err
+
+        d.emails_returned_total += len(raw_messages)
+        d.last_poll_emails_returned = len(raw_messages)
 
         # Set up parser + parcelapp client (same as Gmail path).
         # PR4-C2: Tier 2 broad scan is opt-in (default OFF).
@@ -554,6 +574,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # IMAP uid used as message_id for deduplication (D-08).
             uid_str = str(msg_info["uid"])
             if uid_str in self._forwarded_ids:
+                d.last_poll_emails_skipped_dedup += 1
                 continue
 
             raw_bytes: bytes = msg_info["raw"]
@@ -672,6 +693,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 7: capture per-poll timing.
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
+        d.forwarded_ids_count = len(self._forwarded_ids)
 
         # Update last_imap_uid after successful fetch (D-08).
         # CRITICAL: Do NOT advance if any message was quota-blocked this cycle.
@@ -701,6 +723,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             await self._async_save_store()
 
         return current_data
+
+    async def async_reset_forwarded_ids(self) -> None:
+        """Clear dedup cache and reset scan window. Called by ResetEmailCacheButton."""
+        self._forwarded_ids.clear()
+        self._last_email_timestamp = None
+        self._last_imap_uid = None
+        await self._async_save_store()
+        _LOGGER.info(
+            "forwarded_ids reset for entry %s — next poll rescans from window start",
+            self.config_entry.entry_id if self.config_entry else "unknown",
+        )
 
     async def async_cleanup_delivered(self, now: datetime) -> None:
         """Remove delivered shipments from coordinator.data and the entity registry.

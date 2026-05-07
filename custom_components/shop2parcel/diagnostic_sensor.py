@@ -55,9 +55,9 @@ class DiagnosticSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
 
 
 class EmailsScannedSensor(DiagnosticSensor):
-    """sensor.shop2parcel_emails_scanned — total emails scanned since HA restart."""
+    """sensor.shop2parcel_emails_scanned — raw emails returned by Gmail/IMAP before dedup."""
 
-    _attr_name = "Emails Scanned"
+    _attr_name = "Emails Returned"
 
     def __init__(
         self,
@@ -65,22 +65,49 @@ class EmailsScannedSensor(DiagnosticSensor):
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
+        # unique_id kept as _emails_scanned to avoid orphaning existing entity registry entry.
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_emails_scanned"
 
     @property
     def native_value(self) -> int:
-        # Pitfall 5: _diagnostics is always a PollStats() — never None.
-        return self.coordinator._diagnostics.emails_scanned_total
+        return self.coordinator._diagnostics.emails_returned_total
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator._diagnostics
         return {
-            "last_poll_count": d.last_poll_emails_scanned,
+            "last_poll_returned": d.last_poll_emails_returned,
+            "last_poll_skipped_dedup": d.last_poll_emails_skipped_dedup,
+            "last_poll_inspected": d.last_poll_emails_scanned,
+            "forwarded_ids_count": d.forwarded_ids_count,
             "last_poll_time": d.last_poll_time,
             "query_used": d.last_poll_query,
+            "effective_query_used": d.last_poll_effective_query,
             "poll_duration_ms": d.last_poll_duration_ms,
         }
+
+
+class NewEmailsInspectedSensor(DiagnosticSensor):
+    """sensor.shop2parcel_new_emails_inspected — emails that passed dedup and were inspected."""
+
+    _attr_name = "New Emails Inspected"
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_new_emails_inspected"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator._diagnostics.emails_scanned_total
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        d = self.coordinator._diagnostics
+        return {"last_poll_count": d.last_poll_emails_scanned}
 
 
 class EmailsMatchedSensor(DiagnosticSensor):
