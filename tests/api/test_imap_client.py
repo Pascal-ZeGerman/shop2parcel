@@ -70,7 +70,7 @@ def test_imap_client_never_calls_mutating_commands():
             "password",
             "ssl",
             'SUBJECT "shipped"',
-            None,
+            "8-May-2026",
         )
 
     mock_conn.store.assert_not_called()
@@ -87,8 +87,8 @@ def test_imap_client_never_calls_mutating_commands():
 # ---------------------------------------------------------------------------
 
 
-async def test_fetch_shipping_emails_returns_tuple():
-    """D-06: fetch_shipping_emails returns (list[dict], int|None) tuple."""
+async def test_fetch_shipping_emails_returns_list():
+    """D-11: fetch_shipping_emails returns list[dict] — no tuple, no max_uid."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
 
     mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
@@ -106,14 +106,11 @@ async def test_fetch_shipping_emails_returns_tuple():
             password="password",
             tls_mode="ssl",
             search_criteria='SUBJECT "shipped"',
-            since_uid=None,
+            since_date="8-May-2026",
         )
 
-    assert isinstance(result, tuple)
-    assert len(result) == 2
-    emails, max_uid = result
-    assert isinstance(emails, list)
-    assert max_uid is None  # no messages found
+    assert isinstance(result, list)
+    assert len(result) == 0  # no messages found
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +137,7 @@ def test_imap_client_uses_examine_not_select():
             "password",
             "ssl",
             'SUBJECT "shipped"',
-            None,
+            "8-May-2026",
         )
 
     # imaplib.IMAP4.select(mailbox, readonly=True) issues EXAMINE at protocol level
@@ -177,7 +174,7 @@ def test_imap_login_failure_raises_imap_auth_error():
                 "wrong-password",
                 "ssl",
                 'SUBJECT "shipped"',
-                None,
+                "8-May-2026",
             )
 
 
@@ -243,7 +240,7 @@ def test_starttls_failure_does_not_leak_socket():
                 "password",
                 "starttls",
                 'SUBJECT "shipped"',
-                None,
+                "8-May-2026",
             )
 
     mock_conn.logout.assert_called_once()
@@ -269,13 +266,13 @@ def test_imap4_ssl_constructor_failure_does_not_leak_socket():
                 "password",
                 "ssl",
                 'SUBJECT "shipped"',
-                None,
+                "8-May-2026",
             )
     # If we get here without AttributeError on NoneType.logout(), the guard works.
 
 
-def test_fetch_with_since_uid_uses_uid_range():
-    """since_uid non-None path sends UID range '(since_uid+1):*' prefix to SEARCH."""
+def test_since_date_search_criteria():
+    """D-11: _fetch_sync passes 'SINCE {since_date} {search_criteria}' to conn.uid SEARCH."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
 
     mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
@@ -286,19 +283,24 @@ def test_fetch_with_since_uid_uses_uid_range():
 
     with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
         client = ImapClient(_inline_executor)
-        client._fetch_sync(
-            "imap.example.com",
-            993,
-            "user@example.com",
-            "password",
-            "ssl",
-            'SUBJECT "shipped"',
-            since_uid=99,
+        import asyncio  # noqa: PLC0415
+        asyncio.get_event_loop().run_until_complete(
+            client.fetch_shipping_emails(
+                host="h",
+                port=993,
+                username="u",
+                password="p",
+                tls_mode="ssl",
+                search_criteria='SUBJECT "shipped"',
+                since_date="8-May-2026",
+            )
         )
 
     search_call = mock_conn.uid.call_args_list[0]
     uid_arg = search_call[0][1]
-    assert uid_arg.startswith("100:"), f"Expected UID range '100:*...', got: {uid_arg!r}"
+    assert uid_arg == 'SINCE 8-May-2026 SUBJECT "shipped"', (
+        f"Expected SINCE date search criterion, got: {uid_arg!r}"
+    )
 
 
 def test_select_non_ok_raises_imap_transient_error():
@@ -326,5 +328,5 @@ def test_select_non_ok_raises_imap_transient_error():
                 "password",
                 "ssl",
                 'SUBJECT "shipped"',
-                None,
+                "8-May-2026",
             )
