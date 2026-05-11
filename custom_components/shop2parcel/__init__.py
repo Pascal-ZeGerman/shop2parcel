@@ -11,6 +11,9 @@ Responsibilities:
 - Stores the coordinator in hass.data[DOMAIN][entry.entry_id] as a dict keyed
   by "coordinator" so sensor.py and binary_sensor.py can retrieve it.
 - Forwards platform setup to PLATFORMS ("sensor", "binary_sensor").
+  The button platform was removed in Phase 10 (D-04): the Reset Email Cache
+  button is no longer needed because dedup now uses persisted tracking numbers
+  rather than a message-ID cache that required manual clearing.
 """
 
 from __future__ import annotations
@@ -27,7 +30,10 @@ from .const import DOMAIN
 # Phase 7 (D-13): diagnostic sensors are co-registered under the "sensor" platform
 # via sensor.py::async_setup_entry — "diagnostic_sensor" is not a built-in HA
 # platform domain, so it cannot be forwarded via async_forward_entry_setups.
-PLATFORMS: list[str] = ["sensor", "binary_sensor", "button"]
+# Phase 10 (D-04): button platform removed — the Reset Email Cache button is no
+# longer needed; dedup is now tracking-number-based (not message-ID-based) and
+# persisted in HA Store, so users never need to manually clear a cache.
+PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -122,10 +122,15 @@ async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
 
 
 async def test_setup_entry_forwards_to_sensor_platforms(hass, mock_config_entry):
-    """CONTEXT.md D-09: PLATFORMS includes sensor, binary_sensor, and button."""
+    """CONTEXT.md D-09 / Phase 10 D-04: PLATFORMS includes sensor and binary_sensor only.
+
+    The button platform was removed in Phase 10 (D-04) because the Reset Email
+    Cache button is no longer needed — dedup is now tracking-number-based and
+    persisted in HA Store automatically.
+    """
     from custom_components.shop2parcel import PLATFORMS
 
-    assert PLATFORMS == ["sensor", "binary_sensor", "button"]
+    assert PLATFORMS == ["sensor", "binary_sensor"]
 
 
 async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_config_entry):
