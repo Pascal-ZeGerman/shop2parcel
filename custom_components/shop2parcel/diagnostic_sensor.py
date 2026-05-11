@@ -79,7 +79,7 @@ class EmailsScannedSensor(DiagnosticSensor):
             "last_poll_returned": d.last_poll_emails_returned,
             "last_poll_skipped_dedup": d.last_poll_emails_skipped_dedup,
             "last_poll_inspected": d.last_poll_emails_scanned,
-            "forwarded_ids_count": d.forwarded_ids_count,
+            "submitted_tracking_count": d.submitted_tracking_count,
             "last_poll_time": d.last_poll_time,
             "query_used": d.last_poll_query,
             "effective_query_used": d.last_poll_effective_query,

@@ -54,11 +54,12 @@ async def test_diagnostics_imap_redaction(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
         patch("custom_components.shop2parcel.coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([], None))
+        # Phase 10: fetch_shipping_emails returns list[dict], not a tuple
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
         await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
         coordinator.async_set_updated_data({})
@@ -89,11 +90,12 @@ async def test_diagnostics_config_imap(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
         patch("custom_components.shop2parcel.coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([], None))
+        # Phase 10: fetch_shipping_emails returns list[dict], not a tuple
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
         await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
         coordinator.async_set_updated_data({})

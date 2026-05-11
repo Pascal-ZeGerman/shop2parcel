@@ -49,7 +49,7 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
