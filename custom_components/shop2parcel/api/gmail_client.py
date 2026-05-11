@@ -72,6 +72,7 @@ class GmailClient:
             return all_messages, full_query
         except Exception as err:
             _classify_gmail_error(err)
+            raise  # unreachable — _classify_gmail_error is NoReturn
 
     async def async_get_message(self, access_token: str, message_id: str) -> dict[str, Any]:
         """Fetch full message payload (format=full for MIME parts with body data)."""
@@ -81,6 +82,7 @@ class GmailClient:
             return await self._executor(request.execute)
         except Exception as err:
             _classify_gmail_error(err)
+            raise  # unreachable — _classify_gmail_error is NoReturn
 
 
 def build_incremental_query(
