@@ -271,7 +271,7 @@ def test_imap4_ssl_constructor_failure_does_not_leak_socket():
     # If we get here without AttributeError on NoneType.logout(), the guard works.
 
 
-def test_since_date_search_criteria():
+async def test_since_date_search_criteria():
     """D-11: _fetch_sync passes 'SINCE {since_date} {search_criteria}' to conn.uid SEARCH."""
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
 
@@ -283,17 +283,14 @@ def test_since_date_search_criteria():
 
     with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
         client = ImapClient(_inline_executor)
-        import asyncio  # noqa: PLC0415
-        asyncio.get_event_loop().run_until_complete(
-            client.fetch_shipping_emails(
-                host="h",
-                port=993,
-                username="u",
-                password="p",
-                tls_mode="ssl",
-                search_criteria='SUBJECT "shipped"',
-                since_date="8-May-2026",
-            )
+        await client.fetch_shipping_emails(
+            host="h",
+            port=993,
+            username="u",
+            password="p",
+            tls_mode="ssl",
+            search_criteria='SUBJECT "shipped"',
+            since_date="8-May-2026",
         )
 
     search_call = mock_conn.uid.call_args_list[0]
