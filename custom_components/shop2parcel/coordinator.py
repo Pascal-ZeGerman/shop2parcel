@@ -399,20 +399,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                         **email_meta,
                     }
                 )
-            else:
-                d.emails_matched_total += 1
-                d.last_poll_emails_matched += 1
-                d.tracking_numbers_found_total += 1
-                d.last_poll_found.append(
-                    {
-                        "tracking_number": result.shipment.tracking_number,
-                        "carrier": result.shipment.carrier_name,
-                        "order_name": result.shipment.order_name,
-                        "message_id": msg_id,
-                        "candidates": result.candidate_tokens,
-                        **email_meta,
-                    }
-                )
             # Keyword hit accumulation (D-08): always — HTML strategy gives all-False.
             for key, hit in result.keyword_hits.items():
                 if hit and key in d.keyword_hits_per_key:
@@ -428,6 +414,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if normalized in self._submitted_tracking_numbers:
                 d.last_poll_emails_skipped_dedup += 1
                 continue
+
+            # Only increment match/found counters after dedup confirms this is a new tracking number.
+            d.emails_matched_total += 1
+            d.last_poll_emails_matched += 1
+            d.tracking_numbers_found_total += 1
+            d.last_poll_found.append(
+                {
+                    "tracking_number": shipment.tracking_number,
+                    "carrier": shipment.carrier_name,
+                    "order_name": shipment.order_name,
+                    "message_id": msg_id,
+                    "candidates": result.candidate_tokens,
+                    **email_meta,
+                }
+            )
 
             # 5. Quota guard (D-05): when quota is exhausted, skip the POST.
             if quota_blocked:
@@ -614,20 +615,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                         **imap_meta,
                     }
                 )
-            else:
-                d.emails_matched_total += 1
-                d.last_poll_emails_matched += 1
-                d.tracking_numbers_found_total += 1
-                d.last_poll_found.append(
-                    {
-                        "tracking_number": result.shipment.tracking_number,
-                        "carrier": result.shipment.carrier_name,
-                        "order_name": result.shipment.order_name,
-                        "message_id": uid_str,
-                        "candidates": result.candidate_tokens,
-                        **imap_meta,
-                    }
-                )
             for key, hit in result.keyword_hits.items():
                 if hit and key in d.keyword_hits_per_key:
                     d.keyword_hits_per_key[key] += 1
@@ -642,6 +629,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if normalized in self._submitted_tracking_numbers:
                 d.last_poll_emails_skipped_dedup += 1
                 continue
+
+            # Only increment match/found counters after dedup confirms this is a new tracking number.
+            d.emails_matched_total += 1
+            d.last_poll_emails_matched += 1
+            d.tracking_numbers_found_total += 1
+            d.last_poll_found.append(
+                {
+                    "tracking_number": shipment.tracking_number,
+                    "carrier": shipment.carrier_name,
+                    "order_name": shipment.order_name,
+                    "message_id": uid_str,
+                    "candidates": result.candidate_tokens,
+                    **imap_meta,
+                }
+            )
 
             if quota_blocked:
                 _LOGGER.debug("Skipping forward of IMAP UID %s — quota exhausted", uid_str)
