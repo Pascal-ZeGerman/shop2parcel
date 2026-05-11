@@ -950,9 +950,24 @@ async def test_diagnostics_last_poll_fields_reset_per_cycle(hass, mock_config_en
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
+        # Use distinct tracking numbers so msg2 is not deduped on the second poll.
+        shipment1 = ShipmentData(
+            tracking_number="1Z999AA10123456784",
+            carrier_name="UPS",
+            order_name="#1234",
+            message_id="msg1",
+            email_date=1700000000,
+        )
+        shipment2 = ShipmentData(
+            tracking_number="9400111899223397614437",
+            carrier_name="USPS",
+            order_name="#1235",
+            message_id="msg2",
+            email_date=1700000000,
+        )
         mock_parser_cls.return_value.parse.side_effect = [
-            _make_parse_result(_make_shipment("msg1")),
-            _make_parse_result(_make_shipment("msg2")),
+            _make_parse_result(shipment1),
+            _make_parse_result(shipment2),
         ]
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = Shop2ParcelCoordinator(hass, mock_config_entry)
