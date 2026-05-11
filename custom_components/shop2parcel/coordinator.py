@@ -18,8 +18,9 @@ import email as _email_stdlib
 import html as _html_stdlib
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from datetime import time as dt_time
 from typing import cast
 
@@ -68,11 +69,13 @@ from .const import (
     DEFAULT_POLL_INTERVAL,
     DEFAULT_RESCAN_WINDOW_DAYS,
     DOMAIN,
+    MAX_SUBMITTED_TRACKING_NUMBERS,
+    normalize_tracking_number,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
 
 
 def _extract_email_meta(msg: dict) -> dict:
@@ -137,7 +140,7 @@ class PollStats:
     keyword_hits_total: int = 0
     last_poll_emails_returned: int = 0
     last_poll_emails_skipped_dedup: int = 0
-    forwarded_ids_count: int = 0
+    submitted_tracking_count: int = 0
     last_poll_effective_query: str | None = None
     last_poll_emails_scanned: int = 0
     last_poll_emails_matched: int = 0
@@ -156,6 +159,40 @@ class PollStats:
     )
 
 
+class Shop2ParcelStore(Store):
+    """HA Store subclass for Shop2Parcel with v1→v2 migration support.
+
+    Overrides _async_migrate_func to drop the v1 forwarded_ids/last_imap_uid/
+    last_email_timestamp schema and seed the v2 submitted_tracking_numbers schema.
+    """
+
+    async def _async_migrate_func(
+        self,
+        old_major_version: int,
+        old_minor_version: int,
+        old_data: dict,
+    ) -> dict:
+        """Migrate stored data when STORAGE_VERSION bumps.
+
+        v1 → v2: drop forwarded_ids, last_imap_uid, last_email_timestamp;
+        seed submitted_tracking_numbers as empty list; preserve quota_exhausted_until.
+        """
+        if old_major_version == 1:
+            entry_id = self.key.removeprefix("shop2parcel.")
+            _LOGGER.warning(
+                "Migrated Shop2Parcel Store to v2 for entry %s — "
+                "submitted_tracking_numbers starts empty; first poll may re-submit "
+                "tracking numbers already in parcelapp.net.",
+                entry_id,
+            )
+            return {
+                "submitted_tracking_numbers": [],
+                "quota_exhausted_until": old_data.get("quota_exhausted_until"),
+            }
+        # Future major versions: return data unchanged (caller will handle).
+        return old_data
+
+
 class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     """Polls Gmail, parses shipping emails, forwards to parcelapp.net."""
 
@@ -168,12 +205,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             config_entry=entry,
             update_interval=timedelta(minutes=poll_minutes),
         )
-        self._store: Store = Store(
+        self._store: Shop2ParcelStore = Shop2ParcelStore(
             hass, version=STORAGE_VERSION, key=f"shop2parcel.{entry.entry_id}"
         )
-        self._forwarded_ids: set[str] = set()
+        self._submitted_tracking_numbers: OrderedDict[str, None] = OrderedDict()
         self._quota_exhausted_until: int | None = None
-        self._last_email_timestamp: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
         # Phase 9 (D-05/D-10): dispatch to ImapClient or GmailClient based on connection type.
@@ -182,8 +218,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._email_client: ImapClient | GmailClient = ImapClient(hass.async_add_executor_job)
         else:
             self._email_client = GmailClient(hass.async_add_executor_job)
-        # Phase 9 (D-08): IMAP UID deduplication — persisted in Store. None means first run.
-        self._last_imap_uid: int | None = None
 
     @property
     def diagnostics(self) -> PollStats:
@@ -194,26 +228,23 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """Hydrate dedup + quota state from Store.
 
         MUST be called before async_config_entry_first_refresh().  Failing to do so
-        leaves _forwarded_ids empty, causing every previously forwarded shipment to be
-        re-POSTed on startup.
+        leaves _submitted_tracking_numbers empty, causing every previously submitted
+        tracking number to be re-POSTed on startup.
 
         async_setup_entry in __init__.py is the canonical caller; do not call this
         method from any other site without careful thought about sequencing.
         """
         stored = await self._store.async_load() or {}
-        self._forwarded_ids = set(stored.get("forwarded_ids", []))
+        stored_list = stored.get("submitted_tracking_numbers", [])
+        self._submitted_tracking_numbers = OrderedDict((tn, None) for tn in stored_list)
         self._quota_exhausted_until = stored.get("quota_exhausted_until")
-        self._last_email_timestamp = stored.get("last_email_timestamp")
-        self._last_imap_uid = stored.get("last_imap_uid")
 
     async def _async_save_store(self) -> None:
-        """Persist current dedup + quota + timestamp + IMAP UID state to Store."""
+        """Persist current dedup + quota state to Store."""
         await self._store.async_save(
             {
-                "forwarded_ids": sorted(self._forwarded_ids),
+                "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
                 "quota_exhausted_until": self._quota_exhausted_until,
-                "last_email_timestamp": self._last_email_timestamp,
-                "last_imap_uid": self._last_imap_uid,
             }
         )
 
@@ -268,7 +299,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             messages, effective_query = await gmail.async_list_messages(
                 access_token,
                 query,
-                after_timestamp=self._last_email_timestamp,
                 rescan_window_days=rescan_window_days,
             )
         except GmailAuthError as err:
@@ -297,15 +327,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         quota_blocked = (
             self._quota_exhausted_until is not None and now < self._quota_exhausted_until
         )
-        max_email_date = self._last_email_timestamp or 0
-        any_forwarded = False
 
-        # 4. Iterate messages — skip already-forwarded BEFORE fetching body (saves quota).
+        # 4. Iterate messages — fetch body, parse, then dedup on tracking number.
         for msg_meta in messages:
             msg_id = msg_meta["id"]
-            if msg_id in self._forwarded_ids:
-                d.last_poll_emails_skipped_dedup += 1
-                continue
 
             try:
                 msg = await gmail.async_get_message(access_token, msg_id)
@@ -316,17 +341,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
             email_meta = _extract_email_meta(msg)
 
-            # Extract email_date early so it can be used to advance max_email_date
-            # for skipped messages (no_html_body, parse failure) as well as forwarded ones.
-            # This prevents permanently-unparseable messages from blocking
-            # _last_email_timestamp indefinitely (WR-02 fix).
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
             except (ValueError, TypeError):  # fmt: skip
-                # PR4-C3: previously the ValueError branch was missing both
-                # `continue` and the skip_reason append, causing an
-                # UnboundLocalError when execution fell through to use
-                # email_date below. Both error types now share one handler.
+                # PR4-C3: both ValueError and TypeError share one handler.
                 _LOGGER.warning("Unexpected internalDate value for message %s; skipping", msg_id)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
@@ -353,10 +371,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "no_html_body", **email_meta}
                 )
-                # Advance max_email_date so this un-parseable message does not block
-                # _last_email_timestamp and cause infinite re-fetching on future polls.
-                if email_date > max_email_date:
-                    max_email_date = email_date
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
@@ -373,8 +387,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "parse_exception", **email_meta}
                 )
-                if email_date > max_email_date:
-                    max_email_date = email_date
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -408,20 +420,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
             if result.shipment is None:
-                # Advance max_email_date for parse failures too — the message cannot
-                # produce a shipment and should not be re-fetched indefinitely.
-                if email_date > max_email_date:
-                    max_email_date = email_date
                 continue
             shipment = result.shipment
 
-            # 5. Quota guard (D-05): when quota is exhausted, do NOT add the shipment
-            # to current_data and do NOT advance max_email_date.  Keeping the message
-            # "unseen" ensures _last_email_timestamp is not advanced past it, so Gmail
-            # will return it again on the next poll cycle once quota has reset — at which
-            # point it will be properly POSTed and added to forwarded_ids.  Advancing
-            # current_data or max_email_date here would cause the message to be skipped
-            # by the after_timestamp filter and never forwarded (FWRD-02 violation).
+            # D-10: tracking-number dedup check (replaces message-ID skip gate).
+            normalized = normalize_tracking_number(shipment.tracking_number)
+            if normalized in self._submitted_tracking_numbers:
+                d.last_poll_emails_skipped_dedup += 1
+                continue
+
+            # 5. Quota guard (D-05): when quota is exhausted, skip the POST.
             if quota_blocked:
                 _LOGGER.debug("Skipping forward of %s — quota exhausted", msg_id)
                 continue
@@ -434,13 +442,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     description=shipment.order_name,
                 )
             except ParcelAppAuthError as err:
-                # Raising ConfigEntryAuthFailed mid-loop is safe: messages that were
-                # successfully forwarded before this point already had their msg_ids
-                # added to _forwarded_ids and persisted to Store (line ~210 below).
-                # _last_email_timestamp is NOT yet advanced (that happens after the
-                # loop), so after the user re-authenticates the next poll re-fetches
-                # all messages from the last known timestamp.  Those already in
-                # forwarded_ids are skipped; unforwarded ones are retried cleanly.
                 raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
             except ParcelAppQuotaError as err:
                 # D-06: prefer reset_at, else next midnight UTC.
@@ -460,38 +461,28 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     msg_id,
                     err,
                 )
-                # Add to forwarded_ids to prevent infinite retry loop draining quota.
-                # The tracking data is invalid; re-POSTing will always fail with 400.
-                self._forwarded_ids.add(msg_id)
-                if email_date > max_email_date:
-                    max_email_date = email_date
-                any_forwarded = True  # triggers store save so suppression is persisted
+                # Record normalized tracking number to suppress infinite retries.
+                normalized_for_suppress = normalize_tracking_number(shipment.tracking_number)
+                self._submitted_tracking_numbers[normalized_for_suppress] = None
+                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                    self._submitted_tracking_numbers.popitem(last=False)
+                await self._async_save_store()
                 continue
             except ParcelAppTransientError as err:
                 _LOGGER.warning("parcelapp.net transient error for %s: %s", msg_id, err)
                 continue
 
-            # 6. Success — update in-memory data (persist deferred to after the loop
-            # so the store is written once for all successfully forwarded messages in
-            # this poll cycle rather than once per message).
-            self._forwarded_ids.add(msg_id)
+            # 6. Success — record tracking number dedup, save immediately (D-10/D-03).
+            self._submitted_tracking_numbers[normalized] = None
+            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                self._submitted_tracking_numbers.popitem(last=False)
+            await self._async_save_store()
             current_data[msg_id] = shipment
-            if email_date > max_email_date:
-                max_email_date = email_date
-            any_forwarded = True
 
         # Phase 7: capture per-poll timing (D-04, Specifics).
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
-        d.forwarded_ids_count = len(self._forwarded_ids)
-
-        timestamp_advanced = max_email_date > (self._last_email_timestamp or 0)
-        if timestamp_advanced:
-            self._last_email_timestamp = max_email_date
-        # Persist once after the loop if any shipments were forwarded OR if the
-        # email timestamp advanced (covers skipped messages that unblock _last_email_timestamp).
-        if any_forwarded or timestamp_advanced:
-            await self._async_save_store()
+        d.submitted_tracking_count = len(self._submitted_tracking_numbers)
 
         # Clear stale quota block from Store once the window has expired.  Without
         # this, a past-epoch timestamp would accumulate across restarts indefinitely.
@@ -508,9 +499,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         return current_data
 
     async def _async_update_data_imap(self) -> dict[str, ShipmentData]:
-        """IMAP poll path — mirrors _async_update_data but uses ImapClient + UID dedup.
+        """IMAP poll path — uses SINCE-date fetch + tracking-number dedup.
 
-        Phase 9 (D-05/D-06/D-07/D-08): same post-fetch pipeline as Gmail (parse → forward).
+        Phase 10 (D-11/D-12): fetch all emails in the rescan window on every poll.
+        Dedup is now tracking-number-based (not UID-based). No _last_imap_uid field.
         Does NOT perform OAuth2 token refresh (IMAP uses entry.data credentials directly).
         """
         entry = self.config_entry
@@ -533,16 +525,25 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.last_poll_query = query
         # last_poll_effective_query not set for IMAP (no Gmail after: filter)
 
+        # D-11: compute since_date from rescan_window_days (IMAP SEARCH date format).
+        rescan_window_days = entry.options.get(CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS)
+        since_ts = int(time.time()) - rescan_window_days * 86400
+        since_date = (
+            datetime.fromtimestamp(since_ts, tz=timezone.utc)
+            .strftime("%d-%b-%Y")
+            .lstrip("0")
+        )
+
         # Fetch messages from IMAP (whole session in one executor call per D-05/Pitfall 6).
         try:
-            raw_messages, max_uid = await imap_client.fetch_shipping_emails(
+            raw_messages = await imap_client.fetch_shipping_emails(
                 host=entry.data[CONF_IMAP_HOST],
                 port=entry.data[CONF_IMAP_PORT],
                 username=entry.data[CONF_IMAP_USERNAME],
                 password=entry.data[CONF_IMAP_PASSWORD],
                 tls_mode=entry.data[CONF_IMAP_TLS],
                 search_criteria=query,
-                since_uid=self._last_imap_uid,
+                since_date=since_date,
             )
         except ImapAuthError as err:
             raise ConfigEntryAuthFailed("IMAP auth error") from err
@@ -566,16 +567,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         quota_blocked = (
             self._quota_exhausted_until is not None and now < self._quota_exhausted_until
         )
-        any_forwarded = False
-        any_quota_blocked = False
-        any_transient_error = False
 
         for msg_info in raw_messages:
-            # IMAP uid used as message_id for deduplication (D-08).
             uid_str = str(msg_info["uid"])
-            if uid_str in self._forwarded_ids:
-                d.last_poll_emails_skipped_dedup += 1
-                continue
 
             raw_bytes: bytes = msg_info["raw"]
             imap_meta = _extract_imap_email_meta(raw_bytes)
@@ -595,8 +589,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 continue
 
             # Assign a synthetic email_date (0 = unknown — IMAP does not guarantee internalDate).
-            # Phase 9 does not track IMAP email timestamps in _last_email_timestamp (that is
-            # a Gmail-specific pattern). IMAP uses UID-based dedup instead.
             try:
                 result: ParseResult = parser.parse(html, uid_str, 0)
             except Exception as parse_err:  # noqa: BLE001
@@ -645,9 +637,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 continue
             shipment = result.shipment
 
+            # D-10: tracking-number dedup check (replaces UID skip gate).
+            normalized = normalize_tracking_number(shipment.tracking_number)
+            if normalized in self._submitted_tracking_numbers:
+                d.last_poll_emails_skipped_dedup += 1
+                continue
+
             if quota_blocked:
                 _LOGGER.debug("Skipping forward of IMAP UID %s — quota exhausted", uid_str)
-                any_quota_blocked = True
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -669,7 +666,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     self._quota_exhausted_until,
                 )
                 quota_blocked = True
-                any_quota_blocked = True
                 continue
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(
@@ -677,41 +673,28 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     uid_str,
                     err,
                 )
-                # Add to forwarded_ids to prevent infinite retry draining quota.
-                self._forwarded_ids.add(uid_str)
-                any_forwarded = True  # triggers store save so suppression is persisted
+                # Record normalized tracking number to suppress infinite retries.
+                normalized_for_suppress = normalize_tracking_number(shipment.tracking_number)
+                self._submitted_tracking_numbers[normalized_for_suppress] = None
+                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                    self._submitted_tracking_numbers.popitem(last=False)
+                await self._async_save_store()
                 continue
             except ParcelAppTransientError as err:
                 _LOGGER.warning("parcelapp.net transient error for UID %s: %s", uid_str, err)
-                any_transient_error = True
                 continue
 
-            self._forwarded_ids.add(uid_str)
+            # Success — record tracking number dedup, save immediately (D-10/D-03).
+            self._submitted_tracking_numbers[normalized] = None
+            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                self._submitted_tracking_numbers.popitem(last=False)
+            await self._async_save_store()
             current_data[uid_str] = shipment
-            any_forwarded = True
 
         # Phase 7: capture per-poll timing.
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
-        d.forwarded_ids_count = len(self._forwarded_ids)
-
-        # Update last_imap_uid after successful fetch (D-08).
-        # CRITICAL: Do NOT advance if any message was quota-blocked this cycle.
-        # When quota-blocked, keep _last_imap_uid at its previous value so the UID
-        # SEARCH on the next poll re-includes those messages — mirrors the Gmail
-        # path which does not advance max_email_date when quota_blocked (line 310).
-        store_dirty = any_forwarded
-        if (
-            not any_quota_blocked
-            and not any_transient_error
-            and max_uid is not None
-            and (self._last_imap_uid is None or max_uid > self._last_imap_uid)
-        ):
-            self._last_imap_uid = max_uid
-            store_dirty = True  # UID advanced — persist even if no shipments forwarded this cycle
-
-        if store_dirty:
-            await self._async_save_store()
+        d.submitted_tracking_count = len(self._submitted_tracking_numbers)
 
         # Clear stale quota block.
         if (
@@ -723,17 +706,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             await self._async_save_store()
 
         return current_data
-
-    async def async_reset_forwarded_ids(self) -> None:
-        """Clear dedup cache and reset scan window. Called by ResetEmailCacheButton."""
-        self._forwarded_ids.clear()
-        self._last_email_timestamp = None
-        self._last_imap_uid = None
-        await self._async_save_store()
-        _LOGGER.info(
-            "forwarded_ids reset for entry %s — next poll rescans from window start",
-            self.config_entry.entry_id if self.config_entry else "unknown",
-        )
 
     async def async_cleanup_delivered(self, now: datetime) -> None:
         """Remove delivered shipments from coordinator.data and the entity registry.
