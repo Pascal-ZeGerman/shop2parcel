@@ -56,3 +56,15 @@ CONF_API_KEY = "api_key"
 # false-positive forwards to ParcelApp consuming the 20/day quota.
 CONF_ENABLE_BROAD_SCAN = "enable_broad_scan"
 DEFAULT_ENABLE_BROAD_SCAN = False
+
+# Phase 10 (D-09): LRU cap for submitted_tracking_numbers OrderedDict.
+MAX_SUBMITTED_TRACKING_NUMBERS = 1000
+
+
+def normalize_tracking_number(tracking_number: str) -> str:
+    """Normalize a tracking number for dedup comparison.
+
+    strip() removes whitespace from parser extraction.
+    upper() handles casing inconsistencies in email content.
+    """
+    return tracking_number.strip().upper()
