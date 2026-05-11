@@ -45,18 +45,16 @@ class GmailClient:
         self,
         access_token: str,
         query: str,
-        after_timestamp: int | None = None,
         rescan_window_days: int = 30,
     ) -> tuple[list[dict[str, Any]], str]:
-        """List Gmail messages matching query, optionally filtered by date.
+        """List Gmail messages matching query filtered by rescan_window_days.
 
         EMAIL-02: query is configurable (default: from:no-reply@shopify.com subject:shipped).
-        EMAIL-08: after_timestamp appended as 'after:{ts}' for incremental polling.
-        QF-02: rescan_window_days controls minimum lookback; forwarded_ids dedup prevents
-        re-POSTing previously forwarded shipments when the window widens.
+        SCAN-02: rescan_window_days is the sole polling window boundary (Phase 10 D-06).
+        after_timestamp parameter removed in Phase 10 — full-window scanning always-on.
         Paginates through all result pages — Gmail caps each page at 100 messages.
         """
-        full_query = build_incremental_query(query, after_timestamp, rescan_window_days)
+        full_query = build_incremental_query(query, rescan_window_days)
         try:
             service = await self._get_service(access_token)
             all_messages: list[dict[str, Any]] = []
@@ -87,33 +85,15 @@ class GmailClient:
 
 def build_incremental_query(
     base_query: str,
-    last_timestamp: int | None,
     rescan_window_days: int = 30,
 ) -> str:
-    """Append after: filter for incremental polling.
+    """Return Gmail query with after: filter based on rescan_window_days only.
 
-    Effective lower bound = min(last_timestamp, now - rescan_window_days*86400).
-    When last_timestamp is None, falls back to (now - rescan_window_days*86400).
-    rescan_window_days defaults to 30 to preserve historical behavior when
-    callers don't pass it explicitly.
-
-    EMAIL-08: stores epoch seconds; Gmail query accepts integer epoch seconds.
-    QF-02: rescan_window_days allows widening the lookback window without
-    clearing forwarded_ids (dedup happens before any ParcelApp POST).
-
-    Cases:
-    - last_timestamp is None → use window_start (first run: scan window_days back).
-    - last_timestamp OLDER than window_start → use last_timestamp (don't refetch
-      pre-window mail unnecessarily).
-    - last_timestamp MORE RECENT than window_start (the bug case) → use window_start
-      (look back further than the stored point to rescan recent mail).
+    SCAN-02: query boundary is solely the rescan_window_days window.
+    after_timestamp / last_timestamp parameter removed (Phase 10 D-05/D-06).
+    Full-window scanning is always-on — no incremental timestamp tracking.
     """
-    window_start = int(time.time()) - rescan_window_days * 86400
-    if last_timestamp is None:
-        effective = window_start
-    else:
-        effective = min(last_timestamp, window_start)
-    return f"{base_query} after:{effective}"
+    return f"{base_query} after:{int(time.time()) - rescan_window_days * 86400}"
 
 
 def extract_html_body(payload: dict) -> str | None:
