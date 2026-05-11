@@ -111,7 +111,12 @@ Shop2Parcel is a Home Assistant custom integration that polls the Shopify API fo
 <!-- GSD:conventions-start source:CONVENTIONS.md -->
 ## Conventions
 
-Conventions not yet established. Will populate as patterns emerge during development.
+### Release Process
+
+1. **Bump `manifest.json` version in the same PR** as the feature work — the release workflow validates that `manifest.json` version matches the tag and fails if they diverge. Never tag before the manifest bump is on master.
+2. **Tag after the PR is merged**: `git fetch origin master && git tag vX.Y.Z origin/master && git push origin vX.Y.Z`
+3. **Pre-release detection is automatic**: tags containing `-rc`, `-beta`, or `-alpha` are marked as GitHub pre-releases by the workflow.
+4. **If you tag before bumping the manifest**: open a hotfix PR with only the manifest bump, merge it, delete the tag, and re-push it pointing at the new master HEAD.
 <!-- GSD:conventions-end -->
 
 <!-- GSD:architecture-start source:ARCHITECTURE.md -->
