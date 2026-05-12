@@ -1624,7 +1624,7 @@ async def test_scan_event_gmail_posted(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg1"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg1"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -1669,7 +1669,7 @@ async def test_scan_event_gmail_no_match(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg2"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg2"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -1713,7 +1713,7 @@ async def test_scan_event_gmail_parse_error(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg3"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg3"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -1766,7 +1766,7 @@ async def test_scan_event_gmail_skipped_dedup(hass, mock_config_entry):
         shipment_a = _make_shipment("msg4")  # TN = 1Z999AA10123456784
         shipment_b = _make_shipment("msg4b")  # same TN = 1Z999AA10123456784
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            side_effect=[[{"id": "msg4"}], [{"id": "msg4b"}]]
+            side_effect=[([{"id": "msg4"}], "q after:0"), ([{"id": "msg4b"}], "q after:0")]
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
@@ -1816,7 +1816,7 @@ async def test_scan_event_gmail_skipped_quota(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[{"id": "msg5"}])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([{"id": "msg5"}], "q after:0"))
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -1862,7 +1862,7 @@ async def test_scan_events_not_reset_between_polls(hass, mock_config_entry):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            side_effect=[[{"id": "msg_p1"}], [{"id": "msg_p2"}]]
+            side_effect=[([{"id": "msg_p1"}], "q after:0"), ([{"id": "msg_p2"}], "q after:0")]
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
@@ -1909,7 +1909,7 @@ async def test_scan_event_imap_posted(hass, mock_imap_config_entry):
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([raw_msg], 300))
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
         mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
@@ -1943,7 +1943,7 @@ async def test_scan_event_imap_no_match(hass, mock_imap_config_entry):
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([raw_msg], 301))
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
         mock_parser_cls.return_value.parse.return_value = _make_parse_result(
             None, skip_reason="no_match"
         )
@@ -1979,7 +1979,7 @@ async def test_scan_event_imap_parse_error(hass, mock_imap_config_entry):
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([raw_msg], 302))
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
         mock_parser_cls.return_value.parse.side_effect = RuntimeError("imap parse fail")
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
@@ -2014,7 +2014,7 @@ async def test_scan_event_imap_skipped_quota(hass, mock_imap_config_entry):
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([raw_msg], 303))
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
         mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
@@ -2053,7 +2053,7 @@ async def test_scan_event_imap_skipped_dedup(hass, mock_imap_config_entry):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
-            side_effect=[([raw_msg_a], 304), ([raw_msg_b], 305)]
+            side_effect=[[raw_msg_a], [raw_msg_b]]
         )
         mock_parser_cls.return_value.parse.side_effect = [
             _make_parse_result(shipment_a),
@@ -2102,7 +2102,7 @@ async def test_scan_events_accumulate_across_gmail_and_imap(hass, mock_config_en
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            side_effect=[[{"id": "m1"}], [{"id": "m2"}], [{"id": "m3"}]]
+            side_effect=[([{"id": "m1"}], "q after:0"), ([{"id": "m2"}], "q after:0"), ([{"id": "m3"}], "q after:0")]
         )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}

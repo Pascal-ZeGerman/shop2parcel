@@ -18,7 +18,7 @@ import email as _email_stdlib
 import html as _html_stdlib
 import logging
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from datetime import time as dt_time
@@ -157,6 +157,8 @@ class PollStats:
             "carrier_regex": 0,
         }
     )
+    scan_events: deque = field(default_factory=lambda: deque(maxlen=50))
+    scan_events_total: int = 0
 
 
 class Shop2ParcelStore(Store):
@@ -387,6 +389,18 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "parse_exception", **email_meta}
                 )
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"gmail:{msg_id}",
+                    "subject": email_meta.get("subject", ""),
+                    "sender": email_meta.get("from", ""),
+                    "strategy": "no_match",
+                    "tracking_number": None,
+                    "outcome": "error",
+                    "error_type": type(parse_err).__name__,
+                    "error_msg": str(parse_err)[:100],
+                })
+                d.scan_events_total += 1
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -406,6 +420,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
             if result.shipment is None:
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"gmail:{msg_id}",
+                    "subject": email_meta.get("subject", ""),
+                    "sender": email_meta.get("from", ""),
+                    "strategy": result.strategy_used or "no_match",
+                    "tracking_number": None,
+                    "outcome": "no_match",
+                })
+                d.scan_events_total += 1
                 continue
             shipment = result.shipment
 
@@ -413,6 +437,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             normalized = normalize_tracking_number(shipment.tracking_number)
             if normalized in self._submitted_tracking_numbers:
                 d.last_poll_emails_skipped_dedup += 1
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"gmail:{msg_id}",
+                    "subject": email_meta.get("subject", ""),
+                    "sender": email_meta.get("from", ""),
+                    "strategy": result.strategy_used,
+                    "tracking_number": shipment.tracking_number,
+                    "outcome": "skipped_dedup",
+                })
+                d.scan_events_total += 1
                 continue
 
             # Only increment match/found counters after dedup confirms this is a new tracking number.
@@ -433,6 +467,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # 5. Quota guard (D-05): when quota is exhausted, skip the POST.
             if quota_blocked:
                 _LOGGER.debug("Skipping forward of %s — quota exhausted", msg_id)
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"gmail:{msg_id}",
+                    "subject": email_meta.get("subject", ""),
+                    "sender": email_meta.get("from", ""),
+                    "strategy": result.strategy_used,
+                    "tracking_number": shipment.tracking_number,
+                    "outcome": "skipped_quota",
+                })
+                d.scan_events_total += 1
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -479,6 +523,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._submitted_tracking_numbers.popitem(last=False)
             await self._async_save_store()
             current_data[msg_id] = shipment
+            d.scan_events.append({
+                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "message_id": f"gmail:{msg_id}",
+                "subject": email_meta.get("subject", ""),
+                "sender": email_meta.get("from", ""),
+                "strategy": result.strategy_used,
+                "tracking_number": shipment.tracking_number,
+                "outcome": "posted",
+            })
+            d.scan_events_total += 1
 
         # Phase 7: capture per-poll timing (D-04, Specifics).
         d.last_poll_time = poll_start
@@ -603,6 +657,18 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 d.last_poll_skip_reasons.append(
                     {"message_id": uid_str, "reason": "parse_exception", **imap_meta}
                 )
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"imap:{uid_str}",
+                    "subject": imap_meta.get("subject", ""),
+                    "sender": imap_meta.get("from", ""),
+                    "strategy": "no_match",
+                    "tracking_number": None,
+                    "outcome": "error",
+                    "error_type": type(parse_err).__name__,
+                    "error_msg": str(parse_err)[:100],
+                })
+                d.scan_events_total += 1
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -621,6 +687,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
             if result.shipment is None:
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"imap:{uid_str}",
+                    "subject": imap_meta.get("subject", ""),
+                    "sender": imap_meta.get("from", ""),
+                    "strategy": result.strategy_used or "no_match",
+                    "tracking_number": None,
+                    "outcome": "no_match",
+                })
+                d.scan_events_total += 1
                 continue
             shipment = result.shipment
 
@@ -628,6 +704,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             normalized = normalize_tracking_number(shipment.tracking_number)
             if normalized in self._submitted_tracking_numbers:
                 d.last_poll_emails_skipped_dedup += 1
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"imap:{uid_str}",
+                    "subject": imap_meta.get("subject", ""),
+                    "sender": imap_meta.get("from", ""),
+                    "strategy": result.strategy_used,
+                    "tracking_number": shipment.tracking_number,
+                    "outcome": "skipped_dedup",
+                })
+                d.scan_events_total += 1
                 continue
 
             # Only increment match/found counters after dedup confirms this is a new tracking number.
@@ -647,6 +733,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
             if quota_blocked:
                 _LOGGER.debug("Skipping forward of IMAP UID %s — quota exhausted", uid_str)
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"imap:{uid_str}",
+                    "subject": imap_meta.get("subject", ""),
+                    "sender": imap_meta.get("from", ""),
+                    "strategy": result.strategy_used,
+                    "tracking_number": shipment.tracking_number,
+                    "outcome": "skipped_quota",
+                })
+                d.scan_events_total += 1
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -692,6 +788,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._submitted_tracking_numbers.popitem(last=False)
             await self._async_save_store()
             current_data[uid_str] = shipment
+            d.scan_events.append({
+                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "message_id": f"imap:{uid_str}",
+                "subject": imap_meta.get("subject", ""),
+                "sender": imap_meta.get("from", ""),
+                "strategy": result.strategy_used,
+                "tracking_number": shipment.tracking_number,
+                "outcome": "posted",
+            })
+            d.scan_events_total += 1
 
         # Phase 7: capture per-poll timing.
         d.last_poll_time = poll_start
