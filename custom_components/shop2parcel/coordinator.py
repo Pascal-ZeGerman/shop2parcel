@@ -484,7 +484,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
             # 5. Quota guard (D-05): when quota is exhausted, skip the POST.
             if quota_blocked:
-                _LOGGER.debug("Skipping forward of %s — quota exhausted", msg_id)
                 d.scan_events.append({
                     "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                     "message_id": f"gmail:{msg_id}",
