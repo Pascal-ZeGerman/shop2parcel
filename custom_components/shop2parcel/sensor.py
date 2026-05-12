@@ -54,7 +54,7 @@ async def async_setup_entry(
     Pitfall 4: hass.data[DOMAIN][entry.entry_id] is a dict {"coordinator": ..., "cancel_cleanup": ...}
     after Phase 5 changes to __init__.py — use ["coordinator"] key, not bare access.
 
-    Phase 7 (D-09/D-13): 4 static diagnostic sensors are co-registered here.
+    Phase 7 (D-09/D-13): 6 static diagnostic sensors are co-registered here.
     "diagnostic_sensor" is not a built-in HA platform domain and cannot be used
     in PLATFORMS directly — sensors belonging to the "sensor" domain must be
     registered from sensor.py's async_setup_entry.

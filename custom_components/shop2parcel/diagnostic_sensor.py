@@ -1,4 +1,4 @@
-"""Shop2Parcel diagnostic_sensor — 5 static DiagnosticSensor entity classes + ActivityLogSensor.
+"""Shop2Parcel diagnostic_sensor — 6 diagnostic sensor entity classes (5 PollStats-based + ActivityLogSensor).
 
 Phase 7 (DIAG-08, DIAG-09, DIAG-10):
 - D-09: All diagnostic sensors registered statically via sensor.py::async_setup_entry.
@@ -36,7 +36,7 @@ from .coordinator import Shop2ParcelCoordinator
 
 
 class DiagnosticSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
-    """Shared base for all 4 diagnostic sensors (D-10, D-11)."""
+    """Shared base for all 6 diagnostic sensors (D-10, D-11)."""
 
     _attr_should_poll = False
     _attr_has_entity_name = True
