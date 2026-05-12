@@ -377,6 +377,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "no_html_body", **email_meta}
                 )
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"gmail:{msg_id}",
+                    "subject": email_meta.get("subject", ""),
+                    "sender": email_meta.get("from", ""),
+                    "strategy": None,
+                    "tracking_number": None,
+                    "outcome": "no_html_body",
+                })
+                d.scan_events_total += 1
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_html_body")
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
@@ -651,12 +662,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     # PR4-I1: same escape+<pre> wrap as Gmail path.
                     html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
             if not html:
-                _LOGGER.debug("IMAP UID %s: no HTML body found, skipping", uid_str)
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
                 d.last_poll_skip_reasons.append(
                     {"message_id": uid_str, "reason": "no_html_body", **imap_meta}
                 )
+                d.scan_events.append({
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"imap:{uid_str}",
+                    "subject": imap_meta.get("subject", ""),
+                    "sender": imap_meta.get("from", ""),
+                    "strategy": None,
+                    "tracking_number": None,
+                    "outcome": "no_html_body",
+                })
+                d.scan_events_total += 1
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_html_body")
                 continue
 
             # Assign a synthetic email_date (0 = unknown — IMAP does not guarantee internalDate).
