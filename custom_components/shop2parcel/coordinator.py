@@ -22,7 +22,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from datetime import time as dt_time
-from typing import cast
+from typing import Any, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -157,7 +157,7 @@ class PollStats:
             "carrier_regex": 0,
         }
     )
-    scan_events: deque = field(default_factory=lambda: deque(maxlen=50))
+    scan_events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
     scan_events_total: int = 0
 
 
