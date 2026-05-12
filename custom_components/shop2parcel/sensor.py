@@ -30,6 +30,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import Shop2ParcelCoordinator
 from .diagnostic_sensor import (
+    ActivityLogSensor,
     EmailsMatchedSensor,
     EmailsScannedSensor,
     KeywordHitsSensor,
@@ -61,6 +62,7 @@ async def async_setup_entry(
     coordinator: Shop2ParcelCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
     # Phase 7 (D-09): register static diagnostic sensors.
+    # Phase 11 (ACTLOG-04): ActivityLogSensor added as 6th diagnostic sensor.
     async_add_entities(
         [
             EmailsScannedSensor(coordinator, entry),
@@ -68,6 +70,7 @@ async def async_setup_entry(
             EmailsMatchedSensor(coordinator, entry),
             TrackingNumbersFoundSensor(coordinator, entry),
             KeywordHitsSensor(coordinator, entry),
+            ActivityLogSensor(coordinator, entry),
         ]
     )
 
