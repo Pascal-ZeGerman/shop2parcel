@@ -838,8 +838,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 "tracking_number": shipment.tracking_number,
                 "outcome": "posted",
             })
-            _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "posted")
             d.scan_events_total += 1
+            _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "posted")
 
         # Phase 7: capture per-poll timing.
         d.last_poll_time = poll_start
