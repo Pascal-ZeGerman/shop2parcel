@@ -8,6 +8,7 @@ Token refresh is the coordinator's responsibility (via OAuth2Session.async_ensur
 from __future__ import annotations
 
 import base64
+import logging
 import time
 from collections.abc import Callable
 from functools import partial
@@ -18,6 +19,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from .exceptions import GmailAuthError, GmailTransientError
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class GmailClient:
@@ -55,6 +58,7 @@ class GmailClient:
         Paginates through all result pages — Gmail caps each page at 100 messages.
         """
         full_query = build_incremental_query(query, rescan_window_days)
+        _LOGGER.debug("Gmail list query: %s", full_query)
         try:
             service = await self._get_service(access_token)
             all_messages: list[dict[str, Any]] = []
@@ -69,6 +73,7 @@ class GmailClient:
                 page_token = result.get("nextPageToken")
                 if not page_token:
                     break
+            _LOGGER.debug("Gmail returned %d messages", len(all_messages))
             return all_messages, full_query
         except Exception as err:
             _classify_gmail_error(err)

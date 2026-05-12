@@ -90,6 +90,7 @@ class ImapClient:
                 if tls_mode == "starttls":
                     conn.starttls()
 
+            _LOGGER.debug("IMAP connecting to %s:%s", host, port)
             conn.login(username, password)
 
             ok, _ = conn.select(
@@ -105,6 +106,9 @@ class ImapClient:
                 return []
 
             uid_list = data[0].decode().split()
+            _LOGGER.debug(
+                "IMAP SEARCH returned %d UIDs for folder %s", len(uid_list), "INBOX"
+            )
             results: list[dict[str, Any]] = []
 
             for uid_str in uid_list:

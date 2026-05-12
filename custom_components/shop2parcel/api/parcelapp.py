@@ -14,6 +14,8 @@ No HA imports (D-01/D-03).
 
 from __future__ import annotations
 
+import logging
+
 import aiohttp
 
 from .exceptions import (
@@ -22,6 +24,8 @@ from .exceptions import (
     ParcelAppQuotaError,
     ParcelAppTransientError,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 ADD_DELIVERY_URL = "https://api.parcel.app/external/add-delivery/"
 VIEW_DELIVERIES_URL = "https://api.parcel.app/external/deliveries/"
@@ -62,6 +66,9 @@ class ParcelAppClient:
             "description": description,
             "send_push_confirmation": False,
         }
+        _LOGGER.debug(
+            "Submitting TN %s (carrier=%s) to parcelapp.net", tracking_number, carrier_code
+        )
         try:
             async with self._session.post(
                 ADD_DELIVERY_URL,
@@ -69,6 +76,9 @@ class ParcelAppClient:
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
+                _LOGGER.debug(
+                    "parcelapp.net responded HTTP %d for TN %s", resp.status, tracking_number
+                )
                 if resp.status in (401, 403):
                     raise ParcelAppAuthError(f"Auth failed: HTTP {resp.status}")
                 if resp.status == 429:
