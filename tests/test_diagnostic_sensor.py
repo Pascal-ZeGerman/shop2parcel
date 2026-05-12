@@ -92,8 +92,8 @@ async def test_emails_scanned_sensor_registered(hass, mock_config_entry):
     assert state.state == "0"
 
 
-async def test_all_five_diagnostic_sensors_registered(hass, mock_config_entry):
-    """DIAG-08: all 5 diagnostic sensors registered at setup."""
+async def test_all_six_diagnostic_sensors_registered(hass, mock_config_entry):
+    """DIAG-08: all 6 diagnostic sensors registered at setup."""
     await _setup_integration(hass, mock_config_entry)
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
@@ -104,6 +104,7 @@ async def test_all_five_diagnostic_sensors_registered(hass, mock_config_entry):
         "emails_matched",
         "tracking_numbers_found",
         "keyword_hits",
+        "activity_log",
     }
     found = {e.unique_id.removeprefix(prefix) for e in entries if e.unique_id.startswith(prefix)}
     missing = expected_suffixes - found
@@ -210,3 +211,78 @@ async def test_keyword_hits_per_keyword_attribute(hass, mock_config_entry):
     assert "per_keyword" in state.attributes
     per_keyword = state.attributes["per_keyword"]
     assert set(per_keyword.keys()) == {"tracking_regex", "order_regex", "carrier_regex"}
+
+
+async def test_activity_log_sensor_state(hass, mock_config_entry):
+    """ActivityLogSensor registered as 6th sensor; state=0 before any poll."""
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_activity_log"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, "activity_log diagnostic sensor not registered"
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state == "0"
+
+
+async def test_activity_log_sensor_state_after_poll(hass, mock_config_entry):
+    """ActivityLogSensor native_value == scan_events_total after a poll."""
+    coordinator = await _setup_integration(hass, mock_config_entry, with_message=True)
+    # After a poll that processed 1 message, scan_events_total should be 1
+    assert coordinator._diagnostics.scan_events_total >= 1
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_activity_log"
+    entry = next(e for e in entries if e.unique_id == uid)
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state == str(coordinator._diagnostics.scan_events_total)
+
+
+async def test_activity_log_sensor_attributes(hass, mock_config_entry):
+    """ActivityLogSensor extra_state_attributes contains 'recent_events' key as a list."""
+    await _setup_integration(hass, mock_config_entry, with_message=True)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_activity_log"
+    entry = next(e for e in entries if e.unique_id == uid)
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert "recent_events" in state.attributes
+    assert isinstance(state.attributes["recent_events"], list)
+
+
+async def test_activity_log_sensor_attributes_capped_at_10(hass, mock_config_entry):
+    """ActivityLogSensor recent_events is capped at 10 even when scan_events has 15 items."""
+    from collections import deque
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    # Manually populate scan_events with 15 fake events
+    for i in range(15):
+        coordinator._diagnostics.scan_events.append(
+            {
+                "timestamp": f"2026-01-01T00:00:0{i % 10}Z",
+                "message_id": f"gmail:msg{i}",
+                "subject": f"Shipment {i}",
+                "sender": "noreply@shopify.com",
+                "strategy": "html_template",
+                "tracking_number": f"TRK{i}",
+                "outcome": "posted",
+            }
+        )
+    # Trigger a coordinator update to refresh entity state
+    coordinator.async_set_updated_data(coordinator.data or {})
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_activity_log"
+    entry = next(e for e in entries if e.unique_id == uid)
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    recent_events = state.attributes["recent_events"]
+    assert isinstance(recent_events, list)
+    assert len(recent_events) == 10, f"expected 10 events (capped), got {len(recent_events)}"
+    # Should be the last 10 (indices 5-14)
+    assert recent_events[-1]["message_id"] == "gmail:msg14"
