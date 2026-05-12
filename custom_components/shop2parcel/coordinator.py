@@ -296,6 +296,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.last_poll_time = poll_start  # record attempt time even if poll fails mid-cycle
         d.last_poll_duration_ms = None
         d.last_poll_query = query
+        _LOGGER.debug(
+            "Gmail poll start — query: %s rescan_window_days: %s", query, rescan_window_days
+        )
 
         try:
             messages, effective_query = await gmail.async_list_messages(
@@ -311,6 +314,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.emails_returned_total += len(messages)
         d.last_poll_emails_returned = len(messages)
         d.last_poll_effective_query = effective_query
+        _LOGGER.debug("Gmail fetch returned %d messages", len(messages))
 
         # 3. Set up parser + parcelapp client (session injection per HA quality rule).
         # PR4-C2: Tier 2 broad scan is opt-in (default OFF) to prevent
@@ -401,6 +405,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "error_msg": str(parse_err)[:100],
                 })
                 d.scan_events_total += 1
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "error")
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -430,6 +435,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "outcome": "no_match",
                 })
                 d.scan_events_total += 1
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_match")
                 continue
             shipment = result.shipment
 
@@ -447,6 +453,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "outcome": "skipped_dedup",
                 })
                 d.scan_events_total += 1
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_dedup")
                 continue
 
             # Only increment match/found counters after dedup confirms this is a new tracking number.
@@ -477,6 +484,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "outcome": "skipped_quota",
                 })
                 d.scan_events_total += 1
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_quota")
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -533,6 +541,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 "outcome": "posted",
             })
             d.scan_events_total += 1
+            _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "posted")
 
         # Phase 7: capture per-poll timing (D-04, Specifics).
         d.last_poll_time = poll_start
@@ -588,6 +597,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             .strftime("%d-%b-%Y")
             .lstrip("0")
         )
+        _LOGGER.debug(
+            "IMAP poll start — host: %s query: %s since: %s",
+            entry.data[CONF_IMAP_HOST],
+            query,
+            since_date,
+        )
 
         # Fetch messages from IMAP (whole session in one executor call per D-05/Pitfall 6).
         try:
@@ -607,6 +622,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         d.emails_returned_total += len(raw_messages)
         d.last_poll_emails_returned = len(raw_messages)
+        _LOGGER.debug("IMAP fetch returned %d messages", len(raw_messages))
 
         # Set up parser + parcelapp client (same as Gmail path).
         # PR4-C2: Tier 2 broad scan is opt-in (default OFF).
@@ -669,6 +685,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "error_msg": str(parse_err)[:100],
                 })
                 d.scan_events_total += 1
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "error")
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -697,6 +714,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "outcome": "no_match",
                 })
                 d.scan_events_total += 1
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_match")
                 continue
             shipment = result.shipment
 
@@ -714,6 +732,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "outcome": "skipped_dedup",
                 })
                 d.scan_events_total += 1
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_dedup")
                 continue
 
             # Only increment match/found counters after dedup confirms this is a new tracking number.
@@ -743,6 +762,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "outcome": "skipped_quota",
                 })
                 d.scan_events_total += 1
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_quota")
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -797,6 +817,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 "tracking_number": shipment.tracking_number,
                 "outcome": "posted",
             })
+            _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "posted")
             d.scan_events_total += 1
 
         # Phase 7: capture per-poll timing.
