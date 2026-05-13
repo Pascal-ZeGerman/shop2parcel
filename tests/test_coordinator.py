@@ -1609,7 +1609,7 @@ async def test_scan_event_gmail_posted(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
@@ -1654,7 +1654,7 @@ async def test_scan_event_gmail_no_match(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
@@ -1698,7 +1698,7 @@ async def test_scan_event_gmail_parse_error(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
@@ -1746,7 +1746,7 @@ async def test_scan_event_gmail_skipped_dedup(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
@@ -1801,7 +1801,7 @@ async def test_scan_event_gmail_skipped_quota(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
@@ -1846,7 +1846,7 @@ async def test_scan_events_not_reset_between_polls(hass, mock_config_entry):
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
@@ -1901,7 +1901,7 @@ async def test_scan_event_imap_posted(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body_imap",
             return_value="<html>shipped</html>",
@@ -1935,7 +1935,7 @@ async def test_scan_event_imap_no_match(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body_imap",
             return_value="<html>shipped</html>",
@@ -1971,7 +1971,7 @@ async def test_scan_event_imap_parse_error(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body_imap",
             return_value="<html>shipped</html>",
@@ -2006,7 +2006,7 @@ async def test_scan_event_imap_skipped_quota(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body_imap",
             return_value="<html>shipped</html>",
@@ -2044,7 +2044,7 @@ async def test_scan_event_imap_skipped_dedup(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body_imap",
             return_value="<html>shipped</html>",
@@ -2086,7 +2086,7 @@ async def test_scan_events_accumulate_across_gmail_and_imap(hass, mock_config_en
         patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
             "custom_components.shop2parcel.coordinator.extract_html_body",
