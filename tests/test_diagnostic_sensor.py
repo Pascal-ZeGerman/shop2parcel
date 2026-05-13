@@ -1,7 +1,7 @@
 """Tests for Shop2Parcel diagnostic_sensor.py — Phase 7 DIAG-08, DIAG-09, DIAG-10.
 
 These tests assume Plan 03 has landed:
-- custom_components/shop2parcel/diagnostic_sensor.py exists with 4 sensor classes.
+- custom_components/shop2parcel/diagnostic_sensor.py exists with 6 sensor classes.
 - Diagnostic sensors are registered via sensor.py::async_setup_entry (not via a
   "diagnostic_sensor" platform — HA only supports built-in platform domains).
 - coordinator._diagnostics is a PollStats instance (Plan 02).
@@ -112,7 +112,7 @@ async def test_all_six_diagnostic_sensors_registered(hass, mock_config_entry):
 
 
 async def test_diagnostic_sensors_share_device(hass, mock_config_entry):
-    """DIAG-10: all 4 diagnostic sensors share the same Shop2Parcel device."""
+    """DIAG-10: all 6 diagnostic sensors share the same Shop2Parcel device."""
     await _setup_integration(hass, mock_config_entry)
     device_reg = dr.async_get(hass)
     devices = [
