@@ -605,11 +605,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # D-11: compute since_date from rescan_window_days (IMAP SEARCH date format).
         rescan_window_days = entry.options.get(CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS)
         since_ts = int(time.time()) - rescan_window_days * 86400
-        since_date = (
-            datetime.fromtimestamp(since_ts, tz=timezone.utc)
-            .strftime("%d-%b-%Y")
-            .lstrip("0")
-        )
+        _since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
+        since_date = f"{_since_dt.day}-{_since_dt.strftime('%b-%Y')}"
         _LOGGER.debug(
             "IMAP poll start — host: %s query: %s since: %s",
             entry.data[CONF_IMAP_HOST],
