@@ -159,6 +159,9 @@ class PollStats:
     )
     scan_events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
     scan_events_total: int = 0
+    # ^ Cumulative count since HA restart. Intentionally NOT bounded by scan_events.maxlen.
+    # After >50 events: scan_events_total > len(scan_events). This is correct —
+    # scan_events_total is "all events ever" while scan_events is "most recent 50".
 
 
 class Shop2ParcelStore(Store):

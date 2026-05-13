@@ -2123,3 +2123,22 @@ async def test_scan_events_accumulate_across_gmail_and_imap(hass, mock_config_en
     # scan_events_total must accumulate across polls (not reset)
     assert coord._diagnostics.scan_events_total == 3
     assert len(coord._diagnostics.scan_events) == 3
+
+
+def test_scan_events_total_exceeds_deque_len_after_overflow():
+    """ACTLOG-01: scan_events_total is cumulative; deque evicts but total does not reset.
+
+    After 51+ events the deque (maxlen=50) has evicted the oldest entry but
+    scan_events_total continues to reflect the true lifetime count.  A future
+    maintainer must NOT 'fix' this by resetting scan_events_total to
+    len(scan_events) — that would destroy the cumulative-since-restart semantic.
+    """
+    stats = PollStats()
+    for i in range(51):
+        stats.scan_events.append({"event": i})
+        stats.scan_events_total += 1
+    assert stats.scan_events_total == 51
+    assert len(stats.scan_events) == 50
+    assert stats.scan_events_total > len(stats.scan_events), (
+        "scan_events_total must exceed deque len after overflow — this divergence is intentional"
+    )
