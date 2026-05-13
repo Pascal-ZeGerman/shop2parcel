@@ -771,7 +771,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             )
 
             if quota_blocked:
-                _LOGGER.debug("Skipping forward of IMAP UID %s — quota exhausted", uid_str)
                 d.scan_events.append({
                     "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                     "message_id": f"imap:{uid_str}",
