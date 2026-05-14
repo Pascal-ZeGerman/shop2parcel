@@ -193,3 +193,24 @@ async def test_diagnostics_activity_log_contains_events(hass, mock_config_entry)
     assert len(result["activity_log"]) == 1
     assert result["activity_log"][0]["message_id"] == "gmail:abc123"
     assert result["activity_log"][0]["outcome"] == "posted"
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_activity_log_contains_imap_events(hass, mock_config_entry):
+    """activity_log contains IMAP-prefixed scan events — message_id prefix is an observable invariant."""
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
+    coordinator._diagnostics.scan_events.append(
+        {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message_id": "imap:uid123",
+            "subject": "Your order shipped",
+            "sender": "noreply@shopify.com",
+            "strategy": "html_template",
+            "tracking_number": "TRK001",
+            "outcome": "posted",
+        }
+    )
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    assert len(result["activity_log"]) == 1
+    assert result["activity_log"][0]["message_id"] == "imap:uid123"
+    assert result["activity_log"][0]["outcome"] == "posted"
