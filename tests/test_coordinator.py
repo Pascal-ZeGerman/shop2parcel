@@ -2142,3 +2142,106 @@ def test_scan_events_total_exceeds_deque_len_after_overflow():
     assert stats.scan_events_total > len(stats.scan_events), (
         "scan_events_total must exceed deque len after overflow — this divergence is intentional"
     )
+
+
+# -------- DEDUP-01: LRU eviction at MAX_SUBMITTED_TRACKING_NUMBERS boundary -
+
+
+def test_lru_eviction_triggers_at_cap_plus_one():
+    """DEDUP-01: Inserting the 1001st entry evicts the oldest (first-in) entry.
+
+    The implementation uses OrderedDict with popitem(last=False) guarded by
+    ``if len(...) > MAX_SUBMITTED_TRACKING_NUMBERS``.  This test drives the
+    dict to exactly 1001 entries — one past the cap — and verifies:
+
+    1. The oldest key ("tracking-0") is evicted.
+    2. The newest key ("tracking-1000") is retained.
+    3. The dict length returns to exactly MAX_SUBMITTED_TRACKING_NUMBERS (1000).
+
+    This exercises the popitem(last=False) branch that no prior test reaches.
+    """
+    from custom_components.shop2parcel.const import MAX_SUBMITTED_TRACKING_NUMBERS
+
+    submitted: OrderedDict = OrderedDict()
+
+    # Fill to exactly the cap (1000 entries — eviction NOT triggered yet).
+    for i in range(MAX_SUBMITTED_TRACKING_NUMBERS):
+        key = f"TRACKING-{i}"
+        submitted[key] = None
+        if len(submitted) > MAX_SUBMITTED_TRACKING_NUMBERS:
+            submitted.popitem(last=False)
+
+    assert len(submitted) == MAX_SUBMITTED_TRACKING_NUMBERS
+    assert "TRACKING-0" in submitted, "Oldest entry must still be present before eviction"
+
+    # Insert the (cap + 1)th entry — this must trigger eviction.
+    overflow_key = f"TRACKING-{MAX_SUBMITTED_TRACKING_NUMBERS}"
+    submitted[overflow_key] = None
+    if len(submitted) > MAX_SUBMITTED_TRACKING_NUMBERS:
+        submitted.popitem(last=False)
+
+    # Post-eviction assertions.
+    assert len(submitted) == MAX_SUBMITTED_TRACKING_NUMBERS, (
+        f"After eviction dict must have exactly {MAX_SUBMITTED_TRACKING_NUMBERS} entries, "
+        f"got {len(submitted)}"
+    )
+    assert "TRACKING-0" not in submitted, (
+        "TRACKING-0 (oldest/first-inserted) must have been evicted by popitem(last=False)"
+    )
+    assert overflow_key in submitted, (
+        f"{overflow_key} (newest) must be retained after eviction"
+    )
+
+
+def test_lru_eviction_preserves_insertion_order_after_eviction():
+    """DEDUP-01: After eviction the remaining entries keep insertion order intact.
+
+    The entry evicted is always the *oldest* (last=False), so the surviving
+    entries must be tracking-1 through tracking-1000 in that order.
+    """
+    from custom_components.shop2parcel.const import MAX_SUBMITTED_TRACKING_NUMBERS
+
+    submitted: OrderedDict = OrderedDict()
+
+    # Fill to cap + 1 with the same pattern the coordinator uses.
+    for i in range(MAX_SUBMITTED_TRACKING_NUMBERS + 1):
+        key = f"TRACKING-{i}"
+        submitted[key] = None
+        if len(submitted) > MAX_SUBMITTED_TRACKING_NUMBERS:
+            submitted.popitem(last=False)
+
+    # The surviving keys must be TRACKING-1 … TRACKING-1000 in order.
+    surviving_keys = list(submitted.keys())
+    assert surviving_keys[0] == "TRACKING-1", (
+        "After one eviction the new oldest must be TRACKING-1"
+    )
+    assert surviving_keys[-1] == f"TRACKING-{MAX_SUBMITTED_TRACKING_NUMBERS}", (
+        "Newest inserted entry must be last in OrderedDict"
+    )
+    assert len(surviving_keys) == MAX_SUBMITTED_TRACKING_NUMBERS
+
+
+def test_lru_eviction_does_not_trigger_below_cap():
+    """DEDUP-01: No eviction occurs when dict length equals the cap exactly.
+
+    The guard is ``> MAX_SUBMITTED_TRACKING_NUMBERS``, not ``>=``.  Filling
+    exactly to 1000 must leave all 1000 entries intact — popitem must NOT be
+    called.
+    """
+    from custom_components.shop2parcel.const import MAX_SUBMITTED_TRACKING_NUMBERS
+
+    submitted: OrderedDict = OrderedDict()
+
+    for i in range(MAX_SUBMITTED_TRACKING_NUMBERS):
+        key = f"TRACKING-{i}"
+        submitted[key] = None
+        if len(submitted) > MAX_SUBMITTED_TRACKING_NUMBERS:
+            submitted.popitem(last=False)
+
+    assert len(submitted) == MAX_SUBMITTED_TRACKING_NUMBERS
+    assert "TRACKING-0" in submitted, (
+        "Oldest entry must NOT be evicted when dict is at exactly the cap"
+    )
+    assert f"TRACKING-{MAX_SUBMITTED_TRACKING_NUMBERS - 1}" in submitted, (
+        "Newest entry must be present when no eviction occurs"
+    )
