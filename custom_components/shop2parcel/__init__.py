@@ -1,7 +1,7 @@
 """The Shop2Parcel integration entry point.
 
 Responsibilities:
-- Instantiates Shop2ParcelCoordinator and hydrates deduplication state from
+- Instantiates GmailCoordinator or ImapCoordinator (based on CONF_CONNECTION_TYPE) and hydrates deduplication state from
   persistent Store BEFORE the first refresh (RESEARCH.md Pitfall 1: Store must
   be loaded before async_config_entry_first_refresh() to avoid re-forwarding
   previously processed shipments).
@@ -48,13 +48,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Step 2 MUST precede step 3 — RESEARCH.md Pitfall 1: an empty forwarded_ids
     set on first poll re-POSTs every previously forwarded shipment, wasting quota.
     """
-    # Lazy import: coordinator.py depends on gmail_client.py which requires
-    # google/googleapiclient stubs to be in sys.modules. Deferring to function scope
-    # ensures the test harness (conftest.py) has registered the mocks before this
-    # import runs. At production runtime there is no difference.
-    from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
+    # Lazy import: gmail_coordinator.py and imap_coordinator.py depend on gmail_client.py
+    # which requires google/googleapiclient stubs to be in sys.modules. Deferring to
+    # function scope ensures the test harness (conftest.py) has registered the mocks
+    # before this import runs. At production runtime there is no difference.
+    from .const import CONF_CONNECTION_TYPE, CONNECTION_TYPE_IMAP  # noqa: PLC0415
+    from .gmail_coordinator import GmailCoordinator  # noqa: PLC0415
+    from .imap_coordinator import ImapCoordinator  # noqa: PLC0415
 
-    coordinator = Shop2ParcelCoordinator(hass, entry)
+    conn_type = entry.data.get(CONF_CONNECTION_TYPE, "gmail")
+    if conn_type == CONNECTION_TYPE_IMAP:
+        coordinator = ImapCoordinator(hass, entry)
+    else:
+        coordinator = GmailCoordinator(hass, entry)
     await coordinator._async_load_store()
     await coordinator.async_config_entry_first_refresh()
 

@@ -26,11 +26,11 @@ async def test_setup_entry_wires_coordinator(hass, mock_config_entry):
     """
     mock_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -56,11 +56,11 @@ async def test_setup_entry_calls_load_store_before_first_refresh(hass, mock_conf
     mock_config_entry.add_to_hass(hass)
     parent = MagicMock()
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -82,11 +82,11 @@ async def test_setup_entry_gmail_auth_failure_sets_setup_error(hass, mock_config
     """Gmail auth error -> coordinator raises ConfigEntryAuthFailed -> HA SETUP_ERROR state."""
     mock_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -104,11 +104,11 @@ async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
     """async_unload_entry calls async_unload_platforms with PLATFORMS then drops hass.data."""
     mock_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -139,11 +139,11 @@ async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_c
 
     mock_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch("custom_components.shop2parcel.async_track_time_interval") as mock_track,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
@@ -169,11 +169,11 @@ async def test_unload_entry_cancels_cleanup_task(hass, mock_config_entry):
     mock_config_entry.add_to_hass(hass)
     cancel_cb = MagicMock()
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch("custom_components.shop2parcel.async_track_time_interval", return_value=cancel_cb),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()

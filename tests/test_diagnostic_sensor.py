@@ -46,13 +46,13 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
     mock_config_entry.add_to_hass(hass)
     gmail_messages = [{"id": "msg1"}] if with_message else []
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
-        patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
         patch(
-            "custom_components.shop2parcel.coordinator.extract_html_body",
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
             return_value="<html>body</html>" if with_message else "",
         ),
     ):

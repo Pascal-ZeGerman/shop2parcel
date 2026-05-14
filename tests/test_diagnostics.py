@@ -51,9 +51,9 @@ async def test_diagnostics_imap_redaction(hass, mock_imap_config_entry):
     """IMAP credentials (imap_password, api_key) must not appear in diagnostic output."""
     mock_imap_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
@@ -87,9 +87,9 @@ async def test_diagnostics_config_imap(hass, mock_imap_config_entry):
     """IMAP entries report connection_type='imap' and account=imap_username."""
     mock_imap_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)

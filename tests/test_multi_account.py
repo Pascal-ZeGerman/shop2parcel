@@ -70,13 +70,13 @@ async def test_two_imap_entries_have_separate_store_keys(hass, mock_imap_config_
 
 
 async def test_imap_coordinator_instantiates_imap_client(hass, mock_imap_config_entry):
-    """D-10: Coordinator with connection_type='imap' must instantiate ImapClient, not GmailClient."""
+    """D-10: ImapCoordinator must instantiate ImapClient, not GmailClient."""
     from custom_components.shop2parcel.api.gmail_client import GmailClient  # noqa: PLC0415
     from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
-    from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
+    from custom_components.shop2parcel.imap_coordinator import ImapCoordinator  # noqa: PLC0415
 
     mock_imap_config_entry.add_to_hass(hass)
-    coordinator = Shop2ParcelCoordinator(hass, mock_imap_config_entry)
+    coordinator = ImapCoordinator(hass, mock_imap_config_entry)
 
     assert isinstance(coordinator._email_client, ImapClient), (
         "IMAP config entry must create ImapClient, not GmailClient"
