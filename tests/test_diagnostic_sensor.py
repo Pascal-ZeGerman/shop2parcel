@@ -255,8 +255,6 @@ async def test_activity_log_sensor_attributes(hass, mock_config_entry):
 
 async def test_activity_log_sensor_attributes_capped_at_10(hass, mock_config_entry):
     """ActivityLogSensor recent_events is capped at 10 even when scan_events has 15 items."""
-    from collections import deque
-
     coordinator = await _setup_integration(hass, mock_config_entry)
     # Manually populate scan_events with 15 fake events
     for i in range(15):
