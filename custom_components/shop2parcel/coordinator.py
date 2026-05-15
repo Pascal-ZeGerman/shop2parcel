@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import email as _email_stdlib
 import logging
-import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta

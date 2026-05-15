@@ -9,7 +9,7 @@ from __future__ import annotations
 import html as _html_stdlib
 import logging
 import time
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from typing import cast
 
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -98,7 +98,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         # D-11: compute since_date from rescan_window_days (IMAP SEARCH date format).
         rescan_window_days = entry.options.get(CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS)
         since_ts = int(time.time()) - rescan_window_days * 86400
-        _since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
+        _since_dt = datetime.fromtimestamp(since_ts, tz=UTC)
         since_date = (
             f"{_since_dt.day:02d}"
             f"-{_IMAP_MONTH_ABBR[_since_dt.month - 1]}"

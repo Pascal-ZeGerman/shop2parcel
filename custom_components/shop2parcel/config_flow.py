@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -166,7 +166,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             # Use yesterday's date for SINCE filter — connectivity test only, not a real scan.
             _yesterday_ts = int(time.time()) - 86400
             _since_date = (
-                datetime.fromtimestamp(_yesterday_ts, tz=timezone.utc)
+                datetime.fromtimestamp(_yesterday_ts, tz=UTC)
                 .strftime("%d-%b-%Y")
                 .lstrip("0")
             )
@@ -335,7 +335,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
 
             _yesterday_ts = int(time.time()) - 86400
             _since_date = (
-                datetime.fromtimestamp(_yesterday_ts, tz=timezone.utc)
+                datetime.fromtimestamp(_yesterday_ts, tz=UTC)
                 .strftime("%d-%b-%Y")
                 .lstrip("0")
             )
