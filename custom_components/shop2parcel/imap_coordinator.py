@@ -52,6 +52,13 @@ from .coordinator import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# RFC 3501 requires English month abbreviations in IMAP SEARCH date strings.
+# strftime('%b') is locale-dependent and must NOT be used here.
+_IMAP_MONTH_ABBR = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
 
 class ImapCoordinator(Shop2ParcelCoordinator):
     """Coordinator for IMAP-connected Shop2Parcel entries."""
@@ -91,7 +98,11 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         rescan_window_days = entry.options.get(CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS)
         since_ts = int(time.time()) - rescan_window_days * 86400
         _since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
-        since_date = f"{_since_dt.day}-{_since_dt.strftime('%b-%Y')}"
+        since_date = (
+            f"{_since_dt.day:02d}"
+            f"-{_IMAP_MONTH_ABBR[_since_dt.month - 1]}"
+            f"-{_since_dt.year}"
+        )
         _LOGGER.debug(
             "IMAP poll start — host: %s query: %s since: %s",
             entry.data[CONF_IMAP_HOST],
