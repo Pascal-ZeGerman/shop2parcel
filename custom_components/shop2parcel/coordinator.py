@@ -244,7 +244,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not self.data:
             return  # Nothing to clean up — skip the API call entirely
 
-        assert self.config_entry is not None
+        if self.config_entry is None:
+            _LOGGER.error("async_cleanup_delivered called with no config_entry — skipping")
+            return
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
             api_key=self.config_entry.data[CONF_API_KEY],

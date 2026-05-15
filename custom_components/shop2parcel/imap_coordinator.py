@@ -75,7 +75,8 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         Does NOT perform OAuth2 token refresh (IMAP uses entry.data credentials directly).
         """
         entry = self.config_entry
-        assert entry is not None
+        if entry is None:
+            raise UpdateFailed("config_entry is None — coordinator not properly initialized")
         imap_client = cast(ImapClient, self._email_client)
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.

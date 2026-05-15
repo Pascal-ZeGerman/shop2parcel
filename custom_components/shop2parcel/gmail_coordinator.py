@@ -58,7 +58,8 @@ class GmailCoordinator(Shop2ParcelCoordinator):
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
-        assert self.config_entry is not None
+        if self.config_entry is None:
+            raise UpdateFailed("config_entry is None — coordinator not properly initialized")
 
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
