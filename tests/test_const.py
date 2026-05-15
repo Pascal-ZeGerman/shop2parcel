@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from custom_components.shop2parcel.const import normalize_tracking_number
 
-
 # -------- SCAN-03: normalize_tracking_number canonicalizes strings ----------
 
 

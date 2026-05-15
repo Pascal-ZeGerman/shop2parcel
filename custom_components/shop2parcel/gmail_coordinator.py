@@ -181,15 +181,17 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "no_html_body", **email_meta}
                 )
-                d.scan_events.append({
-                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    "message_id": f"gmail:{msg_id}",
-                    "subject": email_meta.get("subject", ""),
-                    "sender": email_meta.get("from", ""),
-                    "strategy": None,
-                    "tracking_number": None,
-                    "outcome": "no_html_body",
-                })
+                d.scan_events.append(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                        "message_id": f"gmail:{msg_id}",
+                        "subject": email_meta.get("subject", ""),
+                        "sender": email_meta.get("from", ""),
+                        "strategy": None,
+                        "tracking_number": None,
+                        "outcome": "no_html_body",
+                    }
+                )
                 d.scan_events_total += 1
                 _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_html_body")
                 continue
@@ -208,17 +210,19 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "parse_exception", **email_meta}
                 )
-                d.scan_events.append({
-                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    "message_id": f"gmail:{msg_id}",
-                    "subject": email_meta.get("subject", ""),
-                    "sender": email_meta.get("from", ""),
-                    "strategy": "no_match",
-                    "tracking_number": None,
-                    "outcome": "error",
-                    "error_type": type(parse_err).__name__,
-                    "error_msg": str(parse_err)[:100],
-                })
+                d.scan_events.append(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                        "message_id": f"gmail:{msg_id}",
+                        "subject": email_meta.get("subject", ""),
+                        "sender": email_meta.get("from", ""),
+                        "strategy": "no_match",
+                        "tracking_number": None,
+                        "outcome": "error",
+                        "error_type": type(parse_err).__name__,
+                        "error_msg": str(parse_err)[:100],
+                    }
+                )
                 d.scan_events_total += 1
                 _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "error")
                 continue
@@ -240,15 +244,17 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
             if result.shipment is None:
-                d.scan_events.append({
-                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    "message_id": f"gmail:{msg_id}",
-                    "subject": email_meta.get("subject", ""),
-                    "sender": email_meta.get("from", ""),
-                    "strategy": result.strategy_used or "no_match",
-                    "tracking_number": None,
-                    "outcome": "no_match",
-                })
+                d.scan_events.append(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                        "message_id": f"gmail:{msg_id}",
+                        "subject": email_meta.get("subject", ""),
+                        "sender": email_meta.get("from", ""),
+                        "strategy": result.strategy_used or "no_match",
+                        "tracking_number": None,
+                        "outcome": "no_match",
+                    }
+                )
                 d.scan_events_total += 1
                 _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_match")
                 continue
@@ -258,15 +264,17 @@ class GmailCoordinator(Shop2ParcelCoordinator):
             normalized = normalize_tracking_number(shipment.tracking_number)
             if normalized in self._submitted_tracking_numbers:
                 d.last_poll_emails_skipped_dedup += 1
-                d.scan_events.append({
-                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    "message_id": f"gmail:{msg_id}",
-                    "subject": email_meta.get("subject", ""),
-                    "sender": email_meta.get("from", ""),
-                    "strategy": result.strategy_used,
-                    "tracking_number": shipment.tracking_number,
-                    "outcome": "skipped_dedup",
-                })
+                d.scan_events.append(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                        "message_id": f"gmail:{msg_id}",
+                        "subject": email_meta.get("subject", ""),
+                        "sender": email_meta.get("from", ""),
+                        "strategy": result.strategy_used,
+                        "tracking_number": shipment.tracking_number,
+                        "outcome": "skipped_dedup",
+                    }
+                )
                 d.scan_events_total += 1
                 _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_dedup")
                 continue
@@ -288,15 +296,17 @@ class GmailCoordinator(Shop2ParcelCoordinator):
 
             # 5. Quota guard (D-05): when quota is exhausted, skip the POST.
             if quota_blocked:
-                d.scan_events.append({
-                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    "message_id": f"gmail:{msg_id}",
-                    "subject": email_meta.get("subject", ""),
-                    "sender": email_meta.get("from", ""),
-                    "strategy": result.strategy_used,
-                    "tracking_number": shipment.tracking_number,
-                    "outcome": "skipped_quota",
-                })
+                d.scan_events.append(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                        "message_id": f"gmail:{msg_id}",
+                        "subject": email_meta.get("subject", ""),
+                        "sender": email_meta.get("from", ""),
+                        "strategy": result.strategy_used,
+                        "tracking_number": shipment.tracking_number,
+                        "outcome": "skipped_quota",
+                    }
+                )
                 d.scan_events_total += 1
                 _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_quota")
                 continue
@@ -345,15 +355,17 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 self._submitted_tracking_numbers.popitem(last=False)
             await self._async_save_store()
             current_data[msg_id] = shipment
-            d.scan_events.append({
-                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                "message_id": f"gmail:{msg_id}",
-                "subject": email_meta.get("subject", ""),
-                "sender": email_meta.get("from", ""),
-                "strategy": result.strategy_used,
-                "tracking_number": shipment.tracking_number,
-                "outcome": "posted",
-            })
+            d.scan_events.append(
+                {
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "message_id": f"gmail:{msg_id}",
+                    "subject": email_meta.get("subject", ""),
+                    "sender": email_meta.get("from", ""),
+                    "strategy": result.strategy_used,
+                    "tracking_number": shipment.tracking_number,
+                    "outcome": "posted",
+                }
+            )
             d.scan_events_total += 1
             _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "posted")
 

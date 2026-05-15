@@ -166,9 +166,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             # Use yesterday's date for SINCE filter — connectivity test only, not a real scan.
             _yesterday_ts = int(time.time()) - 86400
             _since_date = (
-                datetime.fromtimestamp(_yesterday_ts, tz=UTC)
-                .strftime("%d-%b-%Y")
-                .lstrip("0")
+                datetime.fromtimestamp(_yesterday_ts, tz=UTC).strftime("%d-%b-%Y").lstrip("0")
             )
             imap_client = ImapClient(self.hass.async_add_executor_job)
             try:
@@ -335,9 +333,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
 
             _yesterday_ts = int(time.time()) - 86400
             _since_date = (
-                datetime.fromtimestamp(_yesterday_ts, tz=UTC)
-                .strftime("%d-%b-%Y")
-                .lstrip("0")
+                datetime.fromtimestamp(_yesterday_ts, tz=UTC).strftime("%d-%b-%Y").lstrip("0")
             )
             imap_client = ImapClient(self.hass.async_add_executor_job)
             try:

@@ -50,7 +50,9 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
             return_value="<html>body</html>" if with_message else "",
@@ -64,7 +66,9 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=(gmail_messages, "q after:0"))
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=(gmail_messages, "q after:0")
+        )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )

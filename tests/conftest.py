@@ -72,7 +72,9 @@ async def setup_coordinator_with_data(hass, mock_config_entry, data: dict[str, S
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
