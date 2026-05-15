@@ -105,11 +105,6 @@ async def async_get_config_entry_diagnostics(
         if "scan_events" in poll_stats:
             poll_stats["scan_events"] = list(poll_stats["scan_events"])
 
-    # Build activity_log — full scan_events ring buffer from coordinator.diagnostics.
-    # list() snapshots the deque at this moment (thread-safe copy for serialisation).
-    # Subject and sender are NOT redacted per D-07 (user-initiated download, personal instance).
-    d = coordinator.diagnostics
-
     # Build recent_shipments — 10 most recent by email_date. Insertion order is not
     # used because the dict is repopulated across polls and restarts in poll-discovery
     # sequence, which does not match email_date order.
@@ -138,6 +133,6 @@ async def async_get_config_entry_diagnostics(
     return {
         "config": config,
         "poll_stats": poll_stats,
-        "activity_log": list(d.scan_events),
+        "activity_log": list(diag_obj.scan_events),
         "recent_shipments": recent_shipments,
     }
