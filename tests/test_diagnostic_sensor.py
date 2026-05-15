@@ -1,7 +1,7 @@
 """Tests for Shop2Parcel diagnostic_sensor.py — Phase 7 DIAG-08, DIAG-09, DIAG-10.
 
 These tests assume Plan 03 has landed:
-- custom_components/shop2parcel/diagnostic_sensor.py exists with 4 sensor classes.
+- custom_components/shop2parcel/diagnostic_sensor.py exists with 6 sensor classes.
 - Diagnostic sensors are registered via sensor.py::async_setup_entry (not via a
   "diagnostic_sensor" platform — HA only supports built-in platform domains).
 - coordinator._diagnostics is a PollStats instance (Plan 02).
@@ -46,13 +46,15 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
     mock_config_entry.add_to_hass(hass)
     gmail_messages = [{"id": "msg1"}] if with_message else []
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
-        patch("custom_components.shop2parcel.coordinator.EmailParser") as mock_parser_cls,
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
-            "custom_components.shop2parcel.coordinator.extract_html_body",
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
             return_value="<html>body</html>" if with_message else "",
         ),
     ):
@@ -64,7 +66,9 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=gmail_messages)
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=(gmail_messages, "q after:0")
+        )
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
@@ -92,17 +96,19 @@ async def test_emails_scanned_sensor_registered(hass, mock_config_entry):
     assert state.state == "0"
 
 
-async def test_all_four_diagnostic_sensors_registered(hass, mock_config_entry):
-    """DIAG-08: all 4 diagnostic sensors registered at setup."""
+async def test_all_six_diagnostic_sensors_registered(hass, mock_config_entry):
+    """DIAG-08: all 6 diagnostic sensors registered at setup."""
     await _setup_integration(hass, mock_config_entry)
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
     prefix = f"{DOMAIN}_{mock_config_entry.entry_id}_"
     expected_suffixes = {
         "emails_scanned",
+        "new_emails_inspected",
         "emails_matched",
         "tracking_numbers_found",
         "keyword_hits",
+        "activity_log",
     }
     found = {e.unique_id.removeprefix(prefix) for e in entries if e.unique_id.startswith(prefix)}
     missing = expected_suffixes - found
@@ -110,7 +116,7 @@ async def test_all_four_diagnostic_sensors_registered(hass, mock_config_entry):
 
 
 async def test_diagnostic_sensors_share_device(hass, mock_config_entry):
-    """DIAG-10: all 4 diagnostic sensors share the same Shop2Parcel device."""
+    """DIAG-10: all 6 diagnostic sensors share the same Shop2Parcel device."""
     await _setup_integration(hass, mock_config_entry)
     device_reg = dr.async_get(hass)
     devices = [
@@ -122,17 +128,17 @@ async def test_diagnostic_sensors_share_device(hass, mock_config_entry):
 
 
 async def test_emails_scanned_state_after_poll(hass, mock_config_entry):
-    """DIAG-09: sensor state == coordinator._diagnostics.emails_scanned_total after a poll.
+    """DIAG-09: EmailsScannedSensor state == emails_returned_total after a poll.
 
     Setup runs one full poll cycle with a matched shipment, so:
-    - emails_scanned_total == 1
+    - emails_returned_total == 1 (sensor native_value)
     - sensor.shop2parcel_emails_scanned.state == "1"
-    - extra_state_attributes contains last_poll_count, last_poll_time, query_used,
+    - extra_state_attributes contains last_poll_returned, last_poll_time, query_used,
       poll_duration_ms (per CONTEXT.md D-12).
     """
     coordinator = await _setup_integration(hass, mock_config_entry, with_message=True)
     # async_setup runs async_config_entry_first_refresh which triggers _async_update_data.
-    assert coordinator._diagnostics.emails_scanned_total == 1
+    assert coordinator._diagnostics.emails_returned_total == 1
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
     uid = f"{DOMAIN}_{mock_config_entry.entry_id}_emails_scanned"
@@ -141,11 +147,11 @@ async def test_emails_scanned_state_after_poll(hass, mock_config_entry):
     assert state is not None
     assert state.state == "1"
     # D-12 attributes
-    assert "last_poll_count" in state.attributes
+    assert "last_poll_returned" in state.attributes
     assert "last_poll_time" in state.attributes
     assert "query_used" in state.attributes
     assert "poll_duration_ms" in state.attributes
-    assert state.attributes["last_poll_count"] == 1
+    assert state.attributes["last_poll_returned"] == 1
 
 
 async def test_tracking_numbers_found_attributes_after_poll(hass, mock_config_entry):
@@ -167,6 +173,34 @@ async def test_tracking_numbers_found_attributes_after_poll(hass, mock_config_en
     assert last_poll_found[0]["tracking_number"] == "1Z999AA10123456784"
 
 
+async def test_new_emails_inspected_sensor_registered(hass, mock_config_entry):
+    """NewEmailsInspectedSensor registered at setup; state=0 before any poll."""
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_new_emails_inspected"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, "new_emails_inspected diagnostic sensor not registered"
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state == "0"
+
+
+async def test_new_emails_inspected_state_after_poll(hass, mock_config_entry):
+    """NewEmailsInspectedSensor state == emails_scanned_total after a poll."""
+    coordinator = await _setup_integration(hass, mock_config_entry, with_message=True)
+    assert coordinator._diagnostics.emails_scanned_total == 1
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_new_emails_inspected"
+    entry = next(e for e in entries if e.unique_id == uid)
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state == "1"
+    assert "last_poll_count" in state.attributes
+    assert state.attributes["last_poll_count"] == 1
+
+
 async def test_keyword_hits_per_keyword_attribute(hass, mock_config_entry):
     """DIAG-09: keyword_hits sensor exposes per_keyword dict with all 3 keys."""
     await _setup_integration(hass, mock_config_entry, with_message=True)
@@ -181,3 +215,76 @@ async def test_keyword_hits_per_keyword_attribute(hass, mock_config_entry):
     assert "per_keyword" in state.attributes
     per_keyword = state.attributes["per_keyword"]
     assert set(per_keyword.keys()) == {"tracking_regex", "order_regex", "carrier_regex"}
+
+
+async def test_activity_log_sensor_state(hass, mock_config_entry):
+    """ActivityLogSensor registered as 6th sensor; state=0 before any poll."""
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_activity_log"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, "activity_log diagnostic sensor not registered"
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state == "0"
+
+
+async def test_activity_log_sensor_state_after_poll(hass, mock_config_entry):
+    """ActivityLogSensor native_value == scan_events_total after a poll."""
+    coordinator = await _setup_integration(hass, mock_config_entry, with_message=True)
+    # After a poll that processed 1 message, scan_events_total should be 1
+    assert coordinator._diagnostics.scan_events_total >= 1
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_activity_log"
+    entry = next(e for e in entries if e.unique_id == uid)
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state == str(coordinator._diagnostics.scan_events_total)
+
+
+async def test_activity_log_sensor_attributes(hass, mock_config_entry):
+    """ActivityLogSensor extra_state_attributes contains 'recent_events' key as a list."""
+    await _setup_integration(hass, mock_config_entry, with_message=True)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_activity_log"
+    entry = next(e for e in entries if e.unique_id == uid)
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert "recent_events" in state.attributes
+    assert isinstance(state.attributes["recent_events"], list)
+
+
+async def test_activity_log_sensor_attributes_capped_at_10(hass, mock_config_entry):
+    """ActivityLogSensor recent_events is capped at 10 even when scan_events has 15 items."""
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    # Manually populate scan_events with 15 fake events
+    for i in range(15):
+        coordinator._diagnostics.scan_events.append(
+            {
+                "timestamp": f"2026-01-01T00:00:0{i % 10}Z",
+                "message_id": f"gmail:msg{i}",
+                "subject": f"Shipment {i}",
+                "sender": "noreply@shopify.com",
+                "strategy": "html_template",
+                "tracking_number": f"TRK{i}",
+                "outcome": "posted",
+            }
+        )
+    # Trigger a coordinator update to refresh entity state
+    coordinator.async_set_updated_data(coordinator.data or {})
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_activity_log"
+    entry = next(e for e in entries if e.unique_id == uid)
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    recent_events = state.attributes["recent_events"]
+    assert isinstance(recent_events, list)
+    assert len(recent_events) == 10, f"expected 10 events (capped), got {len(recent_events)}"
+    # Should be the last 10 (indices 5-14)
+    assert recent_events[-1]["message_id"] == "gmail:msg14"

@@ -444,7 +444,7 @@ async def test_async_step_imap_on_success_stores_credentials_in_data():
     )
 
     mock_imap_client = AsyncMock()
-    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=([], None))
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=[])
 
     with patch(
         "custom_components.shop2parcel.config_flow.ImapClient",
@@ -475,7 +475,7 @@ async def test_async_step_imap_sets_unique_id_to_username_at_host():
     handler.async_step_finish = AsyncMock(return_value={"type": "create_entry"})
 
     mock_imap_client = AsyncMock()
-    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=([], None))
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=[])
 
     with patch(
         "custom_components.shop2parcel.config_flow.ImapClient",

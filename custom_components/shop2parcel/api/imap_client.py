@@ -36,12 +36,13 @@ class ImapClient:
         password: str,
         tls_mode: str,
         search_criteria: str,
-        since_uid: int | None,
-    ) -> tuple[list[dict[str, Any]], int | None]:
-        """Fetch shipping emails via IMAP, returning (messages, max_uid).
+        since_date: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch shipping emails via IMAP using SINCE-date search.
 
-        D-06: Returns list[dict] with keys "uid" (int) and "raw" (bytes).
-        D-08: Passes since_uid to _fetch_sync for UID-based incremental polling.
+        D-11: Returns list[dict] with keys "uid" (int) and "raw" (bytes).
+        since_date: IMAP SEARCH date string in DD-Mon-YYYY format (e.g. "8-May-2026").
+        Phase 10 D-11: full-window scanning uses SINCE date exclusively.
         Entire IMAP session runs in one executor call (RESEARCH.md Pitfall 6).
         """
         try:
@@ -53,7 +54,7 @@ class ImapClient:
                 password,
                 tls_mode,
                 search_criteria,
-                since_uid,
+                since_date,
             )
         except ImapAuthError:
             raise  # already classified — do not re-wrap
@@ -71,13 +72,14 @@ class ImapClient:
         password: str,
         tls_mode: str,
         search_criteria: str,
-        since_uid: int | None,
-    ) -> tuple[list[dict[str, Any]], int | None]:
+        since_date: str,
+    ) -> list[dict[str, Any]]:
         """Synchronous IMAP session — runs in executor thread.
 
         D-09: Uses select(readonly) to issue EXAMINE (not SELECT) — read-only at protocol level.
         D-09: Uses PEEK fetch spec to avoid setting \\Seen flag.
         D-09: Never calls store(), expunge(), copy(), or uid(MOVE/STORE/EXPUNGE/COPY).
+        D-11: Uses SINCE {since_date} search — UID-based search removed (Phase 10).
         """
         conn: imaplib.IMAP4 | None = None
         try:
@@ -88,6 +90,7 @@ class ImapClient:
                 if tls_mode == "starttls":
                     conn.starttls()
 
+            _LOGGER.debug("IMAP connecting to %s:%s", host, port)
             conn.login(username, password)
 
             ok, _ = conn.select(
@@ -96,18 +99,15 @@ class ImapClient:
             if ok != "OK":
                 raise ImapTransientError(f"Failed to select INBOX: {ok}")
 
-            if since_uid is not None:
-                uid_arg = f"{since_uid + 1}:* {search_criteria}"
-            else:
-                uid_arg = search_criteria
+            uid_arg = f"SINCE {since_date} {search_criteria}"
 
             typ, data = conn.uid("SEARCH", uid_arg)
             if typ != "OK" or not data or not data[0]:
-                return [], None
+                return []
 
             uid_list = data[0].decode().split()
+            _LOGGER.debug("IMAP SEARCH returned %d UIDs for folder %s", len(uid_list), "INBOX")
             results: list[dict[str, Any]] = []
-            max_uid: int | None = None
 
             for uid_str in uid_list:
                 try:
@@ -131,10 +131,8 @@ class ImapClient:
                     )
                     continue  # Skip malformed FETCH tuple — body must be bytes
                 results.append({"uid": uid_int, "raw": raw_bytes})
-                if max_uid is None or uid_int > max_uid:
-                    max_uid = uid_int
 
-            return results, max_uid
+            return results
         except ImapAuthError:
             raise  # already classified — re-raise without double-wrapping
         except ImapTransientError:

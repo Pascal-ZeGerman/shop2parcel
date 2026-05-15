@@ -44,7 +44,9 @@ async def async_get_config_entry_diagnostics(
 
     Top-level keys:
       "config"           — sanitized connection info; entry_data has credentials stripped
-      "poll_stats"       — PollStats fields serialised via dataclasses.asdict()
+      "poll_stats"       — PollStats fields serialised via dataclasses.asdict(); scan_events
+                           deque is explicitly converted to list (JSON-safe, T-11-07)
+      "activity_log"     — full scan_events ring buffer as a list of dicts (ACTLOG-04)
       "recent_shipments" — 10 most recent entries from coordinator.data, sorted by email_date
 
     Called by HA when the user clicks "Download Diagnostics" in the UI or via
@@ -97,6 +99,11 @@ async def async_get_config_entry_diagnostics(
         poll_stats: dict[str, Any] = {}
     else:
         poll_stats = dataclasses.asdict(diag_obj)
+        # T-11-07: dataclasses.asdict() does NOT convert deque to list.
+        # Explicit conversion required to prevent TypeError when HA serialises the
+        # diagnostics download to JSON.  (RESEARCH.md Pitfall 1)
+        if "scan_events" in poll_stats:
+            poll_stats["scan_events"] = list(poll_stats["scan_events"])
 
     # Build recent_shipments — 10 most recent by email_date. Insertion order is not
     # used because the dict is repopulated across polls and restarts in poll-discovery
@@ -126,5 +133,6 @@ async def async_get_config_entry_diagnostics(
     return {
         "config": config,
         "poll_stats": poll_stats,
+        "activity_log": list(diag_obj.scan_events),
         "recent_shipments": recent_shipments,
     }

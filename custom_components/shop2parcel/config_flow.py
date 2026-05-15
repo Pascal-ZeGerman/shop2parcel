@@ -24,6 +24,8 @@ Security:
 from __future__ import annotations
 
 import logging
+import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -160,7 +162,12 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             password = user_input[CONF_IMAP_PASSWORD]
             tls_mode = user_input[CONF_IMAP_TLS]
 
-            # Test IMAP connection in executor (synchronous imaplib call)
+            # Test IMAP connection in executor (synchronous imaplib call).
+            # Use yesterday's date for SINCE filter — connectivity test only, not a real scan.
+            _yesterday_ts = int(time.time()) - 86400
+            _since_date = (
+                datetime.fromtimestamp(_yesterday_ts, tz=UTC).strftime("%d-%b-%Y").lstrip("0")
+            )
             imap_client = ImapClient(self.hass.async_add_executor_job)
             try:
                 await imap_client.fetch_shipping_emails(
@@ -170,7 +177,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                     password=password,
                     tls_mode=tls_mode,
                     search_criteria='SUBJECT "shipped"',
-                    since_uid=None,
+                    since_date=_since_date,
                 )
             except ImapAuthError:
                 errors["base"] = "invalid_auth"
@@ -324,6 +331,10 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             password = user_input[CONF_IMAP_PASSWORD]
             tls_mode = user_input.get(CONF_IMAP_TLS, reauth_entry.data.get(CONF_IMAP_TLS, "ssl"))
 
+            _yesterday_ts = int(time.time()) - 86400
+            _since_date = (
+                datetime.fromtimestamp(_yesterday_ts, tz=UTC).strftime("%d-%b-%Y").lstrip("0")
+            )
             imap_client = ImapClient(self.hass.async_add_executor_job)
             try:
                 await imap_client.fetch_shipping_emails(
@@ -333,7 +344,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                     password=password,
                     tls_mode=tls_mode,
                     search_criteria='SUBJECT "shipped"',
-                    since_uid=None,
+                    since_date=_since_date,
                 )
             except ImapAuthError:
                 errors["base"] = "invalid_auth"

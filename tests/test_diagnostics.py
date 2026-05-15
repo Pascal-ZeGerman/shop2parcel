@@ -25,10 +25,10 @@ def _make_shipment(msg_id: str) -> ShipmentData:
 
 @pytest.mark.asyncio
 async def test_diagnostics_output_shape(hass, mock_config_entry):
-    """Returned dict has exactly the top-level keys config, poll_stats, recent_shipments."""
+    """Returned dict has exactly the top-level keys config, poll_stats, activity_log, recent_shipments."""
     await setup_coordinator_with_data(hass, mock_config_entry, {})
     result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
-    assert set(result.keys()) == {"config", "poll_stats", "recent_shipments"}
+    assert set(result.keys()) == {"config", "poll_stats", "activity_log", "recent_shipments"}
 
 
 @pytest.mark.asyncio
@@ -51,14 +51,15 @@ async def test_diagnostics_imap_redaction(hass, mock_imap_config_entry):
     """IMAP credentials (imap_password, api_key) must not appear in diagnostic output."""
     mock_imap_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([], None))
+        # Phase 10: fetch_shipping_emails returns list[dict], not a tuple
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
         await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
         coordinator.async_set_updated_data({})
@@ -86,14 +87,15 @@ async def test_diagnostics_config_imap(hass, mock_imap_config_entry):
     """IMAP entries report connection_type='imap' and account=imap_username."""
     mock_imap_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.ImapClient") as mock_imap_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=([], None))
+        # Phase 10: fetch_shipping_emails returns list[dict], not a tuple
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
         await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
         coordinator.async_set_updated_data({})
@@ -136,3 +138,79 @@ async def test_diagnostics_poll_stats_present(hass, mock_config_entry):
     await setup_coordinator_with_data(hass, mock_config_entry, {})
     result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
     assert "emails_scanned_total" in result["poll_stats"]
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_activity_log_key(hass, mock_config_entry):
+    """activity_log top-level key is a list (may be empty)."""
+    await setup_coordinator_with_data(hass, mock_config_entry, {})
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    assert "activity_log" in result
+    assert isinstance(result["activity_log"], list)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_poll_stats_scan_events_json_safe(hass, mock_config_entry):
+    """poll_stats["scan_events"] is a list, not a deque — json.dumps does not raise TypeError."""
+    import json
+
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
+    # Pre-populate scan_events with a sample event to ensure the field is non-empty
+    coordinator._diagnostics.scan_events.append(
+        {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message_id": "gmail:test123",
+            "subject": "Your order has shipped",
+            "sender": "noreply@shopify.com",
+            "strategy": "html_template",
+            "tracking_number": "1Z999AA10123456784",
+            "outcome": "posted",
+        }
+    )
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    # This must not raise TypeError: "Object of type deque is not JSON serializable"
+    serialized = json.dumps(result["poll_stats"])
+    assert '"scan_events"' in serialized
+    # scan_events in poll_stats must be a list (not a deque)
+    assert isinstance(result["poll_stats"]["scan_events"], list)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_activity_log_contains_events(hass, mock_config_entry):
+    """activity_log contains the scan_events from the coordinator as a list of dicts."""
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
+    event = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "message_id": "gmail:abc123",
+        "subject": "Your order shipped",
+        "sender": "noreply@shopify.com",
+        "strategy": "html_template",
+        "tracking_number": "TRK001",
+        "outcome": "posted",
+    }
+    coordinator._diagnostics.scan_events.append(event)
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    assert len(result["activity_log"]) == 1
+    assert result["activity_log"][0]["message_id"] == "gmail:abc123"
+    assert result["activity_log"][0]["outcome"] == "posted"
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_activity_log_contains_imap_events(hass, mock_config_entry):
+    """activity_log contains IMAP-prefixed scan events — message_id prefix is an observable invariant."""
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
+    coordinator._diagnostics.scan_events.append(
+        {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message_id": "imap:uid123",
+            "subject": "Your order shipped",
+            "sender": "noreply@shopify.com",
+            "strategy": "html_template",
+            "tracking_number": "TRK001",
+            "outcome": "posted",
+        }
+    )
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    assert len(result["activity_log"]) == 1
+    assert result["activity_log"][0]["message_id"] == "imap:uid123"
+    assert result["activity_log"][0]["outcome"] == "posted"

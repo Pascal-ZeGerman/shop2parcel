@@ -137,9 +137,10 @@ class _CapturingExecutor:
 # ---------------------------------------------------------------------------
 
 
-async def test_list_messages_appends_after_timestamp():
-    """after_timestamp=1000 → query contains 'after:1000'."""
+async def test_list_messages_appends_rescan_window_after_filter():
+    """rescan_window_days=7 → query contains 'after:' with a timestamp ~7 days ago."""
     captured_queries = []
+    expected_min = int(time.time()) - 8 * 86400
 
     service = MagicMock()
     list_request = MagicMock()
@@ -150,12 +151,18 @@ async def test_list_messages_appends_after_timestamp():
 
     executor = _CapturingExecutor(service=service, execute_return={"messages": [{"id": "abc"}]})
     client = GmailClient(executor)
-    result = await client.async_list_messages("fake-token", "from:shopify", after_timestamp=1000)
-    assert any("after:1000" in q for q in captured_queries)
+    messages, effective_query = await client.async_list_messages(
+        "fake-token", "from:shopify", rescan_window_days=7
+    )
+    assert len(captured_queries) == 1
+    assert "after:" in captured_queries[0]
+    ts = int(captured_queries[0].split("after:")[1].strip())
+    assert ts > expected_min
+    assert "after:" in effective_query
 
 
 async def test_list_messages_no_after_timestamp():
-    """after_timestamp=None → query contains 'after:' with a recent timestamp."""
+    """Default rescan_window_days=30 → query contains 'after:' with a recent timestamp."""
     captured_queries = []
     expected_min = int(time.time()) - 31 * 86400
 
@@ -168,7 +175,7 @@ async def test_list_messages_no_after_timestamp():
 
     executor = _CapturingExecutor(service=service, execute_return={})
     client = GmailClient(executor)
-    await client.async_list_messages("fake-token", "from:shopify", after_timestamp=None)
+    await client.async_list_messages("fake-token", "from:shopify")
     assert len(captured_queries) == 1
     query = captured_queries[0]
     assert "after:" in query
@@ -176,8 +183,19 @@ async def test_list_messages_no_after_timestamp():
     assert ts > expected_min
 
 
+async def test_async_list_messages_rejects_after_timestamp_kwarg():
+    """Regression guard: after_timestamp kwarg is no longer accepted → TypeError raised.
+
+    Phase 10 D-06: after_timestamp parameter dropped from async_list_messages.
+    """
+    executor = _CapturingExecutor(service=MagicMock(), execute_return={})
+    client = GmailClient(executor)
+    with pytest.raises(TypeError):
+        await client.async_list_messages("fake-token", "from:shopify", after_timestamp=123)
+
+
 async def test_list_messages_returns_message_list():
-    """Executor returns {'messages': [{'id': 'abc'}]} → method returns [{'id': 'abc'}]."""
+    """Executor returns {'messages': [{'id': 'abc'}]} → method returns ([{'id': 'abc'}], query)."""
     service = MagicMock()
     list_request = MagicMock()
     list_request.execute = MagicMock(return_value={"messages": [{"id": "abc"}]})
@@ -185,12 +203,13 @@ async def test_list_messages_returns_message_list():
 
     executor = _CapturingExecutor(service=service, execute_return={"messages": [{"id": "abc"}]})
     client = GmailClient(executor)
-    result = await client.async_list_messages("fake-token", "from:shopify")
-    assert result == [{"id": "abc"}]
+    messages, effective_query = await client.async_list_messages("fake-token", "from:shopify")
+    assert messages == [{"id": "abc"}]
+    assert "after:" in effective_query
 
 
 async def test_list_messages_returns_empty_on_no_results():
-    """Executor returns {} → method returns []."""
+    """Executor returns {} → method returns ([], query)."""
     service = MagicMock()
     list_request = MagicMock()
     list_request.execute = MagicMock(return_value={})
@@ -198,8 +217,9 @@ async def test_list_messages_returns_empty_on_no_results():
 
     executor = _CapturingExecutor(service=service, execute_return={})
     client = GmailClient(executor)
-    result = await client.async_list_messages("fake-token", "from:shopify")
-    assert result == []
+    messages, effective_query = await client.async_list_messages("fake-token", "from:shopify")
+    assert messages == []
+    assert "after:" in effective_query
 
 
 # ---------------------------------------------------------------------------
@@ -334,20 +354,26 @@ def test_extract_html_body_recurses_into_parts():
 # ---------------------------------------------------------------------------
 
 
-def test_build_incremental_query_with_timestamp():
-    """build_incremental_query('base', 1000) → 'base after:1000'.
+def test_build_incremental_query_with_window_only():
+    """build_incremental_query('base', 30) → 'base after:' followed by ts ≈ now-30d.
 
-    last_timestamp=1000 is epoch 1970 — far older than now-30*86400, so
-    min(1000, now-window) == 1000. Assertion still holds with new semantics.
+    Phase 10 D-06: last_timestamp parameter dropped. Only rescan_window_days controls
+    the query boundary.
     """
-    result = build_incremental_query("base", 1000, rescan_window_days=30)
-    assert result == "base after:1000"
+    expected_min = int(time.time()) - 31 * 86400
+    result = build_incremental_query("base", 30)
+    assert result.startswith("base after:")
+    ts = int(result.split("after:")[1].strip())
+    assert ts > expected_min
+    # Within 2 seconds of expected
+    expected = int(time.time()) - 30 * 86400
+    assert abs(ts - expected) <= 2
 
 
 def test_build_incremental_query_none_defaults_30_days():
-    """build_incremental_query('base', None, rescan_window_days=30) → after: with ts > (now - 31*86400)."""
+    """build_incremental_query('base') with no args → after: with ts ≈ now - 30*86400."""
     expected_min = int(time.time()) - 31 * 86400
-    result = build_incremental_query("base", None, rescan_window_days=30)
+    result = build_incremental_query("base")
     assert "after:" in result
     ts = int(result.split("after:")[1].strip())
     assert ts > expected_min
@@ -381,51 +407,27 @@ def test_default_gmail_query_keeps_spam_exclusion():
     )
 
 
-def test_build_incremental_query_with_timestamp_uses_window_start_when_stored_is_more_recent():
-    """QF-02: stored ts is 5 days old, window=30 → after: uses window_start (30 days back).
+def test_build_incremental_query_7_day_window():
+    """build_incremental_query('base', 7) → after: uses 7-day window.
 
-    last_timestamp is MORE RECENT than window_start → window_start wins (look back further).
+    Phase 10 D-06: rescan_window_days is the only parameter beyond base_query.
     """
     now = int(time.time())
-    last_timestamp = now - 5 * 86400  # 5 days old — more recent than window
-    result = build_incremental_query("base", last_timestamp, rescan_window_days=30)
+    result = build_incremental_query("base", 7)
     assert "after:" in result
     ts = int(result.split("after:")[1].strip())
-    expected_window_start = now - 30 * 86400
-    # ts should be approximately now - 30*86400 (within ±5s tolerance)
-    assert abs(ts - expected_window_start) <= 5, (
-        f"Expected after: near {expected_window_start} (window_start), got {ts}. "
-        "When stored ts is more recent than window_start, window_start must win."
-    )
-
-
-def test_build_incremental_query_with_timestamp_uses_stored_when_older_than_window():
-    """QF-02: stored ts is 60 days old, window=30 → after: uses stored ts (60 days back).
-
-    last_timestamp is OLDER than window_start → stored ts wins (don't skip pre-window mail).
-    """
-    now = int(time.time())
-    last_timestamp = now - 60 * 86400  # 60 days old — older than 30-day window
-    result = build_incremental_query("base", last_timestamp, rescan_window_days=30)
-    assert "after:" in result
-    ts = int(result.split("after:")[1].strip())
-    assert ts == last_timestamp, (
-        f"Expected after:{last_timestamp} (stored ts wins when older than window), got {ts}"
-    )
-
-
-def test_build_incremental_query_none_uses_window_start():
-    """QF-02: last_timestamp=None, rescan_window_days=14 → after: ≈ now - 14*86400.
-
-    On first run (no stored timestamp), fall back to window_start.
-    """
-    now = int(time.time())
-    result = build_incremental_query("base", None, rescan_window_days=14)
-    assert "after:" in result
-    ts = int(result.split("after:")[1].strip())
-    expected_window_start = now - 14 * 86400
+    expected_window_start = now - 7 * 86400
     # Within ±5s tolerance for test execution time
     assert abs(ts - expected_window_start) <= 5, (
-        f"Expected after: near {expected_window_start} (now - 14d), got {ts}. "
-        "None last_timestamp must fall back to window_start."
+        f"Expected after: near {expected_window_start} (now - 7d), got {ts}."
     )
+
+
+def test_build_incremental_query_rejects_three_positional_args():
+    """Regression guard: calling with 3 positional args raises TypeError.
+
+    Phase 10 D-06: last_timestamp parameter dropped — legacy callers with
+    3 positional args must fail loudly rather than silently using the wrong value.
+    """
+    with pytest.raises(TypeError):
+        build_incremental_query("base", 0, 30)  # type: ignore[call-arg]

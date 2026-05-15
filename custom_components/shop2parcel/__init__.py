@@ -1,7 +1,7 @@
 """The Shop2Parcel integration entry point.
 
 Responsibilities:
-- Instantiates Shop2ParcelCoordinator and hydrates deduplication state from
+- Instantiates GmailCoordinator or ImapCoordinator (based on CONF_CONNECTION_TYPE) and hydrates deduplication state from
   persistent Store BEFORE the first refresh (RESEARCH.md Pitfall 1: Store must
   be loaded before async_config_entry_first_refresh() to avoid re-forwarding
   previously processed shipments).
@@ -11,6 +11,9 @@ Responsibilities:
 - Stores the coordinator in hass.data[DOMAIN][entry.entry_id] as a dict keyed
   by "coordinator" so sensor.py and binary_sensor.py can retrieve it.
 - Forwards platform setup to PLATFORMS ("sensor", "binary_sensor").
+  The button platform was removed in Phase 10 (D-04): the Reset Email Cache
+  button is no longer needed because dedup now uses persisted tracking numbers
+  rather than a message-ID cache that required manual clearing.
 """
 
 from __future__ import annotations
@@ -27,6 +30,9 @@ from .const import DOMAIN
 # Phase 7 (D-13): diagnostic sensors are co-registered under the "sensor" platform
 # via sensor.py::async_setup_entry — "diagnostic_sensor" is not a built-in HA
 # platform domain, so it cannot be forwarded via async_forward_entry_setups.
+# Phase 10 (D-04): button platform removed — the Reset Email Cache button is no
+# longer needed; dedup is now tracking-number-based (not message-ID-based) and
+# persisted in HA Store, so users never need to manually clear a cache.
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 
 
@@ -42,13 +48,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Step 2 MUST precede step 3 — RESEARCH.md Pitfall 1: an empty forwarded_ids
     set on first poll re-POSTs every previously forwarded shipment, wasting quota.
     """
-    # Lazy import: coordinator.py depends on gmail_client.py which requires
-    # google/googleapiclient stubs to be in sys.modules. Deferring to function scope
-    # ensures the test harness (conftest.py) has registered the mocks before this
-    # import runs. At production runtime there is no difference.
+    # Lazy import: gmail_coordinator.py and imap_coordinator.py depend on gmail_client.py
+    # which requires google/googleapiclient stubs to be in sys.modules. Deferring to
+    # function scope ensures the test harness (conftest.py) has registered the mocks
+    # before this import runs. At production runtime there is no difference.
+    from .const import CONF_CONNECTION_TYPE, CONNECTION_TYPE_IMAP  # noqa: PLC0415
     from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
+    from .gmail_coordinator import GmailCoordinator  # noqa: PLC0415
+    from .imap_coordinator import ImapCoordinator  # noqa: PLC0415
 
-    coordinator = Shop2ParcelCoordinator(hass, entry)
+    conn_type = entry.data.get(CONF_CONNECTION_TYPE, "gmail")
+    coordinator: Shop2ParcelCoordinator
+    if conn_type == CONNECTION_TYPE_IMAP:
+        coordinator = ImapCoordinator(hass, entry)
+    else:
+        coordinator = GmailCoordinator(hass, entry)
     await coordinator._async_load_store()
     await coordinator.async_config_entry_first_refresh()
 

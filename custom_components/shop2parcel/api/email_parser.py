@@ -324,8 +324,19 @@ class EmailParser:
         carrier_detected = False
         for detect_fn, parse_fn in CARRIER_REGISTRY:
             if detect_fn(html):
+                _LOGGER.debug(
+                    "Carrier template detected (%s) for message %s",
+                    detect_fn.__name__,
+                    message_id,
+                )
                 carrier_result = parse_fn(html, message_id, email_date)
                 if carrier_result.shipment is not None:
+                    _LOGGER.debug(
+                        "Carrier template matched — TN=%s strategy=%s message=%s",
+                        carrier_result.shipment.tracking_number,
+                        carrier_result.strategy_used,
+                        message_id,
+                    )
                     return carrier_result
                 carrier_detected = True
                 break  # detected but extraction failed — fall through to Shopify HTML + Tier 1 only
@@ -340,6 +351,9 @@ class EmailParser:
         # up order numbers, phone numbers, etc.
         # PR4-C2: Tier 2 broad scan is opt-in (default OFF).
         if carrier_detected or not self._enable_broad_scan:
+            _LOGGER.debug(
+                "No match after all templates and regex fallback for message %s", message_id
+            )
             return ParseResult(
                 shipment=None,
                 skip_reason="no_tracking_pattern",

@@ -68,17 +68,23 @@ async def setup_coordinator_with_data(hass, mock_config_entry, data: dict[str, S
     """
     mock_config_entry.add_to_hass(hass)
     with (
-        patch("custom_components.shop2parcel.coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Store") as mock_store_cls,
-        patch("custom_components.shop2parcel.coordinator.config_entry_oauth2_flow") as mock_oauth,
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=[])
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
         coordinator.async_set_updated_data(data)
