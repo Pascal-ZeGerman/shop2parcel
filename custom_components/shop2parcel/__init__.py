@@ -53,10 +53,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # function scope ensures the test harness (conftest.py) has registered the mocks
     # before this import runs. At production runtime there is no difference.
     from .const import CONF_CONNECTION_TYPE, CONNECTION_TYPE_IMAP  # noqa: PLC0415
+    from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
     from .gmail_coordinator import GmailCoordinator  # noqa: PLC0415
     from .imap_coordinator import ImapCoordinator  # noqa: PLC0415
 
     conn_type = entry.data.get(CONF_CONNECTION_TYPE, "gmail")
+    coordinator: Shop2ParcelCoordinator
     if conn_type == CONNECTION_TYPE_IMAP:
         coordinator = ImapCoordinator(hass, entry)
     else:
