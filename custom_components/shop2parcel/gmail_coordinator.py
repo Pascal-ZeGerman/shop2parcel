@@ -316,7 +316,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 await parcel_client.async_add_delivery(
                     tracking_number=shipment.tracking_number,
                     carrier_code=carrier_code,
-                    description=shipment.order_name,
+                    description=shipment.order_name or shipment.tracking_number,
                 )
             except ParcelAppAuthError as err:
                 raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
