@@ -74,7 +74,7 @@ _TRACKING_PATTERNS = [
     re.compile(r"^1Z[A-Z0-9]{16}$"),  # UPS: 1Z999AA10123456784
     re.compile(r"^9[12345][0-9]{15,24}$"),  # USPS domestic: IMpb 91-95 (91=Priority Mail Express)
     re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"),  # USPS international
-    re.compile(r"^[0-9]{12,20}$"),  # FedEx (Phase 8: extended for SmartPost up to 20 digits)
+    re.compile(r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$"),  # FedEx: Express=12, Ground=15, SmartPost=20
     re.compile(r"^[0-9]{10,11}$"),  # DHL (assumed)
 ]
 
@@ -95,7 +95,7 @@ STRATEGY_BROAD_REGEX = "broad_regex"
 _UPS_TRACKING_RE = re.compile(r"\b(1Z[0-9A-Z]{16})\b")
 _USPS_TRACKING_RE = re.compile(r"\b(9[12345][0-9]{15,24})\b")
 _FEDEX_TRACKING_RE = re.compile(
-    r"(?:tracking\s+(?:number|#|no\.?)\s*:?\s*)([0-9]{12,20})\b",
+    r"(?:tracking\s+(?:number|#|no\.?)\s*:?\s*)([0-9]{12}|[0-9]{15}|[0-9]{20})\b",
     re.IGNORECASE,
 )
 
