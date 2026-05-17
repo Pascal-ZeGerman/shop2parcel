@@ -195,16 +195,32 @@ def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
 
     UPS direct emails embed tracking in <td>/<a> — not <p>. Strategy: full
     get_text() + carrier-specific bounded regex + _looks_like_tracking() validator.
+    Href fallback handles emails where TN appears only in link query params.
     order_name='' for direct carrier emails (no Shopify order number present —
     sensor entity, coordinator, and parcelapp 'description' all accept empty
     string per Phase 5 design).
     """
-    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
     m = _UPS_TRACKING_RE.search(text)
     if m and _looks_like_tracking(m.group(1)):
         return ParseResult(
             shipment=ShipmentData(
                 tracking_number=m.group(1),
+                carrier_name="UPS",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_UPS,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    tn = _extract_tracking_from_hrefs(soup)
+    if tn and _looks_like_tracking(tn):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=tn,
                 carrier_name="UPS",
                 order_name="",
                 message_id=message_id,
@@ -229,13 +245,29 @@ def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
     the _USPS_TRACKING_RE pattern is the carrier-specific extractor and
     _TRACKING_PATTERNS USPS entry was widened in Task 1 so _looks_like_tracking
     accepts the full 26-digit form.
+    Href fallback handles emails where TN appears only in link query params.
     """
-    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
     m = _USPS_TRACKING_RE.search(text)
     if m and _looks_like_tracking(m.group(1)):
         return ParseResult(
             shipment=ShipmentData(
                 tracking_number=m.group(1),
+                carrier_name="USPS",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_USPS,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    tn = _extract_tracking_from_hrefs(soup)
+    if tn and _looks_like_tracking(tn):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=tn,
                 carrier_name="USPS",
                 order_name="",
                 message_id=message_id,
@@ -259,13 +291,30 @@ def _parse_fedex(html: str, message_id: str, email_date: int) -> ParseResult:
     FedEx uses 12-20 digit tracking numbers (Express 12, Ground 15, SmartPost 20);
     the _FEDEX_TRACKING_RE and _TRACKING_PATTERNS FedEx entries were widened to
     the full 12-20 range in Task 1.
+    Href fallback handles FedEx Delivery Manager emails where TN appears only
+    in ?trknbr= query params, not as labeled text.
     """
-    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
     m = _FEDEX_TRACKING_RE.search(text)
     if m and _looks_like_tracking(m.group(1)):
         return ParseResult(
             shipment=ShipmentData(
                 tracking_number=m.group(1),
+                carrier_name="FedEx",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_FEDEX,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    tn = _extract_tracking_from_hrefs(soup)
+    if tn and _looks_like_tracking(tn):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=tn,
                 carrier_name="FedEx",
                 order_name="",
                 message_id=message_id,
