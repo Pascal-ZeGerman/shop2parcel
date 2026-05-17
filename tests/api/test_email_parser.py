@@ -575,7 +575,9 @@ def test_extract_tracking_from_hrefs_path_segment() -> None:
 
     from custom_components.shop2parcel.api.email_parser import _extract_tracking_from_hrefs
 
-    html = '<html><body><a href="https://example.com/track/1Z999AA10123456784">Track</a></body></html>'
+    html = (
+        '<html><body><a href="https://example.com/track/1Z999AA10123456784">Track</a></body></html>'
+    )
     soup = BeautifulSoup(html, "lxml")
     result = _extract_tracking_from_hrefs(soup)
     assert result == "1Z999AA10123456784"
@@ -676,11 +678,7 @@ def test_carrier_detected_broad_scan_enabled_no_tier2_fallback() -> None:
 
 def test_tier1_carrier_shipped_by_pattern() -> None:
     """Tier 1 extracts carrier from 'shipped by <Carrier>' pattern (group 2 of carrier regex)."""
-    html = (
-        "<html><body><div>"
-        "Tracking number: 449044304137821 shipped by FedEx"
-        "</div></body></html>"
-    )
+    html = "<html><body><div>Tracking number: 449044304137821 shipped by FedEx</div></body></html>"
     parser = EmailParser()
     result = parser._parse_regex_tier1(html, "tier1_shipped_by", 0)
     assert result.shipment is not None
@@ -690,12 +688,7 @@ def test_tier1_carrier_shipped_by_pattern() -> None:
 def test_tier2_longest_candidate_wins() -> None:
     """Tier 2 returns the longest matching token when multiple tracking numbers are found."""
     # UPS (18 chars) vs USPS (22 chars) — USPS wins
-    html = (
-        "<html><body>"
-        "<p>1Z999AA10123456784</p>"
-        "<p>9261290100830125000029</p>"
-        "</body></html>"
-    )
+    html = "<html><body><p>1Z999AA10123456784</p><p>9261290100830125000029</p></body></html>"
     parser = EmailParser()
     result = parser._parse_regex_tier2(html, "tier2_longest", 0)
     assert result.shipment is not None

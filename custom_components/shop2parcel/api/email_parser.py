@@ -74,7 +74,9 @@ _TRACKING_PATTERNS = [
     re.compile(r"^1Z[A-Z0-9]{16}$"),  # UPS: 1Z999AA10123456784
     re.compile(r"^9[12345][0-9]{15,24}$"),  # USPS domestic: IMpb 91-95 (91=Priority Mail Express)
     re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"),  # USPS international
-    re.compile(r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$"),  # FedEx: Express=12, Ground=15, SmartPost=20
+    re.compile(
+        r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$"
+    ),  # FedEx: Express=12, Ground=15, SmartPost=20
     re.compile(r"^[0-9]{10,11}$"),  # DHL (assumed)
 ]
 

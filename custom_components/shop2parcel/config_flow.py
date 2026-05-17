@@ -68,8 +68,18 @@ GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 # RFC 3501 requires English month abbreviations in IMAP SEARCH date strings.
 # strftime('%b') is locale-dependent and must NOT be used here.
 _IMAP_MONTH_ABBR = (
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
 )
 CONF_NAME = "name"
 
