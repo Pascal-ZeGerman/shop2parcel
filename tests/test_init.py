@@ -16,6 +16,25 @@ from homeassistant.config_entries import ConfigEntryState
 from custom_components.shop2parcel.api.exceptions import GmailAuthError
 from custom_components.shop2parcel.const import DOMAIN
 from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
+from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
+
+
+async def test_setup_entry_imap_wires_imap_coordinator(hass, mock_imap_config_entry):
+    """IMAP connection_type dispatches ImapCoordinator, not GmailCoordinator."""
+    mock_imap_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+        result = await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
+    assert result is True
+    coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
+    assert isinstance(coordinator, ImapCoordinator)
 
 
 async def test_setup_entry_wires_coordinator(hass, mock_config_entry):

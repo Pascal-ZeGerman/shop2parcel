@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime
 from typing import cast
 
+import aiohttp
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -70,7 +71,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         )
         try:
             await oauth_session.async_ensure_token_valid()
-        except Exception as err:  # noqa: BLE001 — translate to HA exception
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise UpdateFailed(f"Network error during Gmail token refresh: {err}") from err
+        except Exception as err:  # noqa: BLE001 — translate unexpected auth errors to HA exception
             raise ConfigEntryAuthFailed("Gmail token refresh failed") from err
         # Read access_token from the session's token property. oauth_session.token is
         # self.config_entry.data["token"] — after async_ensure_token_valid() updates

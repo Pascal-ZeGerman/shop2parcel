@@ -496,10 +496,13 @@ def test_infer_carrier_usps_domestic() -> None:
 
 
 def test_infer_carrier_fedex() -> None:
-    """_infer_carrier returns 'FedEx' for pure-digit 12-20 char tracking numbers."""
+    """_infer_carrier returns 'FedEx' for exact FedEx digit lengths (12, 15, 20)."""
     from custom_components.shop2parcel.api.email_parser import _infer_carrier
 
-    assert _infer_carrier("612909123456789123") == "FedEx"
+    assert _infer_carrier("123456789012") == "FedEx"  # 12-digit Express
+    assert _infer_carrier("123456789012345") == "FedEx"  # 15-digit Ground
+    assert _infer_carrier("12345678901234567890") == "FedEx"  # 20-digit SmartPost
+    assert _infer_carrier("612909123456789123") == "Unknown"  # 18-digit — not a valid FedEx length
 
 
 def test_infer_carrier_unknown() -> None:

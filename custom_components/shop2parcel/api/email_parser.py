@@ -113,7 +113,7 @@ def _infer_carrier(tracking: str) -> str:
         return "USPS"
     if re.match(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$", tracking):
         return "USPS"
-    if re.match(r"^[0-9]{12,20}$", tracking):
+    if re.match(r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$", tracking):
         return "FedEx"
     return "Unknown"
 
@@ -508,7 +508,12 @@ class EmailParser:
 
         if not tracking:
             href_tracking = _extract_tracking_from_hrefs(soup)
-            if href_tracking:
+            if href_tracking and _looks_like_tracking(href_tracking):
+                _LOGGER.debug(
+                    "Tier 1 href fallback matched TN=%s for message %s",
+                    href_tracking,
+                    message_id,
+                )
                 return ParseResult(
                     shipment=ShipmentData(
                         tracking_number=href_tracking,
