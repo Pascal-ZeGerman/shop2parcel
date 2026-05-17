@@ -218,12 +218,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
     async def _async_save_store(self) -> None:
         """Persist current dedup + quota state to Store."""
-        await self._store.async_save(
-            {
-                "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
-                "quota_exhausted_until": self._quota_exhausted_until,
-            }
-        )
+        try:
+            await self._store.async_save(
+                {
+                    "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
+                    "quota_exhausted_until": self._quota_exhausted_until,
+                }
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Failed to persist dedup state — dedup may re-submit on next restart: %s",
+                err,
+                exc_info=True,
+            )
 
     async def async_cleanup_delivered(self, now: datetime) -> None:
         """Remove delivered shipments from coordinator.data and the entity registry.

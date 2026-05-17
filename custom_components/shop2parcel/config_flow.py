@@ -64,6 +64,23 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+
+# RFC 3501 requires English month abbreviations in IMAP SEARCH date strings.
+# strftime('%b') is locale-dependent and must NOT be used here.
+_IMAP_MONTH_ABBR = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
 CONF_NAME = "name"
 
 
@@ -165,9 +182,8 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             # Test IMAP connection in executor (synchronous imaplib call).
             # Use yesterday's date for SINCE filter — connectivity test only, not a real scan.
             _yesterday_ts = int(time.time()) - 86400
-            _since_date = (
-                datetime.fromtimestamp(_yesterday_ts, tz=UTC).strftime("%d-%b-%Y").lstrip("0")
-            )
+            _dt = datetime.fromtimestamp(_yesterday_ts, tz=UTC)
+            _since_date = f"{_dt.day}-{_IMAP_MONTH_ABBR[_dt.month - 1]}-{_dt.year}"
             imap_client = ImapClient(self.hass.async_add_executor_job)
             try:
                 await imap_client.fetch_shipping_emails(
@@ -332,9 +348,8 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             tls_mode = user_input.get(CONF_IMAP_TLS, reauth_entry.data.get(CONF_IMAP_TLS, "ssl"))
 
             _yesterday_ts = int(time.time()) - 86400
-            _since_date = (
-                datetime.fromtimestamp(_yesterday_ts, tz=UTC).strftime("%d-%b-%Y").lstrip("0")
-            )
+            _dt = datetime.fromtimestamp(_yesterday_ts, tz=UTC)
+            _since_date = f"{_dt.day}-{_IMAP_MONTH_ABBR[_dt.month - 1]}-{_dt.year}"
             imap_client = ImapClient(self.hass.async_add_executor_job)
             try:
                 await imap_client.fetch_shipping_emails(

@@ -74,7 +74,9 @@ _TRACKING_PATTERNS = [
     re.compile(r"^1Z[A-Z0-9]{16}$"),  # UPS: 1Z999AA10123456784
     re.compile(r"^9[12345][0-9]{15,24}$"),  # USPS domestic: IMpb 91-95 (91=Priority Mail Express)
     re.compile(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$"),  # USPS international
-    re.compile(r"^[0-9]{12,20}$"),  # FedEx (Phase 8: extended for SmartPost up to 20 digits)
+    re.compile(
+        r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$"
+    ),  # FedEx: Express=12, Ground=15, SmartPost=20
     re.compile(r"^[0-9]{10,11}$"),  # DHL (assumed)
 ]
 
@@ -95,7 +97,7 @@ STRATEGY_BROAD_REGEX = "broad_regex"
 _UPS_TRACKING_RE = re.compile(r"\b(1Z[0-9A-Z]{16})\b")
 _USPS_TRACKING_RE = re.compile(r"\b(9[12345][0-9]{15,24})\b")
 _FEDEX_TRACKING_RE = re.compile(
-    r"(?:tracking\s+(?:number|#|no\.?)\s*:?\s*)([0-9]{12,20})\b",
+    r"(?:tracking\s+(?:number|#|no\.?)\s*:?\s*)([0-9]{12}|[0-9]{15}|[0-9]{20})\b",
     re.IGNORECASE,
 )
 
@@ -113,7 +115,7 @@ def _infer_carrier(tracking: str) -> str:
         return "USPS"
     if re.match(r"^[A-Z]{2}[0-9]{9}[A-Z]{2}$", tracking):
         return "USPS"
-    if re.match(r"^[0-9]{12,20}$", tracking):
+    if re.match(r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$", tracking):
         return "FedEx"
     return "Unknown"
 
@@ -195,16 +197,32 @@ def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
 
     UPS direct emails embed tracking in <td>/<a> — not <p>. Strategy: full
     get_text() + carrier-specific bounded regex + _looks_like_tracking() validator.
+    Href fallback handles emails where TN appears only in link query params.
     order_name='' for direct carrier emails (no Shopify order number present —
     sensor entity, coordinator, and parcelapp 'description' all accept empty
     string per Phase 5 design).
     """
-    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
     m = _UPS_TRACKING_RE.search(text)
     if m and _looks_like_tracking(m.group(1)):
         return ParseResult(
             shipment=ShipmentData(
                 tracking_number=m.group(1),
+                carrier_name="UPS",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_UPS,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    tn = _extract_tracking_from_hrefs(soup)
+    if tn and _looks_like_tracking(tn):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=tn,
                 carrier_name="UPS",
                 order_name="",
                 message_id=message_id,
@@ -229,13 +247,29 @@ def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
     the _USPS_TRACKING_RE pattern is the carrier-specific extractor and
     _TRACKING_PATTERNS USPS entry was widened in Task 1 so _looks_like_tracking
     accepts the full 26-digit form.
+    Href fallback handles emails where TN appears only in link query params.
     """
-    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
     m = _USPS_TRACKING_RE.search(text)
     if m and _looks_like_tracking(m.group(1)):
         return ParseResult(
             shipment=ShipmentData(
                 tracking_number=m.group(1),
+                carrier_name="USPS",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_USPS,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    tn = _extract_tracking_from_hrefs(soup)
+    if tn and _looks_like_tracking(tn):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=tn,
                 carrier_name="USPS",
                 order_name="",
                 message_id=message_id,
@@ -259,13 +293,30 @@ def _parse_fedex(html: str, message_id: str, email_date: int) -> ParseResult:
     FedEx uses 12-20 digit tracking numbers (Express 12, Ground 15, SmartPost 20);
     the _FEDEX_TRACKING_RE and _TRACKING_PATTERNS FedEx entries were widened to
     the full 12-20 range in Task 1.
+    Href fallback handles FedEx Delivery Manager emails where TN appears only
+    in ?trknbr= query params, not as labeled text.
     """
-    text = BeautifulSoup(html, "lxml").get_text(separator=" ")
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
     m = _FEDEX_TRACKING_RE.search(text)
     if m and _looks_like_tracking(m.group(1)):
         return ParseResult(
             shipment=ShipmentData(
                 tracking_number=m.group(1),
+                carrier_name="FedEx",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_FEDEX,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    tn = _extract_tracking_from_hrefs(soup)
+    if tn and _looks_like_tracking(tn):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=tn,
                 carrier_name="FedEx",
                 order_name="",
                 message_id=message_id,
@@ -459,7 +510,12 @@ class EmailParser:
 
         if not tracking:
             href_tracking = _extract_tracking_from_hrefs(soup)
-            if href_tracking:
+            if href_tracking and _looks_like_tracking(href_tracking):
+                _LOGGER.debug(
+                    "Tier 1 href fallback matched TN=%s for message %s",
+                    href_tracking,
+                    message_id,
+                )
                 return ParseResult(
                     shipment=ShipmentData(
                         tracking_number=href_tracking,
