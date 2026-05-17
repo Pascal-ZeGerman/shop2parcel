@@ -2342,3 +2342,94 @@ def test_lru_eviction_does_not_trigger_below_cap():
     assert f"TRACKING-{MAX_SUBMITTED_TRACKING_NUMBERS - 1}" in submitted, (
         "Newest entry must be present when no eviction occurs"
     )
+
+
+# ---------------------------------------------------------------------------
+# Description fallback: order_name="" → description uses tracking_number
+# ---------------------------------------------------------------------------
+
+
+def _make_carrier_shipment(message_id: str = "carrier_msg1") -> ShipmentData:
+    """Shipment from a direct carrier email — order_name is empty."""
+    return ShipmentData(
+        tracking_number="1Z999AA10123456784",
+        carrier_name="UPS",
+        order_name="",
+        message_id=message_id,
+        email_date=1700000000,
+    )
+
+
+async def test_gmail_coordinator_uses_tracking_number_as_description_when_order_name_empty(
+    hass, mock_config_entry
+):
+    """FWRD-DESC-01: when order_name is '' (direct carrier email), description falls back to tracking_number."""
+    mock_config_entry.add_to_hass(hass)
+    shipment = _make_carrier_shipment("carrier_msg1")
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "carrier_msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+        call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
+        assert call_kwargs["description"] == "1Z999AA10123456784", (
+            "When order_name is empty, description must fall back to the tracking number"
+        )
+
+
+async def test_imap_coordinator_uses_tracking_number_as_description_when_order_name_empty(
+    hass, mock_imap_config_entry
+):
+    """FWRD-DESC-02: IMAP path — when order_name is '' (direct carrier email), description falls back to tracking_number."""
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msg = _make_imap_raw_message(200)
+    shipment = _make_carrier_shipment("200")
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+        call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
+        assert call_kwargs["description"] == "1Z999AA10123456784", (
+            "When order_name is empty, description must fall back to the tracking number"
+        )

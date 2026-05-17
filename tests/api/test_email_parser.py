@@ -516,3 +516,221 @@ def test_tier2_strategy_used_is_broad_regex() -> None:
     result = parser._parse_regex_tier2(html, "msg_strat", 0)
     assert result.shipment is not None
     assert result.strategy_used == STRATEGY_BROAD_REGEX
+
+
+# ---------------------------------------------------------------------------
+# Edge cases added for fix/manifest-rc5 branch
+# ---------------------------------------------------------------------------
+
+
+def test_looks_like_tracking_fedex_exact_lengths() -> None:
+    """FedEx pattern accepts only 12, 15, and 20 digits — no other digit-only lengths."""
+    from custom_components.shop2parcel.api.email_parser import _looks_like_tracking
+
+    assert _looks_like_tracking("123456789012") is True  # 12-digit FedEx Express
+    assert _looks_like_tracking("123456789012345") is True  # 15-digit FedEx Ground
+    assert _looks_like_tracking("12345678901234567890") is True  # 20-digit SmartPost
+    assert _looks_like_tracking("1234567890123") is False  # 13 digits — not a FedEx format
+    assert _looks_like_tracking("12345678901234") is False  # 14 digits
+    assert _looks_like_tracking("1234567890123456789") is False  # 19 digits
+
+
+def test_looks_like_tracking_usps_international() -> None:
+    """USPS international format (2 letters + 9 digits + 2 letters) is accepted."""
+    from custom_components.shop2parcel.api.email_parser import _looks_like_tracking
+
+    assert _looks_like_tracking("EA123456789US") is True
+    assert _looks_like_tracking("LZ123456789CN") is True
+
+
+def test_looks_like_tracking_dhl_boundaries() -> None:
+    """DHL pattern accepts 10 and 11 digits; 9 digits is too short."""
+    from custom_components.shop2parcel.api.email_parser import _looks_like_tracking
+
+    assert _looks_like_tracking("1234567890") is True  # 10-digit DHL
+    assert _looks_like_tracking("12345678901") is True  # 11-digit DHL
+    assert _looks_like_tracking("123456789") is False  # 9-digit — below DHL minimum
+
+
+def test_looks_like_tracking_lowercase_ups_fails() -> None:
+    """Lowercase UPS tracking number is rejected — all patterns require uppercase."""
+    from custom_components.shop2parcel.api.email_parser import _looks_like_tracking
+
+    assert _looks_like_tracking("1z999aa10123456784") is False
+
+
+def test_infer_carrier_usps_international() -> None:
+    """_infer_carrier returns 'USPS' for 2-letter + 9-digit + 2-letter international format."""
+    from custom_components.shop2parcel.api.email_parser import _infer_carrier
+
+    assert _infer_carrier("EA123456789US") == "USPS"
+
+
+def test_extract_tracking_from_hrefs_path_segment() -> None:
+    """_extract_tracking_from_hrefs extracts tracking from URL path segments."""
+    from bs4 import BeautifulSoup
+
+    from custom_components.shop2parcel.api.email_parser import _extract_tracking_from_hrefs
+
+    html = '<html><body><a href="https://example.com/track/1Z999AA10123456784">Track</a></body></html>'
+    soup = BeautifulSoup(html, "lxml")
+    result = _extract_tracking_from_hrefs(soup)
+    assert result == "1Z999AA10123456784"
+
+
+def test_ups_href_only_path() -> None:
+    """UPS href fallback: tracking number present only in <a href>, not in text content."""
+    html = (
+        "<html><body>"
+        "<table>"
+        "<tr><td>Your UPS package is arriving today. ups.com</td></tr>"
+        '<tr><td><a href="https://www.ups.com/track?tracknum=1Z0Y12345678031234">Track</a></td></tr>'
+        "</table>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "ups_href_msg", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z0Y12345678031234"
+    assert result.shipment.carrier_name == "UPS"
+    assert result.strategy_used == STRATEGY_UPS
+
+
+def test_usps_href_only_path() -> None:
+    """USPS href fallback: tracking number present only in <a href>, not in text content."""
+    html = (
+        "<html><body>"
+        "<table>"
+        "<tr><td>Your USPS package is out for delivery. usps.com</td></tr>"
+        '<tr><td><a href="https://tools.usps.com/go/TrackConfirmAction?tLabels=9261290100830125000029">Track</a></td></tr>'
+        "</table>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "usps_href_msg", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "9261290100830125000029"
+    assert result.shipment.carrier_name == "USPS"
+    assert result.strategy_used == STRATEGY_USPS
+
+
+def test_fedex_href_only_path() -> None:
+    """FedEx Delivery Manager href fallback: TN only in ?trknbr= query param, no labeled text."""
+    html = (
+        "<html><body>"
+        "<table>"
+        "<tr><td>fedex.com</td></tr>"
+        "<tr><td>Your package is scheduled for delivery today.</td></tr>"
+        '<tr><td><a href="https://www.fedex.com/apps/fedextrack/?trknbr=449044304137821">Track</a></td></tr>'
+        "</table>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "fedex_href_msg", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "449044304137821"
+    assert result.shipment.carrier_name == "FedEx"
+    assert result.strategy_used == STRATEGY_FEDEX
+
+
+def test_carrier_detected_extraction_fails_falls_through_to_html() -> None:
+    """When carrier is detected but parse_fn finds no TN, HTML template strategy is tried next."""
+    # ups.com fingerprint triggers UPS detection; no 1Z TN in text or hrefs.
+    # A USPS tracking number in <p> should be found by the HTML template fallthrough.
+    html = (
+        "<html><body>"
+        '<img src="https://www.ups.com/logo.png">'
+        "<p>Order #9876</p>"
+        "<p>92123456508577307776690000</p>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "carrier_fallthrough_msg", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "92123456508577307776690000"
+    assert result.shipment.order_name == "#9876"
+    assert result.strategy_used == STRATEGY_HTML
+
+
+def test_carrier_detected_broad_scan_enabled_no_tier2_fallback() -> None:
+    """PR4-I2: when carrier is detected (even if extraction fails), Tier 2 must NOT run.
+
+    This holds even when enable_broad_scan=True — detected carrier emails would
+    generate false positives from order/phone numbers if broad scan ran.
+    """
+    html = (
+        "<html><body>"
+        '<img src="https://www.ups.com/logo.png">'
+        "<p>Your package is on its way.</p>"
+        "</body></html>"
+    )
+    parser = EmailParser(enable_broad_scan=True)
+    result = parser.parse(html, "pr4_i2_msg", 0)
+    assert result.shipment is None
+    assert result.skip_reason == "no_tracking_pattern"
+    assert result.strategy_used is None
+
+
+def test_tier1_carrier_shipped_by_pattern() -> None:
+    """Tier 1 extracts carrier from 'shipped by <Carrier>' pattern (group 2 of carrier regex)."""
+    html = (
+        "<html><body><div>"
+        "Tracking number: 449044304137821 shipped by FedEx"
+        "</div></body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_regex_tier1(html, "tier1_shipped_by", 0)
+    assert result.shipment is not None
+    assert result.shipment.carrier_name == "FedEx"
+
+
+def test_tier2_longest_candidate_wins() -> None:
+    """Tier 2 returns the longest matching token when multiple tracking numbers are found."""
+    # UPS (18 chars) vs USPS (22 chars) — USPS wins
+    html = (
+        "<html><body>"
+        "<p>1Z999AA10123456784</p>"
+        "<p>9261290100830125000029</p>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_regex_tier2(html, "tier2_longest", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "9261290100830125000029"
+
+
+def test_tier2_dedup_candidate_tokens_from_text_and_href() -> None:
+    """Tier 2 deduplicates candidate_tokens — same token in both text and href appears once."""
+    html = (
+        "<html><body>"
+        "<p>1Z999AA10123456784</p>"
+        '<a href="https://example.com/track?num=1Z999AA10123456784">Track</a>'
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_regex_tier2(html, "tier2_dedup", 0)
+    assert result.shipment is not None
+    assert result.candidate_tokens.count("1Z999AA10123456784") == 1
+
+
+def test_html_template_order_found_but_no_tracking_returns_no_template_match() -> None:
+    """HTML template returns no_template_match when order is present but no valid tracking number."""
+    html = "<html><body><p>Your order #1234 has been placed.</p></body></html>"
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "order_only_msg", 0)
+    assert result.shipment is None
+    assert result.skip_reason == "no_template_match"
+
+
+def test_fedex_regex_rejects_non_exact_digit_lengths() -> None:
+    """FedEx carrier parser rejects labeled tracking tokens that are not 12, 15, or 20 digits."""
+    # 13-digit token — fails _FEDEX_TRACKING_RE (which requires 12|15|20) AND _looks_like_tracking.
+    html = (
+        "<html><body>"
+        '<img src="https://www.fedex.com/logo.png">'
+        "<p>Tracking number: 1234567890123</p>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "fedex_13digit", 0)
+    assert result.shipment is None
