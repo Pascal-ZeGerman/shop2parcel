@@ -8,7 +8,15 @@ Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) 
 
 Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
 
-## Current State: v1.1 Shipped
+## Current Milestone: v1.2 Debug Switch
+
+**Goal:** Add a configurable debug/dry-run mode and fix the dedup store persistence bug causing repeated 400 errors on HA restart.
+
+**Target features:**
+- Dry-run / debug mode — disables Parcel App routing, dedup, and overrides scan window to 365d; emits verbose per-email diagnostic output (from SEED-001)
+- Fix dedup store persistence — 3 stuck message IDs loop with "already added" 400s on every HA restart (root cause identified in v1.1 debug session)
+
+## Previous State: v1.1 Shipped
 
 **Shipped:** 2026-05-17 — v1.1 Debug-Ready complete.
 
@@ -19,8 +27,6 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - **Codebase:** ~3,600 LOC integration + ~6,000 LOC tests, 265 tests passing, manifest v1.1.1
 - **Connection methods:** Gmail OAuth2 and IMAP (app-password / SSL / STARTTLS)
 - **Carriers supported:** Shopify standard, UPS, USPS, FedEx
-
-**Next:** `/gsd:new-milestone` to plan v1.2.
 
 ## Previous Milestones
 
@@ -124,4 +130,4 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 5. Update Context with current state
 
 ---
-*Last updated: 2026-05-17 after v1.1 Debug-Ready milestone*
+*Last updated: 2026-05-18 — v1.2 Debug Switch milestone started*

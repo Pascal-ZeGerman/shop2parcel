@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: Debug-Ready
-status: archived
-stopped_at: v1.1 milestone archived 2026-05-17
-last_updated: "2026-05-17T00:00:00.000Z"
-last_activity: 2026-05-17 -- v1.1 milestone archived — planning next milestone
+milestone: v1.2
+milestone_name: Debug Switch
+status: planning
+last_updated: "2026-05-18T19:28:16.183Z"
+last_activity: 2026-05-18
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -25,12 +24,10 @@ See: .planning/PROJECT.md (updated 2026-05-17)
 
 ## Current Position
 
-Phase: 12
-Plan: 3/3 complete
-Status: Milestone complete
-Last activity: 2026-05-14
-
-Progress: [░░░░░░░░░░] 0%
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-05-18 — Milestone v1.2 started
 
 ## Performance Metrics
 
