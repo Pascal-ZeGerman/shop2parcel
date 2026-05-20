@@ -16,6 +16,7 @@ import aiohttp
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.components import persistent_notification
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api.carrier_codes import normalize_carrier
@@ -33,12 +34,14 @@ from .api.gmail_client import GmailClient, extract_html_body, extract_text_body
 from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_API_KEY,
+    CONF_DEBUG_MODE,
     CONF_ENABLE_BROAD_SCAN,
     CONF_GMAIL_QUERY,
     CONF_RESCAN_WINDOW_DAYS,
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_RESCAN_WINDOW_DAYS,
+    MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
     normalize_tracking_number,
 )
@@ -57,6 +60,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
     def __init__(self, hass, entry):
         super().__init__(hass, entry)
         self._email_client = GmailClient(hass.async_add_executor_job)
+        if not entry.options.get(CONF_DEBUG_MODE, False):
+            persistent_notification.async_dismiss(
+                hass, notification_id="shop2parcel_debug_mode"
+            )
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
