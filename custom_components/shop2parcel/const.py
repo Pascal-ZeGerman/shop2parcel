@@ -60,6 +60,9 @@ DEFAULT_ENABLE_BROAD_SCAN = False
 # Phase 10 (D-09): LRU cap for submitted_tracking_numbers OrderedDict.
 MAX_SUBMITTED_TRACKING_NUMBERS = 1000
 
+# Phase 14 (DBG-01): debug/dry-run mode toggle; stored in entry.options.
+CONF_DEBUG_MODE = "debug_mode"
+
 
 def normalize_tracking_number(tracking_number: str) -> str:
     """Normalize a tracking number for dedup comparison.

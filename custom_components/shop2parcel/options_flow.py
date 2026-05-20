@@ -18,6 +18,7 @@ from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 
 from .const import (
     CONF_CONNECTION_TYPE,
+    CONF_DEBUG_MODE,
     CONF_GMAIL_QUERY,
     CONF_IMAP_SEARCH,
     CONF_POLL_INTERVAL,
@@ -59,6 +60,10 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                             CONF_IMAP_SEARCH, DEFAULT_IMAP_SEARCH
                         ),
                     ): vol.All(str, vol.Length(min=1, max=500)),
+                    vol.Optional(
+                        CONF_DEBUG_MODE,
+                        default=self.config_entry.options.get(CONF_DEBUG_MODE, False),
+                    ): bool,
                 }
             )
         else:
@@ -92,6 +97,10 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                     ): vol.All(
                         int, vol.Range(min=MIN_RESCAN_WINDOW_DAYS, max=MAX_RESCAN_WINDOW_DAYS)
                     ),
+                    vol.Optional(
+                        CONF_DEBUG_MODE,
+                        default=self.config_entry.options.get(CONF_DEBUG_MODE, False),
+                    ): bool,
                 }
             )
 
