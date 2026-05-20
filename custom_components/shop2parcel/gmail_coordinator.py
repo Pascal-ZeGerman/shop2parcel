@@ -23,6 +23,7 @@ from .api.email_parser import EmailParser, ParseResult, ShipmentData
 from .api.exceptions import (
     GmailAuthError,
     GmailTransientError,
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -334,6 +335,26 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     self._quota_exhausted_until,
                 )
                 quota_blocked = True
+                continue
+            except ParcelAppAlreadyAddedError:
+                normalized_for_suppress = normalize_tracking_number(shipment.tracking_number)
+                self._submitted_tracking_numbers[normalized_for_suppress] = None
+                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                    self._submitted_tracking_numbers.popitem(last=False)
+                await self._async_save_store()
+                d.scan_events.append(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                        "message_id": f"gmail:{msg_id}",
+                        "subject": email_meta.get("subject", ""),
+                        "sender": email_meta.get("from", ""),
+                        "strategy": result.strategy_used,
+                        "tracking_number": shipment.tracking_number,
+                        "outcome": "already_added",
+                    }
+                )
+                d.scan_events_total += 1
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "already_added")
                 continue
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(

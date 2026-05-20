@@ -21,6 +21,7 @@ from .api.email_parser import EmailParser, ParseResult, ShipmentData
 from .api.exceptions import (
     ImapAuthError,
     ImapTransientError,
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -316,6 +317,26 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     self._quota_exhausted_until,
                 )
                 quota_blocked = True
+                continue
+            except ParcelAppAlreadyAddedError:
+                normalized_for_suppress = normalize_tracking_number(shipment.tracking_number)
+                self._submitted_tracking_numbers[normalized_for_suppress] = None
+                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                    self._submitted_tracking_numbers.popitem(last=False)
+                await self._async_save_store()
+                d.scan_events.append(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                        "message_id": f"imap:{uid_str}",
+                        "subject": imap_meta.get("subject", ""),
+                        "sender": imap_meta.get("from", ""),
+                        "strategy": result.strategy_used,
+                        "tracking_number": shipment.tracking_number,
+                        "outcome": "already_added",
+                    }
+                )
+                d.scan_events_total += 1
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "already_added")
                 continue
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(

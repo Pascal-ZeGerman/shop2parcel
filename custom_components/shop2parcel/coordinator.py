@@ -215,6 +215,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         stored_list = stored.get("submitted_tracking_numbers", [])
         self._submitted_tracking_numbers = OrderedDict((tn, None) for tn in stored_list)
         self._quota_exhausted_until = stored.get("quota_exhausted_until")
+        _LOGGER.debug(
+            "Loaded %d submitted tracking numbers from store",
+            len(self._submitted_tracking_numbers),
+        )
 
     async def _async_save_store(self) -> None:
         """Persist current dedup + quota state to Store."""
@@ -224,6 +228,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
                     "quota_exhausted_until": self._quota_exhausted_until,
                 }
+            )
+            _LOGGER.debug(
+                "Saved %d submitted tracking numbers to store",
+                len(self._submitted_tracking_numbers),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(

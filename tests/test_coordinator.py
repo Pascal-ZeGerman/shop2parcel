@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time as time_module
 from collections import OrderedDict, deque
 from datetime import date, datetime, time, timedelta, timezone
@@ -17,6 +18,7 @@ from custom_components.shop2parcel.api.exceptions import (
     GmailTransientError,
     ImapAuthError,
     ImapTransientError,
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -2433,3 +2435,210 @@ async def test_imap_coordinator_uses_tracking_number_as_description_when_order_n
         assert call_kwargs["description"] == "1Z999AA10123456784", (
             "When order_name is empty, description must fall back to the tracking number"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 13: Dedup store persistence fix (DEDUP-01, DEDUP-02, DEDUP-03)
+# ---------------------------------------------------------------------------
+
+
+async def test_load_store_debug_log(hass, mock_config_entry, caplog):
+    """DEDUP-03: _async_load_store emits a DEBUG log with the count of loaded TNs."""
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": ["TN1", "TN2", "TN3"],
+                "quota_exhausted_until": None,
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
+            await coord._async_load_store()
+    debug_messages = " ".join(
+        r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
+    )
+    assert "Loaded 3 submitted tracking numbers from store" in debug_messages
+
+
+async def test_save_store_debug_log(hass, mock_config_entry, caplog):
+    """DEDUP-03: _async_save_store emits a DEBUG log with the count of saved TNs."""
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        coord._submitted_tracking_numbers = OrderedDict([("TN_A", None), ("TN_B", None)])
+        with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
+            await coord._async_save_store()
+    debug_messages = " ".join(
+        r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
+    )
+    assert "Saved 2 submitted tracking numbers to store" in debug_messages
+
+
+async def test_already_added_gmail_writes_dedup(hass, mock_config_entry):
+    """DEDUP-01: Gmail coordinator writes TN to dedup store on ParcelAppAlreadyAddedError."""
+    mock_config_entry.add_to_hass(hass)
+    shipment = _make_shipment("msg1")
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html/>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError(
+                "You have already added this delivery to the app"
+            )
+        )
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        data = await coord._async_update_data()
+
+    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+    assert "msg1" not in data
+    mock_store_cls.return_value.async_save.assert_called()
+
+
+async def test_already_added_gmail_emits_scan_event(hass, mock_config_entry):
+    """DEDUP-02: Gmail coordinator emits scan event with outcome='already_added'."""
+    mock_config_entry.add_to_hass(hass)
+    shipment = _make_shipment("msg1")
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html/>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError(
+                "You have already added this delivery to the app"
+            )
+        )
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    already_added_events = [
+        e for e in coord._diagnostics.scan_events if e.get("outcome") == "already_added"
+    ]
+    assert len(already_added_events) == 1
+    event = already_added_events[0]
+    assert event["message_id"] == "gmail:msg1"
+    assert event["tracking_number"] == shipment.tracking_number
+    assert event["outcome"] == "already_added"
+    assert coord._diagnostics.scan_events_total >= 1
+
+
+async def test_already_added_imap_writes_dedup(hass, mock_imap_config_entry):
+    """DEDUP-01: IMAP coordinator writes TN to dedup store on ParcelAppAlreadyAddedError."""
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msg = _make_imap_raw_message(100)
+    shipment = _make_shipment("100")
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError(
+                "You have already added this delivery to the app"
+            )
+        )
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        data = await coord._async_update_data()
+
+    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+    assert "100" not in data
+    mock_store_cls.return_value.async_save.assert_called()
+
+
+async def test_imap_invalid_tracking_suppresses_retry(hass, mock_imap_config_entry):
+    """IMAP mirror of test_invalid_tracking_not_deduped: ParcelAppInvalidTrackingError writes TN to dedup store."""
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msg = _make_imap_raw_message(100)
+    shipment = _make_shipment("100")
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppInvalidTrackingError("bad carrier")
+        )
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
