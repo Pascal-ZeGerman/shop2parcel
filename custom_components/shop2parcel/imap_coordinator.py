@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime
 from typing import cast
 
+from homeassistant.components import persistent_notification
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -31,6 +32,7 @@ from .api.imap_client import ImapClient, extract_html_body_imap, extract_text_bo
 from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_API_KEY,
+    CONF_DEBUG_MODE,
     CONF_ENABLE_BROAD_SCAN,
     CONF_IMAP_HOST,
     CONF_IMAP_PASSWORD,
@@ -42,6 +44,7 @@ from .const import (
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_RESCAN_WINDOW_DAYS,
+    MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
     normalize_tracking_number,
 )
@@ -77,6 +80,10 @@ class ImapCoordinator(Shop2ParcelCoordinator):
     def __init__(self, hass, entry):
         super().__init__(hass, entry)
         self._email_client = ImapClient(hass.async_add_executor_job)
+        if not entry.options.get(CONF_DEBUG_MODE, False):
+            persistent_notification.async_dismiss(
+                hass, notification_id="shop2parcel_debug_mode"
+            )
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """IMAP poll path — uses SINCE-date fetch + tracking-number dedup.
