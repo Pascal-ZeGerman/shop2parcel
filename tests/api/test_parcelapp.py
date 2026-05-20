@@ -11,6 +11,7 @@ import pytest
 from aioresponses import aioresponses
 
 from custom_components.shop2parcel.api.exceptions import (
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -128,6 +129,36 @@ async def test_add_delivery_invalid_tracking_on_400(client):
         with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
             await client.async_add_delivery("BADTRACK", "ups", "Order #1234")
         assert "Invalid tracking" in str(exc_info.value)
+
+
+async def test_add_delivery_already_added_on_400(client):
+    """POST returns 400 with 'already added' message → ParcelAppAlreadyAddedError raised."""
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=400,
+            payload={"success": False, "error_message": "You have already added this delivery to the app"},
+        )
+        with pytest.raises(ParcelAppAlreadyAddedError) as exc_info:
+            await client.async_add_delivery("871503132933", "fedex", "Order #STUCK")
+        assert "You have already added this delivery to the app" in str(exc_info.value)
+
+
+async def test_add_delivery_other_400_raises_invalid_tracking(client):
+    """POST returns 400 with non-already-added message → ParcelAppInvalidTrackingError raised.
+
+    Regression guard: ensures the new ParcelAppAlreadyAddedError branch does not shadow
+    other 400 error messages, which must continue to raise ParcelAppInvalidTrackingError.
+    """
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=400,
+            payload={"success": False, "error_message": "Carrier code not recognized"},
+        )
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("BADTRACK", "pholder", "Order #1234")
+        assert "Carrier code not recognized" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

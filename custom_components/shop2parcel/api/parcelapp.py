@@ -19,6 +19,7 @@ import logging
 import aiohttp
 
 from .exceptions import (
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -99,6 +100,8 @@ class ParcelAppClient:
                         msg = "Bad request (non-JSON body)"
                     except aiohttp.ContentTypeError:
                         msg = "Bad request (non-JSON body)"
+                    if msg == "You have already added this delivery to the app":
+                        raise ParcelAppAlreadyAddedError(msg)
                     raise ParcelAppInvalidTrackingError(msg)
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
