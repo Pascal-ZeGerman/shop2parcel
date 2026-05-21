@@ -426,16 +426,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     }
                 )
                 d.scan_events_total += 1
-                if debug_mode:
-                    _LOGGER.info(
-                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
-                        email_meta.get("subject", ""),
-                        email_meta.get("from", ""),
-                        result.candidate_tokens if hasattr(result, "candidate_tokens") else None,
-                        "already_added",
-                    )
-                else:
-                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "already_added")
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "already_added")
                 continue
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(

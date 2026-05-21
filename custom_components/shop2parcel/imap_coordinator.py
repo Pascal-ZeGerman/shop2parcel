@@ -406,16 +406,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     }
                 )
                 d.scan_events_total += 1
-                if debug_mode:
-                    _LOGGER.info(
-                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
-                        imap_meta.get("subject", ""),
-                        imap_meta.get("from", ""),
-                        result.candidate_tokens if hasattr(result, "candidate_tokens") else None,
-                        "already_added",
-                    )
-                else:
-                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "already_added")
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "already_added")
                 continue
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(
