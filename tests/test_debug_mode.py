@@ -24,7 +24,6 @@ from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
 from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
 from custom_components.shop2parcel.options_flow import OptionsFlowHandler
 
-
 # ---------------------------------------------------------------------------
 # Helpers — copied verbatim from test_coordinator.py to keep test_debug_mode.py
 # self-contained.

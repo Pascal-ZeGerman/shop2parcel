@@ -12,10 +12,10 @@ import time
 from typing import cast
 
 import aiohttp
+from homeassistant.components import persistent_notification
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.components import persistent_notification
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api.carrier_codes import normalize_carrier

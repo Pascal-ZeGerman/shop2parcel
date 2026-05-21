@@ -98,6 +98,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if the entry is re-added with debug_mode=True.
     """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
+
     from .const import debug_mode_notification_id  # noqa: PLC0415
 
     persistent_notification.async_dismiss(
