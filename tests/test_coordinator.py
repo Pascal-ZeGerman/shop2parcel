@@ -2642,3 +2642,42 @@ async def test_imap_invalid_tracking_suppresses_retry(hass, mock_imap_config_ent
         await coord._async_update_data()
 
     assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+
+
+async def test_already_added_imap_emits_scan_event(hass, mock_imap_config_entry):
+    """DEDUP-02 IMAP: IMAP coordinator emits scan event with outcome='already_added'."""
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msg = _make_imap_raw_message(100)
+    shipment = _make_shipment("100")
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError(
+                "You have already added this delivery to the app"
+            )
+        )
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    already_added_events = [
+        e for e in coord._diagnostics.scan_events if e.get("outcome") == "already_added"
+    ]
+    assert len(already_added_events) == 1
+    event = already_added_events[0]
+    assert event["message_id"] == "imap:100"
+    assert event["tracking_number"] == shipment.tracking_number
+    assert event["outcome"] == "already_added"
+    assert coord._diagnostics.scan_events_total >= 1
