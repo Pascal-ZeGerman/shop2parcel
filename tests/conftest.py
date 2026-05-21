@@ -56,6 +56,35 @@ from custom_components.shop2parcel.const import DOMAIN
 # NOTE: `hass` fixture is provided automatically by pytest-homeassistant-custom-component
 
 
+async def setup_imap_coordinator_with_data(
+    hass, mock_imap_config_entry, data: dict[str, ShipmentData]
+):
+    """Shared helper: set up the IMAP coordinator with pre-seeded data.
+
+    W12/P12-WR-02: mirrors the Gmail setup_coordinator_with_data pattern for IMAP tests.
+    Patches ImapClient, ParcelAppClient, EmailParser, and Shop2ParcelStore so no real
+    I/O occurs.  After async_setup the coordinator.data is replaced with the supplied
+    ``data`` dict and hass.async_block_till_done() drains listener callbacks.
+
+    Returns the configured ImapCoordinator instance.
+    """
+    mock_imap_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+        await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
+        coordinator.async_set_updated_data(data)
+        await hass.async_block_till_done()
+        return coordinator
+
+
 async def setup_coordinator_with_data(hass, mock_config_entry, data: dict[str, ShipmentData]):
     """Shared helper: set up the coordinator with pre-seeded data and forward to platforms.
 
@@ -83,7 +112,7 @@ async def setup_coordinator_with_data(hass, mock_config_entry, data: dict[str, S
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]

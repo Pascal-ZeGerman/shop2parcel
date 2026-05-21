@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime
 from typing import cast
 
+from homeassistant.components import persistent_notification
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -21,6 +22,7 @@ from .api.email_parser import EmailParser, ParseResult, ShipmentData
 from .api.exceptions import (
     ImapAuthError,
     ImapTransientError,
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -30,6 +32,7 @@ from .api.imap_client import ImapClient, extract_html_body_imap, extract_text_bo
 from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_API_KEY,
+    CONF_DEBUG_MODE,
     CONF_ENABLE_BROAD_SCAN,
     CONF_IMAP_HOST,
     CONF_IMAP_PASSWORD,
@@ -41,13 +44,16 @@ from .const import (
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_RESCAN_WINDOW_DAYS,
+    MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    debug_mode_notification_id,
     normalize_tracking_number,
 )
 from .coordinator import (
     Shop2ParcelCoordinator,
     _extract_imap_email_meta,
     _next_midnight_utc,
+    _sanitise_parser_error,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,6 +82,10 @@ class ImapCoordinator(Shop2ParcelCoordinator):
     def __init__(self, hass, entry):
         super().__init__(hass, entry)
         self._email_client = ImapClient(hass.async_add_executor_job)
+        if not entry.options.get(CONF_DEBUG_MODE, False):
+            persistent_notification.async_dismiss(
+                hass, notification_id=debug_mode_notification_id(entry.entry_id)
+            )
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """IMAP poll path — uses SINCE-date fetch + tracking-number dedup.
@@ -107,6 +117,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
 
         # D-11: compute since_date from rescan_window_days (IMAP SEARCH date format).
         rescan_window_days = entry.options.get(CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS)
+        debug_mode = entry.options.get(CONF_DEBUG_MODE, False)
+        if debug_mode:
+            rescan_window_days = MAX_RESCAN_WINDOW_DAYS
         since_ts = int(time.time()) - rescan_window_days * 86400
         _since_dt = datetime.fromtimestamp(since_ts, tz=UTC)
         since_date = f"{_since_dt.day:02d}-{_IMAP_MONTH_ABBR[_since_dt.month - 1]}-{_since_dt.year}"
@@ -169,19 +182,21 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 d.last_poll_skip_reasons.append(
                     {"message_id": uid_str, "reason": "no_html_body", **imap_meta}
                 )
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"imap:{uid_str}",
-                        "subject": imap_meta.get("subject", ""),
-                        "sender": imap_meta.get("from", ""),
-                        "strategy": None,
-                        "tracking_number": None,
-                        "outcome": "no_html_body",
-                    }
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="no_html_body",
                 )
-                d.scan_events_total += 1
-                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_html_body")
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        imap_meta.get("subject", ""),
+                        imap_meta.get("from", ""),
+                        None,
+                        "no_html_body",
+                    )
+                else:
+                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_html_body")
                 continue
 
             # Assign a synthetic email_date (0 = unknown — IMAP does not guarantee internalDate).
@@ -198,21 +213,26 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 d.last_poll_skip_reasons.append(
                     {"message_id": uid_str, "reason": "parse_exception", **imap_meta}
                 )
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"imap:{uid_str}",
-                        "subject": imap_meta.get("subject", ""),
-                        "sender": imap_meta.get("from", ""),
-                        "strategy": "no_match",
-                        "tracking_number": None,
-                        "outcome": "error",
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="error",
+                    strategy="no_match",
+                    extra={
                         "error_type": type(parse_err).__name__,
-                        "error_msg": str(parse_err)[:100],
-                    }
+                        "error_msg": _sanitise_parser_error(parse_err),
+                    },
                 )
-                d.scan_events_total += 1
-                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "error")
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        imap_meta.get("subject", ""),
+                        imap_meta.get("from", ""),
+                        None,
+                        "error",
+                    )
+                else:
+                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "error")
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -231,40 +251,39 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
             if result.shipment is None:
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"imap:{uid_str}",
-                        "subject": imap_meta.get("subject", ""),
-                        "sender": imap_meta.get("from", ""),
-                        "strategy": result.strategy_used or "no_match",
-                        "tracking_number": None,
-                        "outcome": "no_match",
-                    }
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="no_match",
+                    strategy=result.strategy_used or "no_match",
                 )
-                d.scan_events_total += 1
-                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_match")
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        imap_meta.get("subject", ""),
+                        imap_meta.get("from", ""),
+                        result.candidate_tokens,
+                        "no_match",
+                    )
+                else:
+                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_match")
                 continue
             shipment = result.shipment
 
             # D-10: tracking-number dedup check (replaces UID skip gate).
             normalized = normalize_tracking_number(shipment.tracking_number)
-            if normalized in self._submitted_tracking_numbers:
-                d.last_poll_emails_skipped_dedup += 1
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"imap:{uid_str}",
-                        "subject": imap_meta.get("subject", ""),
-                        "sender": imap_meta.get("from", ""),
-                        "strategy": result.strategy_used,
-                        "tracking_number": shipment.tracking_number,
-                        "outcome": "skipped_dedup",
-                    }
-                )
-                d.scan_events_total += 1
-                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_dedup")
-                continue
+            if not debug_mode:
+                if normalized in self._submitted_tracking_numbers:
+                    d.last_poll_emails_skipped_dedup += 1
+                    self._emit_scan_event(
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                        outcome="skipped_dedup",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_dedup")
+                    continue
 
             # Only increment match/found counters after dedup confirms this is a new tracking number.
             d.emails_matched_total += 1
@@ -281,20 +300,42 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 }
             )
 
-            if quota_blocked:
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"imap:{uid_str}",
-                        "subject": imap_meta.get("subject", ""),
-                        "sender": imap_meta.get("from", ""),
-                        "strategy": result.strategy_used,
-                        "tracking_number": shipment.tracking_number,
-                        "outcome": "skipped_quota",
-                    }
+            # DBG-04: suppress POST in debug mode; append dry_run_suppressed event and continue.
+            if debug_mode:
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="dry_run_suppressed",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
                 )
-                d.scan_events_total += 1
-                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_quota")
+                _LOGGER.debug(
+                    "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                    imap_meta.get("subject", ""),
+                    imap_meta.get("from", ""),
+                    result.candidate_tokens,
+                    "dry_run_suppressed",
+                )
+                continue
+
+            if quota_blocked:
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="skipped_quota",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                )
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        imap_meta.get("subject", ""),
+                        imap_meta.get("from", ""),
+                        result.candidate_tokens,
+                        "skipped_quota",
+                    )
+                else:
+                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_quota")
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -315,7 +356,29 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     "parcelapp.net daily quota exhausted; forwarding paused until %s",
                     self._quota_exhausted_until,
                 )
+                # C2/P11-CR-01: emit event for the email that triggered quota exhaustion.
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="quota_exhausted_now",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                )
                 quota_blocked = True
+                continue
+            except ParcelAppAlreadyAddedError:
+                self._submitted_tracking_numbers[normalized] = None
+                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                    self._submitted_tracking_numbers.popitem(last=False)
+                await self._async_save_store()
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="already_added",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                )
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "already_added")
                 continue
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(
@@ -324,14 +387,37 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     err,
                 )
                 # Record normalized tracking number to suppress infinite retries.
-                normalized_for_suppress = normalize_tracking_number(shipment.tracking_number)
-                self._submitted_tracking_numbers[normalized_for_suppress] = None
+                self._submitted_tracking_numbers[normalized] = None
                 if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                     self._submitted_tracking_numbers.popitem(last=False)
                 await self._async_save_store()
+                # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="invalid_tracking",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                    extra={
+                        "error_type": type(err).__name__,
+                        "error_msg": str(err)[:100],
+                    },
+                )
                 continue
             except ParcelAppTransientError as err:
                 _LOGGER.warning("parcelapp.net transient error for UID %s: %s", uid_str, err)
+                # C2/P11-CR-01: emit event for transient errors.
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome="transient_error",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                    extra={
+                        "error_type": type(err).__name__,
+                        "error_msg": str(err)[:100],
+                    },
+                )
                 continue
 
             # Success — record tracking number dedup, save immediately (D-10/D-03).
@@ -340,28 +426,48 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 self._submitted_tracking_numbers.popitem(last=False)
             await self._async_save_store()
             current_data[uid_str] = shipment
-            d.scan_events.append(
-                {
-                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    "message_id": f"imap:{uid_str}",
-                    "subject": imap_meta.get("subject", ""),
-                    "sender": imap_meta.get("from", ""),
-                    "strategy": result.strategy_used,
-                    "tracking_number": shipment.tracking_number,
-                    "outcome": "posted",
-                }
+            self._emit_scan_event(
+                message_id=f"imap:{uid_str}",
+                meta=imap_meta,
+                outcome="posted",
+                strategy=result.strategy_used or "unknown",
+                tracking_number=shipment.tracking_number,
             )
-            d.scan_events_total += 1
-            _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "posted")
+            if debug_mode:
+                _LOGGER.debug(
+                    "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                    imap_meta.get("subject", ""),
+                    imap_meta.get("from", ""),
+                    result.candidate_tokens,
+                    "posted",
+                )
+            else:
+                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "posted")
 
         # Phase 7: capture per-poll timing.
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
         d.submitted_tracking_count = len(self._submitted_tracking_numbers)
 
-        # Clear stale quota block.
+        # DBG-06: persistent notification while debug mode is active.
+        if debug_mode:
+            message = (
+                "⚠️ Shop2Parcel is in dry-run mode. No parcels will be sent to parcelapp.net.\n"
+                f"Emails scanned this cycle: {d.last_poll_emails_scanned}.\n"
+                "Disable in Settings → Integrations → Shop2Parcel → Configure."
+            )
+            persistent_notification.async_create(
+                self.hass,
+                message=message,
+                title="Shop2Parcel Debug Mode",
+                notification_id=debug_mode_notification_id(entry.entry_id),
+            )
+
+        # Clear stale quota block from Store once the window has expired.
+        # W17/P14-WR-02: skip in debug mode — zero store writes is the DBG-03 contract.
         if (
-            not quota_blocked
+            not debug_mode
+            and not quota_blocked
             and self._quota_exhausted_until is not None
             and int(time.time()) >= self._quota_exhausted_until
         ):

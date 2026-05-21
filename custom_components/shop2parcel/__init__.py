@@ -88,6 +88,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Dismiss debug-mode notification when this entry is removed.
+
+    W4/P14-WR-01: When the user uninstalls/removes the Shop2Parcel integration,
+    any persistent debug-mode notification must be cleaned up.  This does not
+    fire on a normal unload (e.g., HA restart), only on explicit removal, which
+    is the correct behaviour — HA shows the notification again on next startup
+    if the entry is re-added with debug_mode=True.
+    """
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from .const import debug_mode_notification_id  # noqa: PLC0415
+
+    persistent_notification.async_dismiss(
+        hass, notification_id=debug_mode_notification_id(entry.entry_id)
+    )
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry.
 

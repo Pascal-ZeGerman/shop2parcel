@@ -76,7 +76,32 @@ async def test_migrate_func_v1_emits_warning_with_entry_id(
 async def test_migrate_func_future_version_returns_data_unchanged(
     store: Shop2ParcelStore,
 ) -> None:
-    """Non-v1 major versions must be returned unchanged (forward compatibility guard)."""
+    """Same-major future-minor versions are returned unchanged (passthrough)."""
+    # version=2 is the current; old_major_version=2 (same) → passthrough
+    store.version = 2
+    store.minor_version = 1
     old_data = {"submitted_tracking_numbers": ["X"], "quota_exhausted_until": None}
     result = await store._async_migrate_func(2, 0, old_data)
     assert result == old_data
+
+
+async def test_migrate_unknown_future_major_returns_empty(
+    store: Shop2ParcelStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """W16/P13-WR-08: Future major version → returns empty recoverable state + WARNING log."""
+    store.version = 2
+    store.minor_version = 1
+    old_data = {"submitted_tracking_numbers": ["TN1", "TN2"], "quota_exhausted_until": 9999}
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
+        result = await store._async_migrate_func(3, 0, old_data)
+
+    assert result["submitted_tracking_numbers"] == []
+    assert result["quota_exhausted_until"] is None
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning_records, "Expected at least one WARNING log record"
+    messages = " ".join(r.getMessage() for r in warning_records)
+    assert "downgrade not supported" in messages.lower() or "newer" in messages.lower(), (
+        f"WARNING must mention downgrade or newer version, got: {messages!r}"
+    )

@@ -43,6 +43,15 @@ class ParcelAppInvalidTrackingError(Exception):
     """
 
 
+class ParcelAppAlreadyAddedError(Exception):
+    """HTTP 400 with error_message 'You have already added this delivery to the app'.
+
+    Coordinator treats this as an idempotent success: the tracking number is already
+    in parcelapp.net and is written to the dedup store to permanently suppress retries.
+    NOT a subclass of ParcelAppInvalidTrackingError (D-01).
+    """
+
+
 class ImapAuthError(Exception):
     """IMAP login failure (bad credentials, account locked) — coordinator raises ConfigEntryAuthFailed."""
 

@@ -89,10 +89,11 @@ async def async_get_config_entry_diagnostics(
     # Build poll_stats — dataclasses.asdict() recursively converts nested lists and dicts
     # to JSON-safe values (PollStats contains list[dict] and dict[str, int] fields).
     diag_obj = coordinator.diagnostics
+    activity_log: list[dict[str, Any]] = []
     if not dataclasses.is_dataclass(diag_obj) or isinstance(diag_obj, type):
         _LOGGER.error(
             "coordinator.diagnostics for entry %s is not a dataclass instance (got %r) "
-            "— poll_stats will be empty",
+            "— poll_stats and activity_log will be empty",
             entry.entry_id,
             type(diag_obj),
         )
@@ -104,6 +105,7 @@ async def async_get_config_entry_diagnostics(
         # diagnostics download to JSON.  (RESEARCH.md Pitfall 1)
         if "scan_events" in poll_stats:
             poll_stats["scan_events"] = list(poll_stats["scan_events"])
+        activity_log = list(poll_stats.get("scan_events", []))
 
     # Build recent_shipments — 10 most recent by email_date. Insertion order is not
     # used because the dict is repopulated across polls and restarts in poll-discovery
@@ -133,6 +135,6 @@ async def async_get_config_entry_diagnostics(
     return {
         "config": config,
         "poll_stats": poll_stats,
-        "activity_log": list(diag_obj.scan_events),
+        "activity_log": activity_log,
         "recent_shipments": recent_shipments,
     }

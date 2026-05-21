@@ -9,10 +9,10 @@ from __future__ import annotations
 import html as _html_stdlib
 import logging
 import time
-from datetime import UTC, datetime
 from typing import cast
 
 import aiohttp
+from homeassistant.components import persistent_notification
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -23,6 +23,7 @@ from .api.email_parser import EmailParser, ParseResult, ShipmentData
 from .api.exceptions import (
     GmailAuthError,
     GmailTransientError,
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -32,19 +33,23 @@ from .api.gmail_client import GmailClient, extract_html_body, extract_text_body
 from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_API_KEY,
+    CONF_DEBUG_MODE,
     CONF_ENABLE_BROAD_SCAN,
     CONF_GMAIL_QUERY,
     CONF_RESCAN_WINDOW_DAYS,
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_RESCAN_WINDOW_DAYS,
+    MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    debug_mode_notification_id,
     normalize_tracking_number,
 )
 from .coordinator import (
     Shop2ParcelCoordinator,
     _extract_email_meta,
     _next_midnight_utc,
+    _sanitise_parser_error,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,6 +61,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
     def __init__(self, hass, entry):
         super().__init__(hass, entry)
         self._email_client = GmailClient(hass.async_add_executor_job)
+        if not entry.options.get(CONF_DEBUG_MODE, False):
+            persistent_notification.async_dismiss(
+                hass, notification_id=debug_mode_notification_id(entry.entry_id)
+            )
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
@@ -88,6 +97,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         rescan_window_days = self.config_entry.options.get(
             CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS
         )
+        # DBG-02: override scan window to maximum in debug mode.
+        debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        if debug_mode:
+            rescan_window_days = MAX_RESCAN_WINDOW_DAYS
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
@@ -164,6 +177,12 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "invalid_internal_date", **email_meta}
                 )
+                # C2/P11-CR-01: emit scan event so activity log captures this exit.
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="invalid_internal_date",
+                )
                 continue
 
             payload = msg.get("payload", {})
@@ -184,19 +203,21 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "no_html_body", **email_meta}
                 )
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"gmail:{msg_id}",
-                        "subject": email_meta.get("subject", ""),
-                        "sender": email_meta.get("from", ""),
-                        "strategy": None,
-                        "tracking_number": None,
-                        "outcome": "no_html_body",
-                    }
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="no_html_body",
                 )
-                d.scan_events_total += 1
-                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_html_body")
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        email_meta.get("subject", ""),
+                        email_meta.get("from", ""),
+                        None,
+                        "no_html_body",
+                    )
+                else:
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_html_body")
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
@@ -213,21 +234,26 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 d.last_poll_skip_reasons.append(
                     {"message_id": msg_id, "reason": "parse_exception", **email_meta}
                 )
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"gmail:{msg_id}",
-                        "subject": email_meta.get("subject", ""),
-                        "sender": email_meta.get("from", ""),
-                        "strategy": "no_match",
-                        "tracking_number": None,
-                        "outcome": "error",
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="error",
+                    strategy="no_match",
+                    extra={
                         "error_type": type(parse_err).__name__,
-                        "error_msg": str(parse_err)[:100],
-                    }
+                        "error_msg": _sanitise_parser_error(parse_err),
+                    },
                 )
-                d.scan_events_total += 1
-                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "error")
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        email_meta.get("subject", ""),
+                        email_meta.get("from", ""),
+                        None,
+                        "error",
+                    )
+                else:
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "error")
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -247,40 +273,40 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     d.keyword_hits_total += 1
                     d.last_poll_keyword_hits += 1
             if result.shipment is None:
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"gmail:{msg_id}",
-                        "subject": email_meta.get("subject", ""),
-                        "sender": email_meta.get("from", ""),
-                        "strategy": result.strategy_used or "no_match",
-                        "tracking_number": None,
-                        "outcome": "no_match",
-                    }
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="no_match",
+                    strategy=result.strategy_used or "no_match",
                 )
-                d.scan_events_total += 1
-                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_match")
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        email_meta.get("subject", ""),
+                        email_meta.get("from", ""),
+                        result.candidate_tokens,
+                        "no_match",
+                    )
+                else:
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_match")
                 continue
             shipment = result.shipment
 
             # D-10: tracking-number dedup check (replaces message-ID skip gate).
+            # DBG-03: skip dedup entirely in debug mode.
             normalized = normalize_tracking_number(shipment.tracking_number)
-            if normalized in self._submitted_tracking_numbers:
-                d.last_poll_emails_skipped_dedup += 1
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"gmail:{msg_id}",
-                        "subject": email_meta.get("subject", ""),
-                        "sender": email_meta.get("from", ""),
-                        "strategy": result.strategy_used,
-                        "tracking_number": shipment.tracking_number,
-                        "outcome": "skipped_dedup",
-                    }
-                )
-                d.scan_events_total += 1
-                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_dedup")
-                continue
+            if not debug_mode:
+                if normalized in self._submitted_tracking_numbers:
+                    d.last_poll_emails_skipped_dedup += 1
+                    self._emit_scan_event(
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                        outcome="skipped_dedup",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_dedup")
+                    continue
 
             # Only increment match/found counters after dedup confirms this is a new tracking number.
             d.emails_matched_total += 1
@@ -297,21 +323,43 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 }
             )
 
+            # DBG-04: in debug mode, suppress POST and record dry_run_suppressed event.
+            if debug_mode:
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="dry_run_suppressed",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                )
+                _LOGGER.debug(
+                    "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                    email_meta.get("subject", ""),
+                    email_meta.get("from", ""),
+                    result.candidate_tokens,
+                    "dry_run_suppressed",
+                )
+                continue
+
             # 5. Quota guard (D-05): when quota is exhausted, skip the POST.
             if quota_blocked:
-                d.scan_events.append(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                        "message_id": f"gmail:{msg_id}",
-                        "subject": email_meta.get("subject", ""),
-                        "sender": email_meta.get("from", ""),
-                        "strategy": result.strategy_used,
-                        "tracking_number": shipment.tracking_number,
-                        "outcome": "skipped_quota",
-                    }
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="skipped_quota",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
                 )
-                d.scan_events_total += 1
-                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_quota")
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        email_meta.get("subject", ""),
+                        email_meta.get("from", ""),
+                        result.candidate_tokens,
+                        "skipped_quota",
+                    )
+                else:
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_quota")
                 continue
 
             carrier_code = normalize_carrier(shipment.carrier_name)
@@ -333,7 +381,29 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     "parcelapp.net daily quota exhausted; forwarding paused until %s",
                     self._quota_exhausted_until,
                 )
+                # C2/P11-CR-01: emit event for the email that triggered quota exhaustion.
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="quota_exhausted_now",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                )
                 quota_blocked = True
+                continue
+            except ParcelAppAlreadyAddedError:
+                self._submitted_tracking_numbers[normalized] = None
+                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                    self._submitted_tracking_numbers.popitem(last=False)
+                await self._async_save_store()
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="already_added",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                )
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "already_added")
                 continue
             except ParcelAppInvalidTrackingError as err:
                 _LOGGER.error(
@@ -342,14 +412,37 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     err,
                 )
                 # Record normalized tracking number to suppress infinite retries.
-                normalized_for_suppress = normalize_tracking_number(shipment.tracking_number)
-                self._submitted_tracking_numbers[normalized_for_suppress] = None
+                self._submitted_tracking_numbers[normalized] = None
                 if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                     self._submitted_tracking_numbers.popitem(last=False)
                 await self._async_save_store()
+                # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="invalid_tracking",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                    extra={
+                        "error_type": type(err).__name__,
+                        "error_msg": str(err)[:100],
+                    },
+                )
                 continue
             except ParcelAppTransientError as err:
                 _LOGGER.warning("parcelapp.net transient error for %s: %s", msg_id, err)
+                # C2/P11-CR-01: emit event for transient errors.
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome="transient_error",
+                    strategy=result.strategy_used or "unknown",
+                    tracking_number=shipment.tracking_number,
+                    extra={
+                        "error_type": type(err).__name__,
+                        "error_msg": str(err)[:100],
+                    },
+                )
                 continue
 
             # 6. Success — record tracking number dedup, save immediately (D-10/D-03).
@@ -358,31 +451,51 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 self._submitted_tracking_numbers.popitem(last=False)
             await self._async_save_store()
             current_data[msg_id] = shipment
-            d.scan_events.append(
-                {
-                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    "message_id": f"gmail:{msg_id}",
-                    "subject": email_meta.get("subject", ""),
-                    "sender": email_meta.get("from", ""),
-                    "strategy": result.strategy_used,
-                    "tracking_number": shipment.tracking_number,
-                    "outcome": "posted",
-                }
+            self._emit_scan_event(
+                message_id=f"gmail:{msg_id}",
+                meta=email_meta,
+                outcome="posted",
+                strategy=result.strategy_used or "unknown",
+                tracking_number=shipment.tracking_number,
             )
-            d.scan_events_total += 1
-            _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "posted")
+            if debug_mode:
+                _LOGGER.debug(
+                    "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                    email_meta.get("subject", ""),
+                    email_meta.get("from", ""),
+                    result.candidate_tokens,
+                    "posted",
+                )
+            else:
+                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "posted")
 
         # Phase 7: capture per-poll timing (D-04, Specifics).
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
         d.submitted_tracking_count = len(self._submitted_tracking_numbers)
 
+        # DBG-06: show persistent notification in HA UI after each debug poll.
+        if debug_mode:
+            message = (
+                "⚠️ Shop2Parcel is in dry-run mode. No parcels will be sent to parcelapp.net.\n"
+                f"Emails scanned this cycle: {d.last_poll_emails_scanned}.\n"
+                "Disable in Settings → Integrations → Shop2Parcel → Configure."
+            )
+            persistent_notification.async_create(
+                self.hass,
+                message=message,
+                title="Shop2Parcel Debug Mode",
+                notification_id=debug_mode_notification_id(self.config_entry.entry_id),
+            )
+
         # Clear stale quota block from Store once the window has expired.  Without
         # this, a past-epoch timestamp would accumulate across restarts indefinitely.
         # Skip when quota_blocked=True: the timestamp was just set this cycle and must
         # not be cleared in the same pass (even if reset_at is already in the past).
+        # W17/P14-WR-02: skip in debug mode — zero store writes is the DBG-03 contract.
         if (
-            not quota_blocked
+            not debug_mode
+            and not quota_blocked
             and self._quota_exhausted_until is not None
             and int(time.time()) >= self._quota_exhausted_until
         ):

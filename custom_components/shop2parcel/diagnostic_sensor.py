@@ -3,14 +3,16 @@
 Phase 7 (DIAG-08, DIAG-09, DIAG-10):
 - D-09: All diagnostic sensors registered statically via sensor.py::async_setup_entry.
 - D-10: All sensors use CoordinatorEntity[Shop2ParcelCoordinator]; read from
-  coordinator._diagnostics (a PollStats instance, always non-None — Pitfall 5).
+  coordinator.diagnostics (a PollStats instance, always non-None — Pitfall 5).
+  W11/P12-WR-01: use the public .diagnostics property, not ._diagnostics, so the
+  access goes through the documented API surface.
 - D-11: Diagnostic sensors share the same Shop2Parcel DeviceInfo as shipment sensors
   (one device per config entry, identifiers={(DOMAIN, entry.entry_id)}).
 - D-12: Sensor state/attribute mapping per CONTEXT.md D-12.
 
 Phase 11 (ACTLOG-04, ACTLOG-05):
 - ActivityLogSensor (6th sensor): state = scan_events_total, attributes = last 10 events.
-  Reads from coordinator._diagnostics.scan_events (deque added in Plan 01).
+  Reads from coordinator.diagnostics.scan_events (deque added in Plan 01).
 
 This module only exports sensor classes.  Registration happens in
 sensor.py::async_setup_entry because HA's platform forwarding only supports
@@ -74,11 +76,11 @@ class EmailsScannedSensor(DiagnosticSensor):
 
     @property
     def native_value(self) -> int:
-        return self.coordinator._diagnostics.emails_returned_total
+        return self.coordinator.diagnostics.emails_returned_total
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        d = self.coordinator._diagnostics
+        d = self.coordinator.diagnostics
         return {
             "last_poll_returned": d.last_poll_emails_returned,
             "last_poll_skipped_dedup": d.last_poll_emails_skipped_dedup,
@@ -106,11 +108,11 @@ class NewEmailsInspectedSensor(DiagnosticSensor):
 
     @property
     def native_value(self) -> int:
-        return self.coordinator._diagnostics.emails_scanned_total
+        return self.coordinator.diagnostics.emails_scanned_total
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        d = self.coordinator._diagnostics
+        d = self.coordinator.diagnostics
         return {"last_poll_count": d.last_poll_emails_scanned}
 
 
@@ -129,11 +131,11 @@ class EmailsMatchedSensor(DiagnosticSensor):
 
     @property
     def native_value(self) -> int:
-        return self.coordinator._diagnostics.emails_matched_total
+        return self.coordinator.diagnostics.emails_matched_total
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        d = self.coordinator._diagnostics
+        d = self.coordinator.diagnostics
         unmatched = max(0, d.last_poll_emails_scanned - d.last_poll_emails_matched)
         return {
             "last_poll_matched": d.last_poll_emails_matched,
@@ -157,11 +159,11 @@ class TrackingNumbersFoundSensor(DiagnosticSensor):
 
     @property
     def native_value(self) -> int:
-        return self.coordinator._diagnostics.tracking_numbers_found_total
+        return self.coordinator.diagnostics.tracking_numbers_found_total
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        d = self.coordinator._diagnostics
+        d = self.coordinator.diagnostics
         return {"last_poll_found": list(d.last_poll_found)}
 
 
@@ -180,11 +182,11 @@ class KeywordHitsSensor(DiagnosticSensor):
 
     @property
     def native_value(self) -> int:
-        return self.coordinator._diagnostics.keyword_hits_total
+        return self.coordinator.diagnostics.keyword_hits_total
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        d = self.coordinator._diagnostics
+        d = self.coordinator.diagnostics
         return {
             "last_poll_hits": d.last_poll_keyword_hits,
             "per_keyword": dict(d.keyword_hits_per_key),
@@ -213,9 +215,9 @@ class ActivityLogSensor(DiagnosticSensor):
 
     @property
     def native_value(self) -> int:
-        return self.coordinator._diagnostics.scan_events_total
+        return self.coordinator.diagnostics.scan_events_total
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        d = self.coordinator._diagnostics
+        d = self.coordinator.diagnostics
         return {"recent_events": list(d.scan_events)[-10:]}

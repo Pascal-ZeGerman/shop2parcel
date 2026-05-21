@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import email as _email_stdlib
 import logging
+import re
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -49,29 +50,47 @@ STORAGE_VERSION = 2
 
 
 def _extract_email_meta(msg: dict) -> dict:
-    """Extract subject, from, date, and snippet from a Gmail message dict."""
-    headers = {
-        h["name"]: h["value"]
-        for h in msg.get("payload", {}).get("headers", [])
-        if "name" in h and "value" in h
-    }
-    return {
-        "subject": headers.get("Subject", ""),
-        "from": headers.get("From", ""),
-        "date": headers.get("Date", ""),
-        "snippet": msg.get("snippet", ""),
-    }
+    """Extract subject, from, date, and snippet from a Gmail message dict.
+
+    Returns safe defaults on any extraction failure (W10/P11-WR-05): a
+    malformed encoded-word header can raise LookupError (unknown codec).
+    Wrapping here prevents a single bad email from crashing the whole poll.
+    """
+    try:
+        headers = {
+            h["name"]: h["value"]
+            for h in msg.get("payload", {}).get("headers", [])
+            if "name" in h and "value" in h
+        }
+        return {
+            "subject": headers.get("Subject", ""),
+            "from": headers.get("From", ""),
+            "date": headers.get("Date", ""),
+            "snippet": msg.get("snippet", ""),
+        }
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Failed to extract email meta: %s", err)
+        return {"subject": "", "from": "", "date": "", "snippet": ""}
 
 
 def _extract_imap_email_meta(raw_bytes: bytes) -> dict:
-    """Extract subject, from, and date from raw IMAP message bytes."""
-    msg = _email_stdlib.message_from_bytes(raw_bytes)
-    return {
-        "subject": msg.get("Subject", "") or "",
-        "from": msg.get("From", "") or "",
-        "date": msg.get("Date", "") or "",
-        "snippet": "",
-    }
+    """Extract subject, from, and date from raw IMAP message bytes.
+
+    Returns safe defaults on any extraction failure (W10/P11-WR-05): a
+    malformed encoded-word header can raise LookupError (unknown codec).
+    Wrapping here prevents a single bad email from crashing the whole poll.
+    """
+    try:
+        msg = _email_stdlib.message_from_bytes(raw_bytes)
+        return {
+            "subject": msg.get("Subject", "") or "",
+            "from": msg.get("From", "") or "",
+            "date": msg.get("Date", "") or "",
+            "snippet": "",
+        }
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Failed to extract email meta: %s", err)
+        return {"subject": "", "from": "", "date": "", "snippet": ""}
 
 
 def _next_midnight_utc() -> int:
@@ -88,6 +107,24 @@ def _next_midnight_utc() -> int:
             tzinfo=UTC,
         ).timestamp()
     )
+
+
+def _sanitise_parser_error(err: BaseException) -> str:
+    """Return a safe, HTML-stripped, 100-char slice of a parser exception message.
+
+    Closes W9/P11-WR-04: parser exceptions from BeautifulSoup can contain raw
+    HTML excerpts from the offending email body.  Storing raw ``str(err)`` puts
+    up to 100 chars of arbitrary email content (potentially PII) into the
+    in-memory ring buffer and diagnostics JSON download.
+
+    Steps:
+      1. Strip all HTML tags (``<...>``) to prevent body content leakage.
+      2. Collapse whitespace runs to single spaces for readability.
+      3. Slice to 100 codepoints (not bytes) to prevent mid-grapheme truncation.
+    """
+    sanitised = re.sub(r"<[^>]*>", "", str(err))
+    sanitised = re.sub(r"\s+", " ", sanitised).strip()
+    return sanitised[:100]
 
 
 @dataclass(slots=True)
@@ -164,7 +201,19 @@ class Shop2ParcelStore(Store):
                 "submitted_tracking_numbers": [],
                 "quota_exhausted_until": old_data.get("quota_exhausted_until"),
             }
-        # Future major versions: return data unchanged (caller will handle).
+        if old_major_version > self.version:
+            _LOGGER.warning(
+                "Store contains data from a newer Shop2Parcel version (%d.%d > %d.%d) for entry %s; "
+                "downgrade not supported, discarding unknown schema.",
+                old_major_version,
+                old_minor_version,
+                self.version,
+                self.minor_version,
+                self.key.removeprefix("shop2parcel."),
+            )
+            return {"submitted_tracking_numbers": [], "quota_exhausted_until": None}
+        # Same major, future minor — passthrough.  Minor-version changes are backward
+        # compatible by convention so no migration is needed.
         return old_data
 
 
@@ -201,6 +250,42 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """Public read-only view of in-memory poll diagnostics."""
         return self._diagnostics
 
+    def _emit_scan_event(
+        self,
+        *,
+        message_id: str,
+        meta: dict,
+        outcome: str,
+        strategy: str | None = None,
+        tracking_number: str | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        """Append a single scan event and bump scan_events_total. Single emission point.
+
+        All scan-event dict literals across gmail_coordinator.py and
+        imap_coordinator.py route through here so key order and shape are
+        guaranteed consistent.  The ``extra`` kwarg merges after the standard
+        keys so callers cannot accidentally rename contract keys via extra.
+
+        Contract keys (in order): timestamp, message_id, subject, sender,
+        strategy, tracking_number, outcome.  Optional extra keys (e.g.
+        error_type, error_msg) are appended after outcome.
+        """
+        d = self._diagnostics
+        event: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "message_id": message_id,
+            "subject": meta.get("subject", ""),
+            "sender": meta.get("from", ""),
+            "strategy": strategy,
+            "tracking_number": tracking_number,
+            "outcome": outcome,
+        }
+        if extra:
+            event.update(extra)
+        d.scan_events.append(event)
+        d.scan_events_total += 1
+
     async def _async_load_store(self) -> None:
         """Hydrate dedup + quota state from Store.
 
@@ -213,21 +298,48 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         stored = await self._store.async_load() or {}
         stored_list = stored.get("submitted_tracking_numbers", [])
-        self._submitted_tracking_numbers = OrderedDict((tn, None) for tn in stored_list)
-        self._quota_exhausted_until = stored.get("quota_exhausted_until")
+        if not isinstance(stored_list, list):
+            _LOGGER.warning(
+                "submitted_tracking_numbers in store is not a list (type=%s); "
+                "treating as empty — dedup will repopulate from parcelapp 'already added' 400s.",
+                type(stored_list).__name__,
+            )
+            stored_list = []
+        self._submitted_tracking_numbers = OrderedDict(
+            (tn, None) for tn in stored_list if isinstance(tn, str)
+        )
+        qe = stored.get("quota_exhausted_until")
+        self._quota_exhausted_until = qe if isinstance(qe, int) else None
+        _LOGGER.debug(
+            "Loaded %d submitted tracking numbers from store",
+            len(self._submitted_tracking_numbers),
+        )
 
     async def _async_save_store(self) -> None:
-        """Persist current dedup + quota state to Store."""
+        """Schedule a debounced persist of current dedup + quota state to Store.
+
+        Uses async_delay_save (W1/P13-WR-06) so rapid per-message saves within
+        a single poll are coalesced into one write. async_delay_save is
+        synchronous — it schedules the write; it does NOT write immediately.
+
+        The try/except only guards against scheduling errors; the actual write
+        errors surface in HA logs when the delayed timer fires.
+        """
         try:
-            await self._store.async_save(
-                {
+            self._store.async_delay_save(
+                lambda: {
                     "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
                     "quota_exhausted_until": self._quota_exhausted_until,
-                }
+                },
+                delay=5,
+            )
+            _LOGGER.debug(
+                "Scheduled debounced save for %d submitted tracking numbers",
+                len(self._submitted_tracking_numbers),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
-                "Failed to persist dedup state — dedup may re-submit on next restart: %s",
+                "Failed to schedule dedup state save — dedup may re-submit on next restart: %s",
                 err,
                 exc_info=True,
             )

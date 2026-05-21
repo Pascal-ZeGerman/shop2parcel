@@ -19,6 +19,7 @@ import logging
 import aiohttp
 
 from .exceptions import (
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
@@ -85,32 +86,33 @@ class ParcelAppClient:
                     reset_at: int | None = None
                     try:
                         data = await resp.json(content_type=None)
-                        reset_at = data.get("reset_at")
-                    except ValueError:
-                        pass  # Non-JSON body — reset_at stays None.
-                    except aiohttp.ContentTypeError:
-                        pass  # Wrong content-type body — reset_at stays None.
+                        if isinstance(data, dict):
+                            reset_at = data.get("reset_at")
+                    except (ValueError, aiohttp.ContentTypeError):  # fmt: skip
+                        pass  # Non-JSON or wrong content-type body — reset_at stays None.
                     raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
                 if resp.status == 400:
+                    msg = "Bad request"
                     try:
                         data = await resp.json(content_type=None)
-                        msg = data.get("error_message", "Bad request")
-                    except ValueError:
+                        if isinstance(data, dict):
+                            msg_value = data.get("error_message")
+                            if isinstance(msg_value, str) and msg_value.strip():
+                                msg = msg_value
+                            # else: keep default — covers None, non-string, empty string
+                        else:
+                            msg = "Bad request (unexpected JSON shape)"
+                    except (ValueError, aiohttp.ContentTypeError):  # fmt: skip
                         msg = "Bad request (non-JSON body)"
-                    except aiohttp.ContentTypeError:
-                        msg = "Bad request (non-JSON body)"
+                    if msg == "You have already added this delivery to the app":
+                        raise ParcelAppAlreadyAddedError(msg)
                     raise ParcelAppInvalidTrackingError(msg)
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 if 400 <= resp.status < 500:
                     raise ParcelAppTransientError(f"Unexpected client error: HTTP {resp.status}")
                 resp.raise_for_status()
-        except (
-            TimeoutError,
-            aiohttp.ClientConnectionError,
-            aiohttp.ServerDisconnectedError,
-            aiohttp.ServerTimeoutError,
-        ) as err:
+        except (TimeoutError, aiohttp.ClientConnectionError) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
 
     async def async_get_deliveries(self, filter_mode: str = "recent") -> list[dict]:
@@ -140,10 +142,5 @@ class ParcelAppClient:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 return data.get("deliveries", [])
-        except (
-            TimeoutError,
-            aiohttp.ClientConnectionError,
-            aiohttp.ServerDisconnectedError,
-            aiohttp.ServerTimeoutError,
-        ) as err:
+        except (TimeoutError, aiohttp.ClientConnectionError) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
