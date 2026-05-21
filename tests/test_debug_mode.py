@@ -18,6 +18,7 @@ from custom_components.shop2parcel.const import (
     CONF_RESCAN_WINDOW_DAYS,
     DOMAIN,
     MAX_RESCAN_WINDOW_DAYS,
+    debug_mode_notification_id,
 )
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
 from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
@@ -648,8 +649,8 @@ async def test_dbg06_gmail_notification(hass, mock_config_entry):
             f"Expected async_create call_count=1, got {mock_pn.async_create.call_count}"
         )
         create_kwargs = mock_pn.async_create.call_args[1]
-        assert create_kwargs["notification_id"] == "shop2parcel_debug_mode", (
-            f"Expected notification_id='shop2parcel_debug_mode', got {create_kwargs['notification_id']!r}"
+        assert create_kwargs["notification_id"] == debug_mode_notification_id(mock_config_entry.entry_id), (
+            f"Expected per-entry notification_id, got {create_kwargs['notification_id']!r}"
         )
         assert create_kwargs["title"] == "Shop2Parcel Debug Mode", (
             f"Expected title='Shop2Parcel Debug Mode', got {create_kwargs['title']!r}"
@@ -661,9 +662,7 @@ async def test_dbg06_gmail_notification(hass, mock_config_entry):
         # Dismiss check: when debug_mode=False, __init__ should call async_dismiss
         # Reset mock to isolate the dismiss-on-init assertion
         mock_pn.async_dismiss.reset_mock()
-        from pytest_homeassistant_custom_component.common import MockConfigEntry as MCE
-
-        normal_entry = MCE(
+        normal_entry = MockConfigEntry(
             domain=DOMAIN,
             data=mock_config_entry.data,
             options={CONF_DEBUG_MODE: False},
@@ -675,7 +674,7 @@ async def test_dbg06_gmail_notification(hass, mock_config_entry):
             f"Expected async_dismiss call_count=1 when debug_mode=False, got {mock_pn.async_dismiss.call_count}"
         )
         dismiss_kwargs = mock_pn.async_dismiss.call_args[1]
-        assert dismiss_kwargs["notification_id"] == "shop2parcel_debug_mode"
+        assert dismiss_kwargs["notification_id"] == debug_mode_notification_id(normal_entry.entry_id)
 
 
 async def test_dbg06_imap_notification(hass, mock_imap_config_entry):
@@ -711,17 +710,15 @@ async def test_dbg06_imap_notification(hass, mock_imap_config_entry):
             f"Expected async_create call_count=1, got {mock_pn.async_create.call_count}"
         )
         create_kwargs = mock_pn.async_create.call_args[1]
-        assert create_kwargs["notification_id"] == "shop2parcel_debug_mode", (
-            f"Expected notification_id='shop2parcel_debug_mode', got {create_kwargs['notification_id']!r}"
+        assert create_kwargs["notification_id"] == debug_mode_notification_id(mock_imap_config_entry.entry_id), (
+            f"Expected per-entry notification_id, got {create_kwargs['notification_id']!r}"
         )
         assert create_kwargs["title"] == "Shop2Parcel Debug Mode"
         assert "dry-run mode" in create_kwargs["message"]
 
         # Dismiss-on-init: coordinator with debug_mode=False should dismiss
         mock_pn.async_dismiss.reset_mock()
-        from pytest_homeassistant_custom_component.common import MockConfigEntry as MCE
-
-        normal_imap_entry = MCE(
+        normal_imap_entry = MockConfigEntry(
             domain=DOMAIN,
             data=mock_imap_config_entry.data,
             options={
@@ -737,4 +734,30 @@ async def test_dbg06_imap_notification(hass, mock_imap_config_entry):
             f"Expected async_dismiss call_count=1 when debug_mode=False, got {mock_pn.async_dismiss.call_count}"
         )
         dismiss_kwargs = mock_pn.async_dismiss.call_args[1]
-        assert dismiss_kwargs["notification_id"] == "shop2parcel_debug_mode"
+        assert dismiss_kwargs["notification_id"] == debug_mode_notification_id(normal_imap_entry.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# DBG-07: async_remove_entry — dismisses per-entry debug notification on removal
+# ---------------------------------------------------------------------------
+
+
+async def test_async_remove_entry_dismisses_debug_notification(hass, mock_config_entry):
+    """DBG-07: async_remove_entry calls persistent_notification.async_dismiss with per-entry id."""
+    from custom_components.shop2parcel import async_remove_entry
+
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={CONF_DEBUG_MODE: True},
+    )
+
+    with patch(
+        "homeassistant.components.persistent_notification.async_dismiss"
+    ) as mock_dismiss:
+        await async_remove_entry(hass, mock_config_entry)
+
+    mock_dismiss.assert_called_once_with(
+        hass,
+        notification_id=debug_mode_notification_id(mock_config_entry.entry_id),
+    )

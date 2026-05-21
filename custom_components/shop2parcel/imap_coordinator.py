@@ -46,6 +46,7 @@ from .const import (
     DEFAULT_RESCAN_WINDOW_DAYS,
     MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    debug_mode_notification_id,
     normalize_tracking_number,
 )
 from .coordinator import (
@@ -83,7 +84,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         self._email_client = ImapClient(hass.async_add_executor_job)
         if not entry.options.get(CONF_DEBUG_MODE, False):
             persistent_notification.async_dismiss(
-                hass, notification_id="shop2parcel_debug_mode"
+                hass, notification_id=debug_mode_notification_id(entry.entry_id)
             )
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
@@ -459,7 +460,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 self.hass,
                 message=message,
                 title="Shop2Parcel Debug Mode",
-                notification_id="shop2parcel_debug_mode",
+                notification_id=debug_mode_notification_id(entry.entry_id),
             )
 
         # Clear stale quota block.
