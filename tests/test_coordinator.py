@@ -2743,3 +2743,53 @@ async def test_load_store_with_non_int_quota_exhausted_until(hass, mock_config_e
         await coord._async_load_store()
 
     assert coord._quota_exhausted_until is None
+
+
+# -------- _emit_scan_event helper (W7/P11-WR-01) ----------------------------
+
+
+async def test_emit_scan_event_shape_and_counter(hass, mock_config_entry):
+    """W7/P11-WR-01: _emit_scan_event appends correctly-shaped event and bumps counter."""
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+
+    # Call with standard args
+    coord._emit_scan_event(
+        message_id="gmail:m1",
+        meta={"subject": "S", "from": "F"},
+        outcome="posted",
+        strategy="html_template",
+        tracking_number="TN1",
+    )
+    assert coord._diagnostics.scan_events_total == 1
+    event = coord._diagnostics.scan_events[-1]
+    # Must have exactly the seven contract keys (plus no extras)
+    assert set(event.keys()) == {"timestamp", "message_id", "subject", "sender",
+                                  "strategy", "tracking_number", "outcome"}
+    assert event["message_id"] == "gmail:m1"
+    assert event["subject"] == "S"
+    assert event["sender"] == "F"
+    assert event["strategy"] == "html_template"
+    assert event["tracking_number"] == "TN1"
+    assert event["outcome"] == "posted"
+    assert event["timestamp"].endswith("Z")
+
+    # Call with extra keys
+    coord._emit_scan_event(
+        message_id="gmail:m2",
+        meta={"subject": "E", "from": "G"},
+        outcome="error",
+        extra={"error_type": "ValueError", "error_msg": "boom"},
+    )
+    assert coord._diagnostics.scan_events_total == 2
+    event2 = coord._diagnostics.scan_events[-1]
+    assert event2["error_type"] == "ValueError"
+    assert event2["error_msg"] == "boom"
+    # Contract keys still present
+    assert "timestamp" in event2 and "message_id" in event2 and "outcome" in event2

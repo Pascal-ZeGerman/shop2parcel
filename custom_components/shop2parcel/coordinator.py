@@ -213,6 +213,42 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """Public read-only view of in-memory poll diagnostics."""
         return self._diagnostics
 
+    def _emit_scan_event(
+        self,
+        *,
+        message_id: str,
+        meta: dict,
+        outcome: str,
+        strategy: str | None = None,
+        tracking_number: str | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        """Append a single scan event and bump scan_events_total. Single emission point.
+
+        All scan-event dict literals across gmail_coordinator.py and
+        imap_coordinator.py route through here so key order and shape are
+        guaranteed consistent.  The ``extra`` kwarg merges after the standard
+        keys so callers cannot accidentally rename contract keys via extra.
+
+        Contract keys (in order): timestamp, message_id, subject, sender,
+        strategy, tracking_number, outcome.  Optional extra keys (e.g.
+        error_type, error_msg) are appended after outcome.
+        """
+        d = self._diagnostics
+        event: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "message_id": message_id,
+            "subject": meta.get("subject", ""),
+            "sender": meta.get("from", ""),
+            "strategy": strategy,
+            "tracking_number": tracking_number,
+            "outcome": outcome,
+        }
+        if extra:
+            event.update(extra)
+        d.scan_events.append(event)
+        d.scan_events_total += 1
+
     async def _async_load_store(self) -> None:
         """Hydrate dedup + quota state from Store.
 
