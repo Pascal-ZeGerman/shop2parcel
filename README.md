@@ -142,3 +142,97 @@ Delivered shipments are removed from the sensor list automatically after 24 hour
 ## License
 
 MIT
+
+---
+
+## Diagnostic sensors
+
+Shop2Parcel registers six diagnostic sensor entities per config entry. They are visible under the Shop2Parcel device in **Settings → Devices & Services → Shop2Parcel**. All are classified as `diagnostic` and reset to zero when Home Assistant restarts.
+
+| Entity ID | What it measures |
+|-----------|-----------------|
+| `sensor.shop2parcel_emails_returned` | Total emails returned by Gmail/IMAP before deduplication. Attributes include the query used, effective query, last-poll counts, and poll duration in milliseconds. |
+| `sensor.shop2parcel_new_emails_inspected` | Emails that passed the deduplication check and were inspected for shipment data. |
+| `sensor.shop2parcel_emails_matched` | Emails that produced a recognised shipment (tracking number + carrier extracted). Attributes include last-poll skip reasons. |
+| `sensor.shop2parcel_tracking_numbers_found` | Cumulative tracking numbers extracted across all polls. |
+| `sensor.shop2parcel_keyword_hits` | Cumulative fallback regex matches (broad-scan arm). Attributes show per-keyword hit counts. |
+| `sensor.shop2parcel_activity_log` | Count of all scan events since last restart. The `recent_events` attribute holds the last 10 scan events as a list of dicts. |
+
+A `binary_sensor.shop2parcel_has_active_shipments` entity is also created. It is `on` when at least one shipment is present in the coordinator and `off` when the shipment list is empty.
+
+### Downloading diagnostics
+
+The full diagnostic report (config, poll stats, activity log, and the 10 most recent shipments) can be downloaded without credentials by clicking **Download Diagnostics** on the integration card. API keys and passwords are automatically redacted from the download.
+
+---
+
+## Debug mode (dry run)
+
+Debug mode lets you verify that email parsing works without posting anything to parcelapp.net. Enable it via **Settings → Devices & Services → Shop2Parcel → Configure → Debug mode**.
+
+When debug mode is active:
+
+- No parcels are posted to parcelapp.net (all POST calls are suppressed).
+- The Gmail scan window is extended to the maximum (365 days) so historical emails are re-scanned.
+- A persistent notification labelled **Shop2Parcel Debug Mode** appears in the Home Assistant UI after each poll, showing how many emails were scanned that cycle.
+- Activity log events record `dry_run_suppressed` outcomes instead of `posted`.
+- Detailed log lines are emitted at `INFO` level (visible without enabling debug logging) showing the email subject, sender, candidate tokens, and outcome for each inspected message.
+
+Disable debug mode when you are ready to forward real shipments. The persistent notification is dismissed automatically when debug mode is turned off.
+
+---
+
+## Carrier support
+
+Shop2Parcel maps Shopify carrier names to parcelapp.net carrier codes. The following carriers are recognised automatically:
+
+| Shopify carrier name | Parcel carrier code |
+|----------------------|---------------------|
+| UPS | `ups` |
+| FedEx | `fedex` |
+| USPS | `usps` |
+| DHL Express | `dhl` |
+| DHL eCommerce | `dhl` |
+| Canada Post | `cp` |
+| Royal Mail | `rm` |
+| Australia Post | `au` |
+| Japan Post (EN) | `jp` |
+| La Poste | `lp` |
+| PostNL | `tntp` |
+| TNT | `tnt` |
+| GLS | `gls` |
+| DPD | `dpd` |
+| Poste Italiane | `it` |
+
+Carriers not in the table above are mapped to the `pholder` code, which is a valid parcelapp.net placeholder. Tracking status in the Parcel app will be limited for unrecognised carriers, but the shipment will still appear and the API call will succeed.
+
+The carrier matching is case-insensitive.
+
+---
+
+## Troubleshooting
+
+**No shipments appear after setup**
+
+1. Confirm that shipping confirmation emails exist in the monitored inbox. Check the inbox directly and look for emails from `no-reply@shopify.com` with "shipped" in the subject.
+2. In Gmail mode, verify that the search query in **Options** matches those emails. You can paste the query directly into the Gmail search bar to test it.
+3. Enable **Debug mode** (see above) and trigger a manual poll by reloading the integration (**Settings → Devices & Services → Shop2Parcel → three-dot menu → Reload**). Check the `sensor.shop2parcel_emails_returned` and `sensor.shop2parcel_emails_matched` values to narrow down where emails are being dropped.
+4. Download the diagnostics report for a detailed activity log.
+
+**Emails are found but no sensor is created**
+
+The email was parsed but the tracking number was likely already submitted in a previous poll. Check `sensor.shop2parcel_activity_log` attributes for `dry_run_suppressed` or `already_submitted` outcomes. If the sensor was deleted from the entity registry, reload the integration to re-create it.
+
+**Parcel quota exceeded**
+
+When the 20/day limit is reached, the integration logs a warning and stores the quota-exhausted timestamp. No new shipments will be forwarded until midnight UTC. Existing sensor entities continue to update. The quota resets automatically — no action is required.
+
+**Re-authentication required (Gmail)**
+
+If the integration enters a re-auth state (shown as an error on the integration card), click **Re-authenticate** and complete the Google OAuth2 consent flow again. This happens when the refresh token is revoked (e.g., the Google Cloud project is modified or the test user list is changed).
+
+**IMAP connection fails**
+
+- Confirm the hostname, port, and TLS settings. Port 993 uses SSL/TLS; port 143 uses STARTTLS or no TLS.
+- For Gmail IMAP, ensure "Less secure app access" or an app password is configured. Google account 2FA requires an app password.
+- For iCloud, use an app-specific password generated at appleid.apple.com.
