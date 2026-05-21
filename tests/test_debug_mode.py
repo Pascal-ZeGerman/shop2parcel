@@ -162,7 +162,7 @@ async def test_dbg02_gmail_window_override(hass, mock_config_entry):
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
             return_value=([], "q after:X")
         )
@@ -193,6 +193,21 @@ async def test_dbg02_imap_window_override(hass, mock_imap_config_entry):
         },
     )
 
+    # W18/P14-WR-04: dual-candidate strategy — capture BEFORE so we bracket any
+    # second-boundary crossing that occurs during the async poll.
+    from datetime import UTC, datetime
+
+    _IMAP_MONTH_ABBR_LOCAL = (
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    )
+
+    def _to_since_date(ts: int) -> str:
+        dt = datetime.fromtimestamp(ts, tz=UTC)
+        return f"{dt.day:02d}-{_IMAP_MONTH_ABBR_LOCAL[dt.month - 1]}-{dt.year}"
+
+    expected_before = _to_since_date(int(time.time()) - MAX_RESCAN_WINDOW_DAYS * 86400)
+
     with (
         patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
         patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
@@ -203,7 +218,7 @@ async def test_dbg02_imap_window_override(hass, mock_imap_config_entry):
         ),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
 
         coord = ImapCoordinator(hass, mock_imap_config_entry)
@@ -213,20 +228,11 @@ async def test_dbg02_imap_window_override(hass, mock_imap_config_entry):
     call_kwargs = mock_imap_cls.return_value.fetch_shipping_emails.call_args[1]
     since_date_arg = call_kwargs["since_date"]
 
-    # Compute expected 365-day date (allow ±2 seconds of clock drift by checking date portion)
-    from datetime import UTC, datetime
-
-    expected_ts = int(time.time()) - MAX_RESCAN_WINDOW_DAYS * 86400
-    expected_dt = datetime.fromtimestamp(expected_ts, tz=UTC)
-    _IMAP_MONTH_ABBR = (
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    )
-    expected_since_date = (
-        f"{expected_dt.day:02d}-{_IMAP_MONTH_ABBR[expected_dt.month - 1]}-{expected_dt.year}"
-    )
-    assert since_date_arg == expected_since_date, (
-        f"Expected since_date={expected_since_date!r} (365-day lookback), got {since_date_arg!r}"
+    expected_after = _to_since_date(int(time.time()) - MAX_RESCAN_WINDOW_DAYS * 86400)
+    # Accept either candidate (the date computed just before OR just after the poll)
+    assert since_date_arg in {expected_before, expected_after}, (
+        f"Expected since_date in {{{expected_before!r}, {expected_after!r}}} "
+        f"(365-day lookback, dual-candidate), got {since_date_arg!r}"
     )
 
 

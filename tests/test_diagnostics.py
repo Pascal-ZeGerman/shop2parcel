@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+import json
 
 import pytest
 
 from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.const import DOMAIN
 from custom_components.shop2parcel.diagnostics import async_get_config_entry_diagnostics
-from tests.conftest import setup_coordinator_with_data
+from tests.conftest import setup_coordinator_with_data, setup_imap_coordinator_with_data
 
 
-def _make_shipment(msg_id: str) -> ShipmentData:
+def _make_shipment(msg_id: str, email_date: int = 1700000000) -> ShipmentData:
     """Create a minimal ShipmentData for testing."""
     return ShipmentData(
         tracking_number=f"TRK{msg_id}",
         carrier_name="UPS",
         order_name=f"#100{msg_id}",
         message_id=msg_id,
-        email_date=1700000000,
+        email_date=email_date,
     )
 
 
@@ -49,22 +49,7 @@ async def test_diagnostics_config_redaction(hass, mock_config_entry):
 @pytest.mark.asyncio
 async def test_diagnostics_imap_redaction(hass, mock_imap_config_entry):
     """IMAP credentials (imap_password, api_key) must not appear in diagnostic output."""
-    mock_imap_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
-        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        # Phase 10: fetch_shipping_emails returns list[dict], not a tuple
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
-        await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
-        coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
-        coordinator.async_set_updated_data({})
-        await hass.async_block_till_done()
-
+    await setup_imap_coordinator_with_data(hass, mock_imap_config_entry, {})
     result = await async_get_config_entry_diagnostics(hass, mock_imap_config_entry)
     for secret in (
         mock_imap_config_entry.data.get("imap_password", ""),
@@ -85,22 +70,7 @@ async def test_diagnostics_config_gmail(hass, mock_config_entry):
 @pytest.mark.asyncio
 async def test_diagnostics_config_imap(hass, mock_imap_config_entry):
     """IMAP entries report connection_type='imap' and account=imap_username."""
-    mock_imap_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
-        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        # Phase 10: fetch_shipping_emails returns list[dict], not a tuple
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
-        await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
-        coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
-        coordinator.async_set_updated_data({})
-        await hass.async_block_till_done()
-
+    await setup_imap_coordinator_with_data(hass, mock_imap_config_entry, {})
     result = await async_get_config_entry_diagnostics(hass, mock_imap_config_entry)
     assert result["config"]["connection_type"] == "imap"
     assert result["config"]["account"] == "user@example.com"
@@ -108,11 +78,14 @@ async def test_diagnostics_config_imap(hass, mock_imap_config_entry):
 
 @pytest.mark.asyncio
 async def test_diagnostics_recent_shipments_capped(hass, mock_config_entry):
-    """When coordinator.data has 15 entries, recent_shipments is capped at 10."""
-    data = {str(i): _make_shipment(str(i)) for i in range(15)}
+    """When coordinator.data has 15 entries, recent_shipments is capped at 10 most recent."""
+    data = {str(i): _make_shipment(str(i), email_date=1_700_000_000 + i) for i in range(15)}
     await setup_coordinator_with_data(hass, mock_config_entry, data)
     result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
     assert len(result["recent_shipments"]) == 10
+    # W13/P12-WR-03: assert ordering — 10 most recent by email_date (descending)
+    returned_ids = [s["message_id"] for s in result["recent_shipments"]]
+    assert returned_ids == [str(i) for i in range(14, 4, -1)]
 
 
 @pytest.mark.asyncio
@@ -226,3 +199,40 @@ async def test_diagnostics_activity_log_contains_imap_events(hass, mock_config_e
     assert len(result["activity_log"]) == 1
     assert result["activity_log"][0]["message_id"] == "imap:uid123"
     assert result["activity_log"][0]["outcome"] == "posted"
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_full_payload_json_safe(hass, mock_config_entry):
+    """W14/P12-WR-04: the full diagnostics payload is JSON-serialisable (json.dumps does not raise).
+
+    Seeds both coordinator.data with a shipment AND a scan_event into the scan_events ring
+    buffer so all top-level sections (config, poll_stats, activity_log, recent_shipments)
+    are non-empty.  Validates the complete payload, not just poll_stats["scan_events"].
+    """
+    coordinator = await setup_coordinator_with_data(
+        hass, mock_config_entry, {"msg1": _make_shipment("msg1")}
+    )
+    coordinator._diagnostics.scan_events.append(
+        {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message_id": "gmail:msg1",
+            "subject": "Your package has shipped",
+            "sender": "noreply@shopify.com",
+            "strategy": "html_template",
+            "tracking_number": "TRKmsg1",
+            "outcome": "posted",
+        }
+    )
+    coordinator._diagnostics.scan_events_total = 1
+
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+
+    # All four top-level sections must be present and non-empty
+    assert "config" in result
+    assert "poll_stats" in result
+    assert len(result["activity_log"]) == 1
+    assert len(result["recent_shipments"]) == 1
+
+    # The entire payload must be JSON-serialisable (no deque, no non-JSON types)
+    serialized = json.dumps(result)
+    assert len(serialized) > 0
