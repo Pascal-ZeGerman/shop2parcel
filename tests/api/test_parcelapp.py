@@ -137,7 +137,10 @@ async def test_add_delivery_already_added_on_400(client):
         mock.post(
             ADD_DELIVERY_URL,
             status=400,
-            payload={"success": False, "error_message": "You have already added this delivery to the app"},
+            payload={
+                "success": False,
+                "error_message": "You have already added this delivery to the app",
+            },
         )
         with pytest.raises(ParcelAppAlreadyAddedError) as exc_info:
             await client.async_add_delivery("871503132933", "fedex", "Order #STUCK")

@@ -150,9 +150,7 @@ async def test_dbg02_gmail_window_override(hass, mock_config_entry):
         patch(
             "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
         ) as mock_oauth,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
@@ -162,9 +160,7 @@ async def test_dbg02_gmail_window_override(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=([], "q after:X")
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:X"))
 
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
@@ -197,8 +193,18 @@ async def test_dbg02_imap_window_override(hass, mock_imap_config_entry):
     from datetime import UTC, datetime
 
     _IMAP_MONTH_ABBR_LOCAL = (
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
     )
 
     def _to_since_date(ts: int) -> str:
@@ -212,9 +218,7 @@ async def test_dbg02_imap_window_override(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
         patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.imap_coordinator.persistent_notification"),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
@@ -260,9 +264,7 @@ async def test_dbg03_gmail_dedup_bypass(hass, mock_config_entry):
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
             return_value="<html>body</html>",
         ),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
@@ -284,6 +286,7 @@ async def test_dbg03_gmail_dedup_bypass(hass, mock_config_entry):
         await coord._async_load_store()
         # Pre-seed the tracking number that would trigger dedup in non-debug mode
         from custom_components.shop2parcel.const import normalize_tracking_number
+
         coord._submitted_tracking_numbers[normalize_tracking_number("1Z999AA10123456784")] = None
         await coord._async_update_data()
 
@@ -326,9 +329,7 @@ async def test_dbg03_imap_dedup_bypass(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
         patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.imap_coordinator.persistent_notification"),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
@@ -341,6 +342,7 @@ async def test_dbg03_imap_dedup_bypass(hass, mock_imap_config_entry):
         await coord._async_load_store()
         # Pre-seed the tracking number
         from custom_components.shop2parcel.const import normalize_tracking_number
+
         coord._submitted_tracking_numbers[normalize_tracking_number("1Z999AA10123456784")] = None
         await coord._async_update_data()
 
@@ -380,9 +382,7 @@ async def test_debug_mode_does_not_clear_stale_quota_gmail(hass, mock_config_ent
         patch(
             "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
         ) as mock_oauth,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
@@ -393,9 +393,7 @@ async def test_debug_mode_does_not_clear_stale_quota_gmail(hass, mock_config_ent
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         delay_save_mock = MagicMock()
         mock_store_cls.return_value.async_delay_save = delay_save_mock
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=([], "q after:X")
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:X"))
 
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
@@ -432,9 +430,7 @@ async def test_debug_mode_does_not_clear_stale_quota_imap(hass, mock_imap_config
         patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
         patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.imap_coordinator.persistent_notification"),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         delay_save_mock = MagicMock()
@@ -481,9 +477,7 @@ async def test_dbg04_gmail_no_post(hass, mock_config_entry):
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
             return_value="<html>body</html>",
         ),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
@@ -542,9 +536,7 @@ async def test_dbg04_imap_no_post(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.imap_coordinator.persistent_notification"),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -594,9 +586,7 @@ async def test_dbg05_gmail_info_log(hass, mock_config_entry, caplog):
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
             return_value="<html>body</html>",
         ),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
@@ -632,8 +622,7 @@ async def test_dbg05_gmail_info_log(hass, mock_config_entry, caplog):
             await coord._async_update_data()
 
     debug_records = [
-        r for r in caplog.records
-        if "[Shop2Parcel DEBUG]" in r.message and r.levelname == "DEBUG"
+        r for r in caplog.records if "[Shop2Parcel DEBUG]" in r.message and r.levelname == "DEBUG"
     ]
     assert len(debug_records) >= 1, (
         f"Expected at least 1 [Shop2Parcel DEBUG] DEBUG record, got 0. Records: {[r.message for r in caplog.records]}"
@@ -676,9 +665,7 @@ async def test_dbg05_imap_info_log(hass, mock_imap_config_entry, caplog):
         patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
         patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.persistent_notification"
-        ),
+        patch("custom_components.shop2parcel.imap_coordinator.persistent_notification"),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -696,8 +683,7 @@ async def test_dbg05_imap_info_log(hass, mock_imap_config_entry, caplog):
             await coord._async_update_data()
 
     debug_records = [
-        r for r in caplog.records
-        if "[Shop2Parcel DEBUG]" in r.message and r.levelname == "DEBUG"
+        r for r in caplog.records if "[Shop2Parcel DEBUG]" in r.message and r.levelname == "DEBUG"
     ]
     assert len(debug_records) >= 1, (
         f"Expected at least 1 [Shop2Parcel DEBUG] DEBUG record for IMAP, got 0. Records: {[r.message for r in caplog.records]}"
@@ -730,9 +716,7 @@ async def test_dbg06_gmail_notification(hass, mock_config_entry):
         patch(
             "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
         ) as mock_oauth,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.persistent_notification"
-        ) as mock_pn,
+        patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification") as mock_pn,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
@@ -742,9 +726,7 @@ async def test_dbg06_gmail_notification(hass, mock_config_entry):
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=([], "q after:X")
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:X"))
 
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
@@ -755,9 +737,9 @@ async def test_dbg06_gmail_notification(hass, mock_config_entry):
             f"Expected async_create call_count=1, got {mock_pn.async_create.call_count}"
         )
         create_kwargs = mock_pn.async_create.call_args[1]
-        assert create_kwargs["notification_id"] == debug_mode_notification_id(mock_config_entry.entry_id), (
-            f"Expected per-entry notification_id, got {create_kwargs['notification_id']!r}"
-        )
+        assert create_kwargs["notification_id"] == debug_mode_notification_id(
+            mock_config_entry.entry_id
+        ), f"Expected per-entry notification_id, got {create_kwargs['notification_id']!r}"
         assert create_kwargs["title"] == "Shop2Parcel Debug Mode", (
             f"Expected title='Shop2Parcel Debug Mode', got {create_kwargs['title']!r}"
         )
@@ -780,7 +762,9 @@ async def test_dbg06_gmail_notification(hass, mock_config_entry):
             f"Expected async_dismiss call_count=1 when debug_mode=False, got {mock_pn.async_dismiss.call_count}"
         )
         dismiss_kwargs = mock_pn.async_dismiss.call_args[1]
-        assert dismiss_kwargs["notification_id"] == debug_mode_notification_id(normal_entry.entry_id)
+        assert dismiss_kwargs["notification_id"] == debug_mode_notification_id(
+            normal_entry.entry_id
+        )
 
 
 async def test_dbg06_imap_notification(hass, mock_imap_config_entry):
@@ -800,9 +784,7 @@ async def test_dbg06_imap_notification(hass, mock_imap_config_entry):
         patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
         patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.persistent_notification"
-        ) as mock_pn,
+        patch("custom_components.shop2parcel.imap_coordinator.persistent_notification") as mock_pn,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -816,9 +798,9 @@ async def test_dbg06_imap_notification(hass, mock_imap_config_entry):
             f"Expected async_create call_count=1, got {mock_pn.async_create.call_count}"
         )
         create_kwargs = mock_pn.async_create.call_args[1]
-        assert create_kwargs["notification_id"] == debug_mode_notification_id(mock_imap_config_entry.entry_id), (
-            f"Expected per-entry notification_id, got {create_kwargs['notification_id']!r}"
-        )
+        assert create_kwargs["notification_id"] == debug_mode_notification_id(
+            mock_imap_config_entry.entry_id
+        ), f"Expected per-entry notification_id, got {create_kwargs['notification_id']!r}"
         assert create_kwargs["title"] == "Shop2Parcel Debug Mode"
         assert "dry-run mode" in create_kwargs["message"]
 
@@ -840,7 +822,9 @@ async def test_dbg06_imap_notification(hass, mock_imap_config_entry):
             f"Expected async_dismiss call_count=1 when debug_mode=False, got {mock_pn.async_dismiss.call_count}"
         )
         dismiss_kwargs = mock_pn.async_dismiss.call_args[1]
-        assert dismiss_kwargs["notification_id"] == debug_mode_notification_id(normal_imap_entry.entry_id)
+        assert dismiss_kwargs["notification_id"] == debug_mode_notification_id(
+            normal_imap_entry.entry_id
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -858,9 +842,7 @@ async def test_async_remove_entry_dismisses_debug_notification(hass, mock_config
         options={CONF_DEBUG_MODE: True},
     )
 
-    with patch(
-        "homeassistant.components.persistent_notification.async_dismiss"
-    ) as mock_dismiss:
+    with patch("homeassistant.components.persistent_notification.async_dismiss") as mock_dismiss:
         await async_remove_entry(hass, mock_config_entry)
 
     mock_dismiss.assert_called_once_with(

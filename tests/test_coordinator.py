@@ -2459,9 +2459,7 @@ async def test_load_store_debug_log(hass, mock_config_entry, caplog):
         coord = GmailCoordinator(hass, mock_config_entry)
         with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
             await coord._async_load_store()
-    debug_messages = " ".join(
-        r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
-    )
+    debug_messages = " ".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
     assert "Loaded 3 submitted tracking numbers from store" in debug_messages
 
 
@@ -2481,9 +2479,7 @@ async def test_save_store_debug_log(hass, mock_config_entry, caplog):
         coord._submitted_tracking_numbers = OrderedDict([("TN_A", None), ("TN_B", None)])
         with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
             await coord._async_save_store()
-    debug_messages = " ".join(
-        r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
-    )
+    debug_messages = " ".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
     assert "Scheduled debounced save for 2 submitted tracking numbers" in debug_messages
 
 
@@ -2773,8 +2769,15 @@ async def test_emit_scan_event_shape_and_counter(hass, mock_config_entry):
     assert coord._diagnostics.scan_events_total == 1
     event = coord._diagnostics.scan_events[-1]
     # Must have exactly the seven contract keys (plus no extras)
-    assert set(event.keys()) == {"timestamp", "message_id", "subject", "sender",
-                                  "strategy", "tracking_number", "outcome"}
+    assert set(event.keys()) == {
+        "timestamp",
+        "message_id",
+        "subject",
+        "sender",
+        "strategy",
+        "tracking_number",
+        "outcome",
+    }
     assert event["message_id"] == "gmail:m1"
     assert event["subject"] == "S"
     assert event["sender"] == "F"
@@ -2832,7 +2835,9 @@ async def test_scan_event_gmail_invalid_internal_date_emits_event(hass, mock_con
         await coord._async_load_store()
         await coord._async_update_data()
 
-    events = [e for e in coord._diagnostics.scan_events if e.get("outcome") == "invalid_internal_date"]
+    events = [
+        e for e in coord._diagnostics.scan_events if e.get("outcome") == "invalid_internal_date"
+    ]
     assert len(events) == 1
     assert events[0]["message_id"] == "gmail:msg1"
 
@@ -2876,7 +2881,9 @@ async def test_scan_event_gmail_parcelapp_quota_emits_event(hass, mock_config_en
         await coord._async_load_store()
         await coord._async_update_data()
 
-    events = [e for e in coord._diagnostics.scan_events if e.get("outcome") == "quota_exhausted_now"]
+    events = [
+        e for e in coord._diagnostics.scan_events if e.get("outcome") == "quota_exhausted_now"
+    ]
     assert len(events) == 1
     assert events[0]["message_id"] == "gmail:msg1"
 
@@ -2995,7 +3002,9 @@ async def test_scan_event_imap_parcelapp_quota_emits_event(hass, mock_imap_confi
         await coord._async_load_store()
         await coord._async_update_data()
 
-    events = [e for e in coord._diagnostics.scan_events if e.get("outcome") == "quota_exhausted_now"]
+    events = [
+        e for e in coord._diagnostics.scan_events if e.get("outcome") == "quota_exhausted_now"
+    ]
     assert len(events) == 1
     assert events[0]["message_id"] == "imap:100"
 
@@ -3093,9 +3102,7 @@ async def test_parse_exception_error_msg_strips_html_tags(hass, mock_config_entr
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
         # Parser raises with HTML-containing message
-        mock_parser_cls.return_value.parse.side_effect = ValueError(
-            "<html>oops</html>"
-        )
+        mock_parser_cls.return_value.parse.side_effect = ValueError("<html>oops</html>")
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         await coord._async_update_data()
@@ -3122,9 +3129,7 @@ async def test_extract_email_meta_returns_defaults_on_malformed_input(hass, mock
     assert result == {"subject": "", "from": "", "date": "", "snippet": ""}
 
 
-async def test_scan_events_total_equals_emails_scanned_total_in_full_cycle(
-    hass, mock_config_entry
-):
+async def test_scan_events_total_equals_emails_scanned_total_in_full_cycle(hass, mock_config_entry):
     """Invariant: scan_events_total == emails_scanned_total after a full poll cycle.
 
     Verifies that every code path (no_html_body, error, no_match, skipped_dedup,
