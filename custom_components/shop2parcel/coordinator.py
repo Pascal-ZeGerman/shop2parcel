@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import email as _email_stdlib
 import logging
+import re
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -49,29 +50,47 @@ STORAGE_VERSION = 2
 
 
 def _extract_email_meta(msg: dict) -> dict:
-    """Extract subject, from, date, and snippet from a Gmail message dict."""
-    headers = {
-        h["name"]: h["value"]
-        for h in msg.get("payload", {}).get("headers", [])
-        if "name" in h and "value" in h
-    }
-    return {
-        "subject": headers.get("Subject", ""),
-        "from": headers.get("From", ""),
-        "date": headers.get("Date", ""),
-        "snippet": msg.get("snippet", ""),
-    }
+    """Extract subject, from, date, and snippet from a Gmail message dict.
+
+    Returns safe defaults on any extraction failure (W10/P11-WR-05): a
+    malformed encoded-word header can raise LookupError (unknown codec).
+    Wrapping here prevents a single bad email from crashing the whole poll.
+    """
+    try:
+        headers = {
+            h["name"]: h["value"]
+            for h in msg.get("payload", {}).get("headers", [])
+            if "name" in h and "value" in h
+        }
+        return {
+            "subject": headers.get("Subject", ""),
+            "from": headers.get("From", ""),
+            "date": headers.get("Date", ""),
+            "snippet": msg.get("snippet", ""),
+        }
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Failed to extract email meta: %s", err)
+        return {"subject": "", "from": "", "date": "", "snippet": ""}
 
 
 def _extract_imap_email_meta(raw_bytes: bytes) -> dict:
-    """Extract subject, from, and date from raw IMAP message bytes."""
-    msg = _email_stdlib.message_from_bytes(raw_bytes)
-    return {
-        "subject": msg.get("Subject", "") or "",
-        "from": msg.get("From", "") or "",
-        "date": msg.get("Date", "") or "",
-        "snippet": "",
-    }
+    """Extract subject, from, and date from raw IMAP message bytes.
+
+    Returns safe defaults on any extraction failure (W10/P11-WR-05): a
+    malformed encoded-word header can raise LookupError (unknown codec).
+    Wrapping here prevents a single bad email from crashing the whole poll.
+    """
+    try:
+        msg = _email_stdlib.message_from_bytes(raw_bytes)
+        return {
+            "subject": msg.get("Subject", "") or "",
+            "from": msg.get("From", "") or "",
+            "date": msg.get("Date", "") or "",
+            "snippet": "",
+        }
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Failed to extract email meta: %s", err)
+        return {"subject": "", "from": "", "date": "", "snippet": ""}
 
 
 def _next_midnight_utc() -> int:
@@ -88,6 +107,24 @@ def _next_midnight_utc() -> int:
             tzinfo=UTC,
         ).timestamp()
     )
+
+
+def _sanitise_parser_error(err: BaseException) -> str:
+    """Return a safe, HTML-stripped, 100-char slice of a parser exception message.
+
+    Closes W9/P11-WR-04: parser exceptions from BeautifulSoup can contain raw
+    HTML excerpts from the offending email body.  Storing raw ``str(err)`` puts
+    up to 100 chars of arbitrary email content (potentially PII) into the
+    in-memory ring buffer and diagnostics JSON download.
+
+    Steps:
+      1. Strip all HTML tags (``<...>``) to prevent body content leakage.
+      2. Collapse whitespace runs to single spaces for readability.
+      3. Slice to 100 codepoints (not bytes) to prevent mid-grapheme truncation.
+    """
+    sanitised = re.sub(r"<[^>]*>", "", str(err))
+    sanitised = re.sub(r"\s+", " ", sanitised).strip()
+    return sanitised[:100]
 
 
 @dataclass(slots=True)

@@ -520,13 +520,16 @@ async def test_dbg05_gmail_info_log(hass, mock_config_entry, caplog):
         await coord._async_load_store()
 
         with caplog.at_level(
-            logging.INFO, logger="custom_components.shop2parcel.gmail_coordinator"
+            logging.DEBUG, logger="custom_components.shop2parcel.gmail_coordinator"
         ):
             await coord._async_update_data()
 
-    debug_records = [r for r in caplog.records if "[Shop2Parcel DEBUG]" in r.message]
+    debug_records = [
+        r for r in caplog.records
+        if "[Shop2Parcel DEBUG]" in r.message and r.levelname == "DEBUG"
+    ]
     assert len(debug_records) >= 1, (
-        f"Expected at least 1 [Shop2Parcel DEBUG] INFO record, got 0. Records: {[r.message for r in caplog.records]}"
+        f"Expected at least 1 [Shop2Parcel DEBUG] DEBUG record, got 0. Records: {[r.message for r in caplog.records]}"
     )
     # All four required fields must appear in at least one record
     combined = " ".join(r.message for r in debug_records)
@@ -581,13 +584,16 @@ async def test_dbg05_imap_info_log(hass, mock_imap_config_entry, caplog):
         await coord._async_load_store()
 
         with caplog.at_level(
-            logging.INFO, logger="custom_components.shop2parcel.imap_coordinator"
+            logging.DEBUG, logger="custom_components.shop2parcel.imap_coordinator"
         ):
             await coord._async_update_data()
 
-    debug_records = [r for r in caplog.records if "[Shop2Parcel DEBUG]" in r.message]
+    debug_records = [
+        r for r in caplog.records
+        if "[Shop2Parcel DEBUG]" in r.message and r.levelname == "DEBUG"
+    ]
     assert len(debug_records) >= 1, (
-        f"Expected at least 1 [Shop2Parcel DEBUG] INFO record for IMAP, got 0. Records: {[r.message for r in caplog.records]}"
+        f"Expected at least 1 [Shop2Parcel DEBUG] DEBUG record for IMAP, got 0. Records: {[r.message for r in caplog.records]}"
     )
     combined = " ".join(r.message for r in debug_records)
     assert "subject=" in combined, "Expected 'subject=' in IMAP [Shop2Parcel DEBUG] log"
