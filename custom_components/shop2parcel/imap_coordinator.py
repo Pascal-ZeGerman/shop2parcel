@@ -389,8 +389,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 quota_blocked = True
                 continue
             except ParcelAppAlreadyAddedError:
-                normalized_for_suppress = normalize_tracking_number(shipment.tracking_number)
-                self._submitted_tracking_numbers[normalized_for_suppress] = None
+                self._submitted_tracking_numbers[normalized] = None
                 if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                     self._submitted_tracking_numbers.popitem(last=False)
                 await self._async_save_store()
@@ -415,8 +414,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     err,
                 )
                 # Record normalized tracking number to suppress infinite retries.
-                normalized_for_suppress = normalize_tracking_number(shipment.tracking_number)
-                self._submitted_tracking_numbers[normalized_for_suppress] = None
+                self._submitted_tracking_numbers[normalized] = None
                 if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                     self._submitted_tracking_numbers.popitem(last=False)
                 await self._async_save_store()
