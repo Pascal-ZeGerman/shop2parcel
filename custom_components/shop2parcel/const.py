@@ -63,6 +63,24 @@ MAX_SUBMITTED_TRACKING_NUMBERS = 1000
 # Phase 14 (DBG-01): debug/dry-run mode toggle; stored in entry.options.
 CONF_DEBUG_MODE = "debug_mode"
 
+# Phase 14 (WR-03): per-entry notification ID prefix.
+# Using a per-entry suffix prevents notification collision when multiple
+# Shop2Parcel config entries exist (e.g., one Gmail + one IMAP account).
+# The helper below builds the full notification_id for a given entry_id.
+DEBUG_MODE_NOTIFICATION_ID_PREFIX = "shop2parcel_debug_mode"
+
+
+def debug_mode_notification_id(entry_id: str) -> str:
+    """Return the persistent-notification ID scoped to a single config entry.
+
+    Using a per-entry suffix prevents notification collision when multiple
+    Shop2Parcel config entries coexist (P14-WR-03).  The prefix alone
+    (``shop2parcel_debug_mode``) was the pre-fix value — callers must now
+    use this helper so HA's notification store keeps each entry's banner
+    separate.
+    """
+    return f"{DEBUG_MODE_NOTIFICATION_ID_PREFIX}_{entry_id}"
+
 
 def normalize_tracking_number(tracking_number: str) -> str:
     """Normalize a tracking number for dedup comparison.
