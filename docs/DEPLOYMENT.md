@@ -16,81 +16,129 @@ HACS reads `manifest.json` for the integration version and `hacs.json` for the m
 
 ---
 
-## CI/CD Pipeline
+## CI/CD Workflows
 
-All five workflows run on every push and pull request. The release workflow additionally triggers on version tags.
+The repository has five GitHub Actions workflows. Their triggers differ — they are documented individually below.
 
-### Pull request and push checks
+### pytest + lint (`pytest.yml`)
 
-| Workflow | File | Trigger | What it does |
-|----------|------|---------|--------------|
-| pytest + lint | `.github/workflows/pytest.yml` | Push / PR (all branches) | Runs `pytest tests/ -v --tb=short`, then `ruff check`, `ruff format --check`, and `mypy custom_components/shop2parcel/` — all under Python 3.14. |
-| hassfest | `.github/workflows/hassfest.yml` | Push / PR (all branches) | Validates `manifest.json` using the official `home-assistant/actions/hassfest` action. |
-| HACS Action | `.github/workflows/hacs.yml` | Push / PR (all branches) | Validates HACS repository structure (file layout, `hacs.json` integrity, category `integration`). |
-| CodeQL | `.github/workflows/codeql.yml` | Push / PR (all branches) + scheduled weekly Monday 03:00 UTC | Static security analysis using the `security-and-quality` query suite on Python. |
+**Triggers:** `push` to any branch, `pull_request` to any branch.
 
-### Release workflow
+Runs two parallel jobs under Python 3.14:
 
-| Workflow | File | Trigger |
-|----------|------|---------|
-| Release | `.github/workflows/release.yml` | Push of a `v*` tag |
+- **pytest** — installs `.[dev]` and runs `python -m pytest tests/ -v --tb=short`.
+- **ruff + mypy** — installs `.[dev]` plus `ruff` and `mypy`, then runs `ruff check .`, `ruff format --check .`, and `mypy custom_components/shop2parcel/`.
 
-**Steps executed by the release workflow:**
+Both jobs must pass before a PR can be merged.
 
-1. Check out the repository at the pushed tag (full history with `fetch-depth: 0`).
-2. Validate that `manifest.json` `.version` matches the tag name (without the leading `v`). The workflow exits with a non-zero status if they diverge.
-3. Detect whether the tag is a pre-release: tags containing `-rc`, `-beta`, or `-alpha` are automatically published as GitHub pre-releases.
-4. Create a GitHub release using `softprops/action-gh-release@v2.3.2` with auto-generated release notes appended to a fixed body template.
+### hassfest (`hassfest.yml`)
+
+**Triggers:** `push` to any branch, `pull_request` to any branch.
+
+Runs `home-assistant/actions/hassfest@master` to validate `manifest.json` and related integration metadata files against official Home Assistant requirements.
+
+### HACS Action (`hacs.yml`)
+
+**Triggers:** `push` to any branch, `pull_request` to any branch.
+
+Runs `hacs/action@22.5.0` with `category: integration` and `ignore: brands`. Validates that the repository structure meets HACS distribution requirements (presence of `hacs.json`, correct `custom_components/` layout, etc.).
+
+### CodeQL (`codeql.yml`)
+
+**Triggers:** `push` to any branch, `pull_request` to any branch, **plus a weekly schedule** (`cron: "0 3 * * 1"` — Mondays at 03:00 UTC).
+
+Runs GitHub's CodeQL static analysis on the Python codebase using the `security-and-quality` query suite. <!-- VERIFY: CodeQL results appear in the repository Security tab — requires GitHub Advanced Security to be enabled on the repo -->
+
+### Release (`release.yml`)
+
+**Triggers:** `push` of a tag matching `v*` only. This workflow does **not** run on branch pushes or pull requests.
+
+Steps executed by the release workflow:
+
+1. Check out the repository at the pushed tag (full history, `fetch-depth: 0`).
+2. Validate that `custom_components/shop2parcel/manifest.json` `.version` matches the tag name with the leading `v` stripped. The workflow exits non-zero if they diverge.
+3. Detect whether the tag is a pre-release: the tag name is tested for the substrings `-rc`, `-beta`, and `-alpha`. If any match, `is_prerelease=true` is set.
+4. Create a GitHub release using `softprops/action-gh-release@v2.3.2` with `generate_release_notes: true`, `draft: false`, and the pre-release flag from the previous step.
 
 ---
 
 ## Release Process
 
-Follow these steps in order. Tagging before the manifest version is updated will fail the release workflow at step 2.
+Follow these steps in order. Tagging before the manifest version is updated will cause the release workflow to fail at step 2 with an explicit error message.
 
-1. **Bump version in both files** — edit `custom_components/shop2parcel/manifest.json` `.version` to the new version string. The `pyproject.toml` `version` field is used only by dev tooling and must be kept in sync manually, but HACS and HA only read `manifest.json`.
+### Step 1 — Bump `manifest.json` version in a PR
 
-2. **Open and merge a PR** — the pytest, hassfest, HACS, and CodeQL checks must all pass. Do not tag from a feature branch.
+Edit `custom_components/shop2parcel/manifest.json` and set the `version` field to the new version string (no leading `v`):
 
-3. **Tag the merged commit:**
+```json
+{
+  "version": "1.2.0"
+}
+```
 
-   ```bash
-   git fetch origin main
-   git tag vX.Y.Z origin/main
-   git push origin vX.Y.Z
-   ```
+Open a PR, wait for all four branch-triggered checks (pytest, hassfest, HACS, CodeQL) to pass, then merge to `main`.
 
-4. **Verify the release workflow** completes successfully in the Actions tab. A GitHub release is created automatically with notes generated from commits since the previous tag.
+### Step 2 — Push the tag
 
-**Pre-releases:** Any tag containing `-rc`, `-beta`, or `-alpha` (e.g., `v1.2.0-rc1`) is automatically published as a GitHub pre-release. HACS shows pre-releases only when the user opts in to experimental versions.
+After the PR is merged:
 
-**Recovery — if you tag before bumping the manifest:**
+```bash
+git fetch origin main
+git tag vX.Y.Z origin/main
+git push origin vX.Y.Z
+```
 
-1. Open a hotfix PR that bumps only `manifest.json` (and `pyproject.toml`) to the target version.
+The `release.yml` workflow fires automatically on the tag push, validates the manifest match, and creates the GitHub release with auto-generated notes.
+
+### Pre-release Tags
+
+Tags containing `-rc`, `-beta`, or `-alpha` anywhere in the tag name are automatically published as GitHub pre-releases. No manual flag is needed.
+
+| Tag example | Pre-release? |
+|-------------|-------------|
+| `v1.2.0` | No |
+| `v1.2.0-rc1` | Yes |
+| `v1.2.0-beta` | Yes |
+| `v1.2.0-alpha.3` | Yes |
+
+HACS shows pre-releases only when the user opts in to experimental/pre-release installs in HACS settings.
+
+### Recovery — If You Tag Before Bumping the Manifest
+
+The release workflow will fail with:
+
+```
+ERROR: manifest.json version (X.Y.Z) does not match tag (A.B.C)
+Bump manifest.json version to A.B.C before tagging.
+```
+
+To recover:
+
+1. Open a hotfix PR that bumps only `manifest.json` `version` to the target version.
 2. Merge the PR to `main`.
 3. Delete the premature tag locally and on the remote:
    ```bash
-   git tag -d vX.Y.Z
-   git push origin :refs/tags/vX.Y.Z
+   git tag -d vA.B.C
+   git push origin :refs/tags/vA.B.C
    ```
 4. Re-push the tag pointing at the new `main` HEAD:
    ```bash
    git fetch origin main
-   git tag vX.Y.Z origin/main
-   git push origin vX.Y.Z
+   git tag vA.B.C origin/main
+   git push origin vA.B.C
    ```
 
 ---
 
 ## Environment Setup
 
-Shop2Parcel has no server-side environment to configure. All credentials are entered by the end user through the Home Assistant UI during integration setup.
+Shop2Parcel has no server-side environment to configure. All credentials are entered by the end user through the Home Assistant UI during integration setup and stored in HA's encrypted config entry storage.
 
 For the full list of configuration fields and their storage model, see [CONFIGURATION.md](CONFIGURATION.md).
 
 The only external services the integration calls at runtime are:
 
-- **Google Gmail API** — authenticated via OAuth2 tokens stored in the HA config entry.
+- **Google Gmail API** — authenticated via OAuth2 tokens stored in the HA config entry (Gmail connection type only).
 - **parcelapp.net API** — authenticated via the user's API key stored in the HA config entry.
 
 <!-- VERIFY: parcelapp.net API base URL and required scopes -->
@@ -100,14 +148,14 @@ The only external services the integration calls at runtime are:
 
 ## Rollback Procedure
 
-HACS retains the previously installed version in its download cache. To roll back:
+HACS supports selecting a previous release version during a redownload:
 
-1. In HA, go to **Settings > Devices & Services > Integrations** and note the current integration version.
+1. In HA, go to **Settings > Devices & Services** and note the current version shown on the Shop2Parcel tile.
 2. In HACS, navigate to the Shop2Parcel integration page and select **Redownload**.
 3. Choose the previous release version from the version dropdown.
 4. Restart Home Assistant when prompted.
 
-Alternatively, re-tag the last known-good commit and push it — HACS users who refresh will see the new (reverted) release.
+Alternatively, delete and re-push the last known-good tag if you need to restore a specific release artifact on GitHub. <!-- VERIFY: HACS version picker allows selecting any previously published release tag -->
 
 ---
 
@@ -127,6 +175,6 @@ This integration runs inside the Home Assistant process. Observability uses HA's
 
 - **Debug mode option** — When `debug_mode` is enabled in the integration options, tracking numbers are logged and a persistent HA notification is displayed instead of posting to parcelapp.net. Useful for validating email parsing without consuming the parcelapp.net add-delivery quota.
 
-- **GitHub CodeQL** — Automated weekly security scans run against the `main` branch. Results appear in the repository's Security tab.
+- **GitHub CodeQL** — Automated weekly security scans run against the default branch every Monday at 03:00 UTC. Results appear in the repository's Security tab. <!-- VERIFY: GitHub repository Security tab URL for CodeQL results -->
 
-<!-- VERIFY: GitHub repository Security tab URL for CodeQL results -->
+No external APM, Sentry, Datadog, or alerting service is configured in the integration.

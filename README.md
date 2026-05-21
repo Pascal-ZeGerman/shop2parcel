@@ -1,3 +1,4 @@
+<!-- generated-by: gsd-doc-writer -->
 [![pytest](https://github.com/Pascal-ZeGerman/shop2parcel/actions/workflows/pytest.yml/badge.svg)](https://github.com/Pascal-ZeGerman/shop2parcel/actions/workflows/pytest.yml)
 [![hassfest](https://github.com/Pascal-ZeGerman/shop2parcel/actions/workflows/hassfest.yml/badge.svg)](https://github.com/Pascal-ZeGerman/shop2parcel/actions/workflows/hassfest.yml)
 [![hacs](https://github.com/Pascal-ZeGerman/shop2parcel/actions/workflows/hacs.yml/badge.svg)](https://github.com/Pascal-ZeGerman/shop2parcel/actions/workflows/hacs.yml)
@@ -10,10 +11,10 @@ A Home Assistant custom integration that monitors your email inbox (Gmail OAuth2
 ## What it does
 
 1. Polls your email inbox on a configurable schedule (default: every 30 minutes) via Gmail OAuth2 or IMAP.
-2. Finds Shopify shipping confirmation emails (from `no-reply@shopify.com`, subject contains "shipped").
+2. Finds shipping notification emails from multiple carriers and senders (Shopify, UPS, USPS, FedEx) matching multiple subject keywords (shipped, delivered, tracking, package, shipment).
 3. Extracts the tracking number and carrier from the email.
 4. Posts the shipment to parcelapp.net via its API so you can track it in the Parcel app.
-5. Creates a `sensor.shop2parcel_<order_number>` entity in Home Assistant showing current shipment status.
+5. Creates a `sensor.shop2parcel_shipment_<order_name>` entity in Home Assistant showing current shipment status.
 
 ## Prerequisites
 
@@ -112,8 +113,8 @@ After the integration is configured you can adjust settings via **Settings → D
 | Option | Default | Notes |
 |--------|---------|-------|
 | Poll interval (minutes) | 30 | How often to check the inbox. Minimum 5 minutes. |
-| Gmail search query | `from:no-reply@shopify.com subject:shipped` | (Gmail only) Advanced: customise the Gmail filter for non-standard senders. |
-| IMAP search criteria | `SUBJECT "shipped"` | (IMAP only) Standard IMAP SEARCH criteria string for filtering messages. |
+| Gmail search query | `(from:no-reply@shopify.com OR from:mcinfo@ups.com OR from:inform@informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR from:TrackingUpdates@fedex.com) subject:(shipped OR delivered OR tracking OR package) OR -label:spam subject:(tracking OR shipped OR shipment OR delivery OR parcel)` | (Gmail only) Advanced: customise the Gmail filter for non-standard senders. |
+| IMAP search criteria | `OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "shipment"` | (IMAP only) Standard IMAP SEARCH criteria string for filtering messages. |
 
 ---
 
@@ -122,8 +123,8 @@ After the integration is configured you can adjust settings via **Settings → D
 Each tracked shipment creates a sensor:
 
 - **Entity ID:** `sensor.shop2parcel_<order_number>`
-- **State:** `in_transit`, `delivered`, or `unknown`
-- **Attributes:** `tracking_number`, `carrier`, `order_number`, `tracking_url`
+- **State:** `in_transit`
+- **Attributes:** `order_name`, `tracking_number`, `carrier`, `email_date`
 
 Delivered shipments are removed from the sensor list automatically after 24 hours.
 
@@ -221,7 +222,7 @@ The carrier matching is case-insensitive.
 
 **Emails are found but no sensor is created**
 
-The email was parsed but the tracking number was likely already submitted in a previous poll. Check `sensor.shop2parcel_activity_log` attributes for `dry_run_suppressed` or `already_submitted` outcomes. If the sensor was deleted from the entity registry, reload the integration to re-create it.
+The email was parsed but the tracking number was likely already submitted in a previous poll. Check `sensor.shop2parcel_activity_log` attributes for `dry_run_suppressed` or `already_added` outcomes. If the sensor was deleted from the entity registry, reload the integration to re-create it.
 
 **Parcel quota exceeded**
 
@@ -236,3 +237,32 @@ If the integration enters a re-auth state (shown as an error on the integration 
 - Confirm the hostname, port, and TLS settings. Port 993 uses SSL/TLS; port 143 uses STARTTLS or no TLS.
 - For Gmail IMAP, ensure "Less secure app access" or an app password is configured. Google account 2FA requires an app password.
 - For iCloud, use an app-specific password generated at appleid.apple.com.
+
+---
+
+## Direct carrier email support
+
+In addition to Shopify merchant emails, Shop2Parcel can parse shipping notification emails sent directly by UPS, USPS, and FedEx. These emails arrive separately from Shopify (e.g. from `mcinfo@ups.com` or `TrackingUpdates@fedex.com`) and do not contain a Shopify order number — the resulting sensor will have an empty order name but a valid tracking number.
+
+The parser detects which carrier sent the email by inspecting the HTML content, then applies a carrier-specific extraction strategy before falling back to the general Shopify template parser:
+
+| Carrier | Detection marker | Tracking format |
+|---------|-----------------|-----------------|
+| UPS | `ups.com` present in HTML (Shopify absent) | `1Z` followed by 16 alphanumeric characters |
+| USPS | `usps.com` present in HTML (Shopify absent) | 17–26 digit number starting with `91`–`95` |
+| FedEx | `fedex.com` present in HTML (Shopify absent) | 12-digit (Express), 15-digit (Ground), or 20-digit (SmartPost) number |
+
+The Gmail default search query already includes these carrier sender addresses so no configuration change is required to receive direct carrier emails via Gmail. For IMAP accounts, extend the **IMAP search criteria** option to include the carrier subjects you want to capture (e.g. add `SUBJECT "out for delivery"` or `SUBJECT "scheduled for delivery"`).
+
+Tracking numbers found in carrier emails that appear only inside link URLs (e.g. `?trknbr=` query parameters) are extracted automatically via an href fallback scan.
+
+---
+
+## Advanced options
+
+Two additional options are available via **Settings → Devices & Services → Shop2Parcel → Configure** that are not shown in the main Options table above:
+
+| Option | Default | Range | Applies to | Notes |
+|--------|---------|-------|------------|-------|
+| Rescan window (days) | 30 | 7–365 | Gmail only | How far back the Gmail `after:` filter looks on each poll. Increasing this value causes older emails to be re-scanned but does NOT re-submit already-forwarded tracking numbers — deduplication is based on the submitted tracking number, not the email date. Useful if you believe recent emails were missed. |
+| Enable broad scan | Off | On/Off | Gmail and IMAP | When enabled, a third parsing tier runs after the HTML template and keyword-regex strategies both fail. It sweeps all alphanumeric tokens from the full email text and URLs, returning the longest match that looks like a tracking number. This maximises recall for non-standard email templates but increases the risk of false positives consuming Parcel API quota. Leave off unless you are missing shipments from unusual merchant emails. |

@@ -1,519 +1,335 @@
 <!-- generated-by: gsd-doc-writer -->
-# Shop2Parcel Architecture
+# Architecture
 
-## System Overview
+Shop2Parcel is a Home Assistant custom integration that monitors an email inbox (Gmail via OAuth2 or any IMAP server) for Shopify shipping confirmation emails and direct carrier notifications. When a shipping email is found, the integration parses the tracking number and carrier, deduplicates it against previously submitted numbers, then POSTs the shipment to [parcelapp.net](https://web.parcelapp.net). Each successfully forwarded shipment appears as a sensor entity in Home Assistant.
 
-Shop2Parcel is a Home Assistant custom integration (`iot_class: cloud_polling`) that monitors an email inbox — either Gmail via OAuth2 or any IMAP server — for Shopify shipping confirmation emails and direct carrier notification emails. On each poll cycle it extracts tracking numbers using a tiered HTML-parse / regex strategy, deduplicates against a persisted store, and forwards new shipments to the parcelapp.net external API. Shipments surface in Home Assistant as `sensor` entities; a companion `binary_sensor` signals whether any active shipments are present. Six diagnostic sensors expose per-poll counters and a scan-event activity log.
-
-The integration follows the standard HA DataUpdateCoordinator pattern: a single coordinator owns all API I/O; all entities subscribe to coordinator updates and read from `coordinator.data` without performing their own I/O.
+The integration follows the standard HA `cloud_polling` pattern: a `DataUpdateCoordinator` subclass drives all external I/O on a configurable interval (default 30 minutes), and `CoordinatorEntity` subclasses read from the coordinator's data dict without making independent API calls.
 
 ---
 
-## System Architecture Diagram
+## Component Diagram
 
 ```mermaid
 graph TD
-    subgraph External["External Services"]
-        Gmail["Gmail API<br/>(OAuth2, gmail.readonly)"]
-        IMAP["IMAP Server<br/>(SSL / STARTTLS / none)"]
-        ParcelApp["parcelapp.net<br/>add-delivery POST<br/>view-deliveries GET"]
+    subgraph HA["Home Assistant Core"]
+        CF[config_flow.py<br/>OAuth2FlowHandler] --> |entry.data| INIT
+        OF[options_flow.py<br/>OptionsFlowHandler] --> |entry.options| INIT
+        INIT[__init__.py<br/>async_setup_entry] --> |constructs| COORD
+        INIT --> |registers| CLEANUP[cleanup timer<br/>async_track_time_interval]
+
+        COORD{Shop2ParcelCoordinator<br/>base class} --> |subclass| GC[GmailCoordinator]
+        COORD --> |subclass| IC[ImapCoordinator]
+
+        GC --> |uses| GCLIENT[api/gmail_client.py<br/>GmailClient]
+        IC --> |uses| ICLIENT[api/imap_client.py<br/>ImapClient]
+
+        GC --> |uses| PARSER[api/email_parser.py<br/>EmailParser]
+        IC --> |uses| PARSER
+
+        GC --> |uses| PAPP[api/parcelapp.py<br/>ParcelAppClient]
+        IC --> |uses| PAPP
+
+        COORD --> |persists dedup state| STORE[HA Store<br/>shop2parcel.{entry_id}]
+
+        COORD --> |data dict| SENSOR[sensor.py<br/>ShipmentSensor x N]
+        COORD --> |data dict| BSENSOR[binary_sensor.py<br/>HasActiveShipmentsBinarySensor]
+        COORD --> |diagnostics| DSENSOR[diagnostic_sensor.py<br/>DiagnosticSensor x 6]
+        COORD --> |diagnostics| DIAG[diagnostics.py<br/>async_get_config_entry_diagnostics]
     end
 
-    subgraph HA["Home Assistant"]
-        CE["Config Entry<br/>(entry.data: credentials)<br/>(entry.options: poll settings)"]
-        Store["HA Store v2<br/>submitted_tracking_numbers<br/>quota_exhausted_until"]
-
-        subgraph Coordinators["Coordinator Layer"]
-            Base["Shop2ParcelCoordinator<br/>(base class)<br/>DataUpdateCoordinator"]
-            GC["GmailCoordinator<br/>_async_update_data"]
-            IC["ImapCoordinator<br/>_async_update_data"]
-        end
-
-        subgraph API["API Clients (no HA imports)"]
-            GmailClient["GmailClient<br/>executor-wrapped"]
-            ImapClient["ImapClient<br/>executor-wrapped"]
-            Parser["EmailParser<br/>3-tier strategy"]
-            ParcelClient["ParcelAppClient<br/>aiohttp"]
-        end
-
-        subgraph Entities["Entity Layer"]
-            Sensor["ShipmentSensor<br/>(one per shipment)"]
-            BinSensor["HasActiveShipmentsBinarySensor"]
-            DiagSensors["6x DiagnosticSensor<br/>(EmailsScanned, NewEmailsInspected,<br/>EmailsMatched, TrackingNumbersFound,<br/>KeywordHits, ActivityLog)"]
-        end
-
-        ConfigFlow["Config Flow<br/>(OAuth2FlowHandler + IMAP path)"]
-        OptionsFlow["Options Flow<br/>(poll interval, query, broad scan, debug)"]
-        Diagnostics["diagnostics.py<br/>(HA Download Diagnostics)"]
-    end
-
-    CE -->|connection_type == gmail| GC
-    CE -->|connection_type == imap| IC
-    GC -->|inherits| Base
-    IC -->|inherits| Base
-    Base -->|loads/saves| Store
-    Base -->|schedules 24h cleanup| ParcelClient
-
-    GC -->|async_add_executor_job| GmailClient
-    IC -->|async_add_executor_job| ImapClient
-    GmailClient -->|HTTPS| Gmail
-    ImapClient -->|TCP/TLS| IMAP
-
-    GC --> Parser
-    IC --> Parser
-    GC -->|POST tracking| ParcelClient
-    IC -->|POST tracking| ParcelClient
-    ParcelClient -->|HTTPS| ParcelApp
-
-    Base -->|coordinator.data dict| Sensor
-    Base -->|coordinator.data dict| BinSensor
-    Base -->|coordinator._diagnostics PollStats| DiagSensors
-    Base -->|coordinator.data + diagnostics| Diagnostics
+    GCLIENT --> |Gmail REST API| GMAIL[(Gmail API)]
+    ICLIENT --> |imaplib| IMAP[(IMAP Server)]
+    PAPP --> |HTTPS POST| PARCEL[(parcelapp.net)]
+    CLEANUP --> |GET deliveries| PAPP
 ```
 
 ---
 
-## Data Flow: Poll Cycle
-
-The following diagram shows the complete sequence for one poll execution from email fetch through parcelapp.net POST.
-
-```mermaid
-sequenceDiagram
-    participant HA as Home Assistant<br/>Event Loop
-    participant Coord as Coordinator<br/>(Gmail or IMAP)
-    participant Email as Email Source<br/>(Gmail API / IMAP)
-    participant Parser as EmailParser
-    participant Store as HA Store v2
-    participant Parcel as parcelapp.net
-
-    HA->>Coord: _async_update_data() [poll interval]
-    Note over Coord: Reset last_poll_* stats<br/>Check quota_exhausted_until
-
-    alt Gmail path
-        Coord->>Coord: OAuth2Session.async_ensure_token_valid()
-        Coord->>Email: async_list_messages(access_token, query, rescan_window_days)
-        Email-->>Coord: list of message stubs [{id, ...}]
-        loop For each message stub
-            Coord->>Email: async_get_message(access_token, msg_id)
-            Email-->>Coord: full message dict (payload, headers)
-        end
-    else IMAP path
-        Coord->>Email: fetch_shipping_emails(host, port, creds, since_date)
-        Email-->>Coord: list[{uid, raw bytes}]
-    end
-
-    loop For each message
-        Coord->>Parser: parser.parse(html, message_id, email_date)
-        Note over Parser: 1. CARRIER_REGISTRY detect+parse<br/>   (UPS / USPS / FedEx direct)<br/>2. HTML template (BeautifulSoup)<br/>3. Tier 1 regex (labeled keywords)<br/>4. Tier 2 broad scan (opt-in)
-        Parser-->>Coord: ParseResult{shipment, strategy_used, keyword_hits, ...}
-
-        alt shipment is None
-            Coord->>Coord: record skip_reason in diagnostics
-        else shipment found
-            Coord->>Coord: normalize_tracking_number()
-            alt already in _submitted_tracking_numbers
-                Coord->>Coord: skipped_dedup — increment counter
-            else new tracking number
-                alt quota_exhausted_until not expired
-                    Coord->>Coord: skipped_quota — record event
-                else quota OK
-                    Coord->>Parcel: POST /external/add-delivery/<br/>{tracking_number, carrier_code, description}
-                    alt HTTP 200
-                        Parcel-->>Coord: success
-                        Coord->>Store: _async_save_store()<br/>submitted_tracking_numbers += normalized
-                        Coord->>Coord: current_data[msg_id] = shipment
-                    else HTTP 429
-                        Parcel-->>Coord: quota exhausted
-                        Coord->>Store: save quota_exhausted_until
-                    else HTTP 400 already added
-                        Parcel-->>Coord: ParcelAppAlreadyAddedError
-                        Coord->>Store: save dedup (idempotent success)
-                    else HTTP 400 invalid
-                        Parcel-->>Coord: ParcelAppInvalidTrackingError
-                        Coord->>Store: save dedup (suppress retries)
-                    end
-                end
-            end
-        end
-    end
-
-    Coord->>Coord: record last_poll_duration_ms
-    Coord-->>HA: return current_data dict[str, ShipmentData]
-    HA->>HA: notify CoordinatorEntity listeners<br/>(sensors write new state)
-```
-
----
-
-## Class and Component Hierarchy
-
-```mermaid
-classDiagram
-    class DataUpdateCoordinator {
-        <<HA Framework>>
-        +async_config_entry_first_refresh()
-        +async_add_listener()
-        +async_set_updated_data()
-        +data: dict[str, ShipmentData]
-    }
-
-    class Shop2ParcelCoordinator {
-        +_store: Shop2ParcelStore
-        +_submitted_tracking_numbers: OrderedDict
-        +_quota_exhausted_until: int | None
-        +_diagnostics: PollStats
-        +_email_client: GmailClient | ImapClient
-        +_async_load_store()
-        +_async_save_store()
-        +async_cleanup_delivered()
-        +diagnostics: PollStats
-    }
-
-    class GmailCoordinator {
-        +_email_client: GmailClient
-        +_async_update_data() dict[str, ShipmentData]
-    }
-
-    class ImapCoordinator {
-        +_email_client: ImapClient
-        +_async_update_data() dict[str, ShipmentData]
-    }
-
-    class Shop2ParcelStore {
-        <<HA Store subclass>>
-        +version: int = 2
-        +key: str = "shop2parcel.{entry_id}"
-        +_async_migrate_func() v1→v2
-    }
-
-    class PollStats {
-        <<dataclass, in-memory only>>
-        +emails_returned_total: int
-        +emails_scanned_total: int
-        +emails_matched_total: int
-        +tracking_numbers_found_total: int
-        +keyword_hits_total: int
-        +last_poll_*: various
-        +scan_events: deque maxlen=50
-        +scan_events_total: int
-    }
-
-    class GmailClient {
-        +_executor: Callable
-        +async_list_messages()
-        +async_get_message()
-        -_get_service()
-    }
-
-    class ImapClient {
-        +_executor: Callable
-        +fetch_shipping_emails()
-        -_fetch_sync()
-    }
-
-    class EmailParser {
-        +enable_broad_scan: bool
-        +parse(html, message_id, email_date) ParseResult
-        -_parse_html_template()
-        -_parse_regex_tier1()
-        -_parse_regex_tier2()
-    }
-
-    class CARRIER_REGISTRY {
-        <<module-level list>>
-        +(_detect_ups, _parse_ups)
-        +(_detect_usps, _parse_usps)
-        +(_detect_fedex, _parse_fedex)
-    }
-
-    class ParcelAppClient {
-        +_session: aiohttp.ClientSession
-        +_api_key: str
-        +async_add_delivery()
-        +async_get_deliveries()
-    }
-
-    class ShipmentData {
-        <<dataclass, frozen>>
-        +tracking_number: str
-        +carrier_name: str
-        +order_name: str
-        +message_id: str
-        +email_date: int
-    }
-
-    class ParseResult {
-        <<dataclass, frozen>>
-        +shipment: ShipmentData | None
-        +skip_reason: str | None
-        +strategy_used: str | None
-        +keyword_hits: dict[str, bool]
-        +candidate_tokens: list[str]
-    }
-
-    class CoordinatorEntity {
-        <<HA Framework>>
-    }
-
-    class ShipmentSensor {
-        +_message_id: str
-        +native_value: "in_transit"
-        +extra_state_attributes: order_name, tracking_number, carrier, email_date
-    }
-
-    class HasActiveShipmentsBinarySensor {
-        +is_on: len(coordinator.data) > 0
-    }
-
-    class DiagnosticSensor {
-        <<abstract base>>
-        +entity_category: DIAGNOSTIC
-        +state_class: MEASUREMENT
-    }
-
-    DataUpdateCoordinator <|-- Shop2ParcelCoordinator
-    Shop2ParcelCoordinator <|-- GmailCoordinator
-    Shop2ParcelCoordinator <|-- ImapCoordinator
-    Shop2ParcelCoordinator --> Shop2ParcelStore
-    Shop2ParcelCoordinator --> PollStats
-    GmailCoordinator --> GmailClient
-    ImapCoordinator --> ImapClient
-    GmailCoordinator --> EmailParser
-    ImapCoordinator --> EmailParser
-    GmailCoordinator --> ParcelAppClient
-    ImapCoordinator --> ParcelAppClient
-    EmailParser --> CARRIER_REGISTRY
-    EmailParser --> ParseResult
-    ParseResult --> ShipmentData
-
-    CoordinatorEntity <|-- ShipmentSensor
-    CoordinatorEntity <|-- HasActiveShipmentsBinarySensor
-    CoordinatorEntity <|-- DiagnosticSensor
-    DiagnosticSensor <|-- EmailsScannedSensor
-    DiagnosticSensor <|-- NewEmailsInspectedSensor
-    DiagnosticSensor <|-- EmailsMatchedSensor
-    DiagnosticSensor <|-- TrackingNumbersFoundSensor
-    DiagnosticSensor <|-- KeywordHitsSensor
-    DiagnosticSensor <|-- ActivityLogSensor
-```
-
----
-
-## Key Abstractions
-
-| Name | File | Description |
-|------|------|-------------|
-| `Shop2ParcelCoordinator` | `coordinator.py` | Base `DataUpdateCoordinator` subclass. Owns the HA Store, dedup `OrderedDict`, quota state, and `PollStats` diagnostics. Subclasses override `_async_update_data`. |
-| `GmailCoordinator` | `gmail_coordinator.py` | Gmail poll path. Refreshes OAuth2 tokens via `OAuth2Session`, calls `GmailClient`, then runs `EmailParser` and `ParcelAppClient`. |
-| `ImapCoordinator` | `imap_coordinator.py` | IMAP poll path. Calls `ImapClient` with a SINCE-date filter, then runs `EmailParser` and `ParcelAppClient`. No token refresh — uses static credentials from `entry.data`. |
-| `Shop2ParcelStore` | `coordinator.py` | HA `Store` subclass (v2). Persists `submitted_tracking_numbers` (LRU-capped `OrderedDict` serialised as list) and `quota_exhausted_until`. Implements v1→v2 migration. |
-| `PollStats` | `coordinator.py` | In-memory `dataclass` (slots, mutable). Accumulates cumulative and per-poll counters since the last HA restart. Not persisted. |
-| `EmailParser` | `api/email_parser.py` | Stateless parser. Applies `CARRIER_REGISTRY` first (direct UPS/USPS/FedEx emails), then three Shopify-oriented strategies in order: HTML template (BeautifulSoup), Tier 1 labeled-keyword regex, Tier 2 broad token sweep (opt-in). Returns `ParseResult`. |
-| `CARRIER_REGISTRY` | `api/email_parser.py` | Module-level `list` of `(detect_fn, parse_fn)` tuples for UPS, USPS, and FedEx. First matching carrier wins; detection is HTML-fingerprint-based with a Shopify-exclusion guard. |
-| `ShipmentData` | `api/email_parser.py` | Frozen `dataclass` representing one extracted shipment. The coordinator data dict is `dict[str, ShipmentData]` keyed by Gmail message ID or IMAP UID string. |
-| `ParcelAppClient` | `api/parcelapp.py` | Async aiohttp client for parcelapp.net. Calls `POST /external/add-delivery/` and `GET /external/deliveries/`. Raises typed exceptions for auth failures, quota exhaustion, invalid tracking, and transient errors. |
-| `GmailClient` | `api/gmail_client.py` | Wraps `google-api-python-client` in `hass.async_add_executor_job`. Caches the service object per access token. |
-| `ImapClient` | `api/imap_client.py` | Wraps `imaplib` in `hass.async_add_executor_job`. Opens a fresh connection per call (stateful IMAP connections must not be shared across threads). Supports SSL, STARTTLS, and no-TLS modes. |
-| `ShipmentSensor` | `sensor.py` | One `CoordinatorEntity` per `coordinator.data` entry. State is the static string `"in_transit"`. Attributes: `order_name`, `tracking_number`, `carrier`, `email_date`. Dynamic addition via `async_add_listener` callback. |
-| `HasActiveShipmentsBinarySensor` | `binary_sensor.py` | Single entity. `is_on = len(coordinator.data) > 0`. |
-| `DiagnosticSensor` (6 subclasses) | `diagnostic_sensor.py` | Static entities registered at setup. Reads from `coordinator._diagnostics` (a `PollStats` instance). Registered under the `sensor` platform domain via `sensor.py::async_setup_entry`. |
-
----
-
-## Directory Structure Rationale
+## Directory Structure
 
 ```
 custom_components/shop2parcel/
-├── __init__.py               # Entry point: constructs coordinator, loads store,
-│                             # runs first refresh, schedules 24h cleanup, forwards platforms
-├── coordinator.py            # Base coordinator + shared infrastructure (PollStats, Shop2ParcelStore)
-├── gmail_coordinator.py      # Gmail-specific poll logic (_async_update_data override)
-├── imap_coordinator.py       # IMAP-specific poll logic (_async_update_data override)
-├── sensor.py                 # ShipmentSensor (dynamic) + 6 DiagnosticSensors (static)
+├── __init__.py               # Entry point: async_setup_entry / async_unload_entry
+├── manifest.json             # HA integration manifest (version, requirements, iot_class)
+├── const.py                  # All constants and normalize_tracking_number()
+├── config_flow.py            # OAuth2FlowHandler — Gmail and IMAP setup + reauth flows
+├── options_flow.py           # OptionsFlowHandler — poll interval, query, debug mode
+├── application_credentials.py  # Google OAuth2 authorization server declaration
+├── coordinator.py            # Shop2ParcelCoordinator base class, PollStats, Shop2ParcelStore
+├── gmail_coordinator.py      # GmailCoordinator — Gmail poll path
+├── imap_coordinator.py       # ImapCoordinator — IMAP poll path
+├── sensor.py                 # ShipmentSensor + diagnostic sensor registration
 ├── binary_sensor.py          # HasActiveShipmentsBinarySensor
-├── diagnostic_sensor.py      # DiagnosticSensor base + 6 concrete subclasses
-├── config_flow.py            # OAuth2FlowHandler (Gmail) + IMAP credential steps
-├── options_flow.py           # OptionsFlowHandler: poll interval, query, broad scan, debug mode
-├── diagnostics.py            # HA diagnostics platform (Download Diagnostics)
-├── application_credentials.py # OAuth2 application credentials registration
-├── const.py                  # All constants, config keys, defaults, normalize_tracking_number()
-├── manifest.json             # Integration metadata (domain, requirements, iot_class, version)
-├── strings.json              # Translation source strings
-├── translations/             # Per-locale translation files
+├── diagnostic_sensor.py      # 6 diagnostic sensor entity classes
+├── diagnostics.py            # async_get_config_entry_diagnostics (HA diagnostics platform)
 └── api/
-    ├── email_parser.py       # EmailParser + CARRIER_REGISTRY + ShipmentData + ParseResult
-    ├── gmail_client.py       # GmailClient (executor-wrapped google-api-python-client)
-    ├── imap_client.py        # ImapClient (executor-wrapped imaplib)
-    ├── parcelapp.py          # ParcelAppClient (aiohttp, add-delivery + view-deliveries)
-    ├── carrier_codes.py      # normalize_carrier(): raw carrier name → parcelapp carrier code
-    └── exceptions.py         # Typed exception hierarchy (no HA imports)
-```
-
-The `api/` subdirectory contains all code that has no HA imports. This separation allows the API clients, parser, and exception types to be tested without an HA test harness and makes the boundary between HA-specific code and plain Python explicit.
-
----
-
-## Coordinator Lifecycle
-
-The setup sequence in `__init__.py::async_setup_entry` follows a strict order that is critical to correct operation:
-
-```mermaid
-sequenceDiagram
-    participant HA as Home Assistant
-    participant Init as __init__.py
-    participant Coord as Coordinator
-    participant Store as HA Store v2
-    participant Platforms as Sensor / BinarySensor
-
-    HA->>Init: async_setup_entry(hass, entry)
-    Init->>Coord: construct GmailCoordinator or ImapCoordinator
-    Note over Coord: No I/O at construction time
-    Init->>Coord: _async_load_store()
-    Coord->>Store: async_load()
-    Store-->>Coord: {submitted_tracking_numbers, quota_exhausted_until}
-    Note over Coord: Dedup set hydrated BEFORE first poll.<br/>Without this step every previously<br/>submitted tracking number would be<br/>re-POSTed on restart.
-    Init->>Coord: async_config_entry_first_refresh()
-    Note over Coord: Runs _async_update_data() once.<br/>Dedup set is already populated.
-    Init->>Init: async_track_time_interval(cleanup, 24h)
-    Init->>Init: entry.async_on_unload(cancel_cleanup)
-    Init->>HA: hass.data[DOMAIN][entry_id] = {"coordinator": coordinator}
-    Init->>Platforms: async_forward_entry_setups(entry, ["sensor", "binary_sensor"])
-    Platforms->>Coord: async_add_listener(_check_shipments)
+    ├── __init__.py
+    ├── carrier_codes.py      # Shopify carrier name → parcelapp carrier code mapping
+    ├── email_parser.py       # EmailParser: tiered HTML/regex/broad-scan strategy
+    ├── exceptions.py         # Custom exception taxonomy (Gmail, IMAP, ParcelApp)
+    ├── gmail_client.py       # GmailClient: async wrapper for google-api-python-client
+    ├── imap_client.py        # ImapClient: async wrapper for imaplib
+    └── parcelapp.py          # ParcelAppClient: async aiohttp client for parcelapp.net API
 ```
 
 ---
 
-## Deduplication and Quota Management
+## Data Flow
 
-### Deduplication
+### Poll Cycle (Gmail path)
 
-Deduplication is tracking-number-based, not message-ID-based. The coordinator maintains `_submitted_tracking_numbers: OrderedDict[str, None]` acting as an LRU set (cap: 1,000 entries, oldest evicted when over limit). The key is the normalized tracking number (`strip().upper()`).
+1. **Token refresh** — `GmailCoordinator._async_update_data()` calls `OAuth2Session.async_ensure_token_valid()` to silently refresh the short-lived access token. On token failure, raises `ConfigEntryAuthFailed` which triggers HA's built-in reauth flow.
+2. **List messages** — `GmailClient.async_list_messages()` queries the Gmail API with the configured search query and an `after:` filter based on `rescan_window_days` (default 30 days). Returns paginated message metadata.
+3. **Fetch body** — For each message, `GmailClient.async_get_message()` fetches the full MIME payload. `extract_html_body()` decodes the base64url HTML part; `extract_text_body()` is used as fallback and wrapped in `<pre>` tags for the parser.
+4. **Parse** — `EmailParser.parse()` runs the tiered strategy pipeline (see Parsing Strategies below). Returns a `ParseResult` containing a `ShipmentData` or `None`.
+5. **Dedup** — The normalized tracking number is checked against `_submitted_tracking_numbers` (an `OrderedDict` capped at 1,000 entries). Duplicates are counted in `PollStats` and skipped.
+6. **Quota guard** — If `_quota_exhausted_until` is set and still in the future, the POST step is skipped for the current cycle.
+7. **POST to parcelapp** — `ParcelAppClient.async_add_delivery()` sends `tracking_number`, `carrier_code` (normalized via `carrier_codes.normalize_carrier()`), and `description` (order name or tracking number).
+8. **Record success** — The normalized tracking number is appended to `_submitted_tracking_numbers` and persisted to the HA Store immediately via `_async_save_store()`. `coordinator.data[msg_id] = shipment` causes HA to push state updates to all `CoordinatorEntity` subscribers.
 
-On a successful `POST /add-delivery/` — or on `ParcelAppAlreadyAddedError` or `ParcelAppInvalidTrackingError` — the normalized tracking number is written to the `OrderedDict` and immediately persisted to the HA Store. This ensures that an HA restart does not cause previously-forwarded tracking numbers to be re-submitted.
+### Poll Cycle (IMAP path)
 
-### Quota Management
+Identical to the Gmail path except steps 1–3 differ:
+- No OAuth2 token refresh — IMAP credentials come from `entry.data` directly.
+- `ImapClient.fetch_shipping_emails()` opens a synchronous `imaplib` session in an executor thread, issues `EXAMINE INBOX` (read-only), then `UID SEARCH SINCE {since_date} {search_criteria}`, and fetches each matching message with `BODY.PEEK[]` (no `\Seen` flag mutation).
+- Returns `list[dict]` with keys `uid` (int) and `raw` (bytes). The UID string is used as the `message_id` key in `coordinator.data`.
+- The `since_date` is computed from `rescan_window_days` in RFC 3501 `DD-Mon-YYYY` format using a fixed English month abbreviation table (not `strftime('%b')` which is locale-dependent).
 
-The parcelapp.net add-delivery endpoint has a hard limit of 20 calls per day (all responses, including 400 errors, count against quota). When the API returns HTTP 429, the coordinator:
+### Delivered Shipment Cleanup
 
-1. Sets `_quota_exhausted_until` to `reset_at` from the response body, or to the next UTC midnight if `reset_at` is absent.
-2. Persists the value to the Store immediately.
-3. Skips all subsequent POST attempts within the same poll cycle (`quota_blocked = True`).
-4. On future poll cycles, checks `int(time.time()) < self._quota_exhausted_until` before any POST.
-5. Clears `_quota_exhausted_until = None` and saves the Store once the window has expired.
-
-Poll cycles continue normally during quota exhaustion — emails are scanned and parsed, but the POST step is skipped. No tracking numbers are added to the dedup store during a quota-blocked cycle (they will be forwarded on the next non-blocked cycle where they pass dedup).
+`async_cleanup_delivered()` runs once every 24 hours via `async_track_time_interval`. It calls `ParcelAppClient.async_get_deliveries(filter_mode="recent")` and removes any entries from `coordinator.data` whose tracking number has `status_code == 0` (completed). Entity registry removal is explicit — HA does not auto-remove entities when a key disappears from `coordinator.data`.
 
 ---
 
-## Email Parsing Strategy
+## Key Classes
 
-The `EmailParser.parse()` method applies strategies in a fixed priority order. The first strategy that returns a non-`None` `shipment` wins and no further strategies are tried.
+### `Shop2ParcelCoordinator` (`coordinator.py`)
 
-```mermaid
-flowchart TD
-    A([parse called]) --> B{CARRIER_REGISTRY<br/>detect_fn matches?}
-    B -->|Yes| C[run carrier-specific parse_fn<br/>UPS / USPS / FedEx regex + href fallback]
-    C --> D{shipment found?}
-    D -->|Yes| Z([return ParseResult with shipment])
-    D -->|No| E[carrier_detected = True<br/>fall through to HTML + Tier 1 only]
-    B -->|No| E2[carrier_detected = False]
+Base class, extends `DataUpdateCoordinator[dict[str, ShipmentData]]`.
 
-    E --> F[Strategy 1: HTML Template<br/>BeautifulSoup on p and td elements<br/>+ href fallback]
-    E2 --> F
-    F --> G{tracking_number found?}
-    G -->|Yes| Z
+| Method / Attribute | Description |
+|---|---|
+| `__init__(hass, entry)` | Constructs store, empty `_submitted_tracking_numbers` `OrderedDict`, `PollStats` accumulator |
+| `diagnostics` (property) | Read-only view of `_diagnostics: PollStats` |
+| `_async_load_store()` | Hydrates `_submitted_tracking_numbers` and `_quota_exhausted_until` from HA Store. **Must be called before `async_config_entry_first_refresh()`** |
+| `_async_save_store()` | Persists dedup state to Store (called after every successful POST) |
+| `async_cleanup_delivered(now)` | Removes delivered shipments from `coordinator.data` and the entity registry; called by daily timer |
 
-    G -->|No| H[Strategy 2: Tier 1 regex<br/>labeled keyword anchor<br/>tracking/order/carrier regexes<br/>+ href fallback]
-    H --> I{tracking found<br/>and valid?}
-    I -->|Yes| Z
+### `GmailCoordinator` (`gmail_coordinator.py`)
 
-    I -->|No| J{carrier_detected<br/>OR broad_scan disabled?}
-    J -->|Yes| K([return ParseResult shipment=None<br/>skip_reason=no_tracking_pattern])
+Extends `Shop2ParcelCoordinator`. Sets `self._email_client = GmailClient(hass.async_add_executor_job)`.
 
-    J -->|No| L[Strategy 3: Tier 2 broad scan<br/>all alphanumeric tokens 10-40 chars<br/>+ href URLs — no keyword gate]
-    L --> M{any candidates?}
-    M -->|Yes| N[return best=longest candidate<br/>carrier inferred from shape]
-    N --> Z
-    M -->|No| K
+| Method | Description |
+|---|---|
+| `_async_update_data()` | Full Gmail poll cycle: token refresh → list messages → fetch bodies → parse → dedup → POST |
+
+### `ImapCoordinator` (`imap_coordinator.py`)
+
+Extends `Shop2ParcelCoordinator`. Sets `self._email_client = ImapClient(hass.async_add_executor_job)`.
+
+| Method | Description |
+|---|---|
+| `_async_update_data()` | Full IMAP poll cycle: compute `since_date` → fetch via IMAP → parse → dedup → POST |
+
+### `GmailClient` (`api/gmail_client.py`)
+
+| Method | Description |
+|---|---|
+| `__init__(async_add_executor_job)` | Injects executor callable; no HA imports |
+| `_get_service(access_token)` | Returns cached `googleapiclient` service, rebuilding only when token rotates |
+| `async_list_messages(access_token, query, rescan_window_days)` | Returns `(list[dict], effective_query_str)` — paginates all results |
+| `async_get_message(access_token, message_id)` | Fetches full MIME payload for one message |
+
+Module-level helpers: `build_incremental_query(base_query, rescan_window_days)`, `extract_html_body(payload)`, `extract_text_body(payload)`, `_classify_gmail_error(err)`.
+
+### `ImapClient` (`api/imap_client.py`)
+
+| Method | Description |
+|---|---|
+| `__init__(async_add_executor_job)` | Injects executor callable; no HA imports |
+| `fetch_shipping_emails(host, port, username, password, tls_mode, search_criteria, since_date)` | Returns `list[dict]` with `uid` (int) and `raw` (bytes); runs entire session in one executor call |
+| `_fetch_sync(...)` | Synchronous imaplib session in executor thread; uses `EXAMINE` (read-only) + `BODY.PEEK[]` (no `\Seen` flag mutation) |
+
+Module-level helpers: `extract_html_body_imap(raw_bytes)`, `extract_text_body_imap(raw_bytes)`, `_classify_imap_error(err)`.
+
+### `EmailParser` (`api/email_parser.py`)
+
+| Method | Description |
+|---|---|
+| `__init__(enable_broad_scan)` | `enable_broad_scan=False` by default; gates Tier 2 sweep |
+| `parse(html, message_id, email_date)` | Returns `ParseResult` (never `None`); runs carrier registry then tiered Shopify strategies |
+| `_parse_html_template(html, message_id, email_date)` | Strategy 1: BeautifulSoup on `<p>`/`<td>` elements + href fallback |
+| `_parse_regex_tier1(html, message_id, email_date)` | Strategy 2: labeled keyword regex (`Tracking number: ...`) + href fallback |
+| `_parse_regex_tier2(html, message_id, email_date)` | Strategy 3: broad token sweep (opt-in, default off) |
+
+### `ParcelAppClient` (`api/parcelapp.py`)
+
+| Method | Description |
+|---|---|
+| `__init__(session, api_key)` | Receives injected `aiohttp.ClientSession`; never creates its own |
+| `async_add_delivery(tracking_number, carrier_code, description)` | `POST https://api.parcel.app/external/add-delivery/`; raises typed exceptions on all error conditions |
+| `async_get_deliveries(filter_mode)` | `GET https://api.parcel.app/external/deliveries/`; used for cleanup and initial dedup |
+
+### `PollStats` (`coordinator.py`)
+
+`@dataclass(slots=True)` — in-memory diagnostic accumulator, reset on HA restart. Never persisted.
+
+Key fields: `emails_returned_total`, `emails_scanned_total`, `emails_matched_total`, `tracking_numbers_found_total`, `keyword_hits_total`, `scan_events` (deque, maxlen=50), `scan_events_total`, `last_poll_*` fields (reset at the top of each poll cycle).
+
+### `Shop2ParcelStore` (`coordinator.py`)
+
+Extends `homeassistant.helpers.storage.Store`. Implements `_async_migrate_func` for v1→v2 migration (drops `forwarded_ids`/`last_imap_uid` schema; seeds `submitted_tracking_numbers` as empty list).
+
+Store schema (version 2):
+```json
+{
+  "submitted_tracking_numbers": ["1Z...", "9400..."],
+  "quota_exhausted_until": null
+}
 ```
 
-**Strategy constants** (stable string contract imported by tests):
-
-| Constant | Value | Used when |
-|---|---|---|
-| `STRATEGY_HTML` | `"html_template"` | BeautifulSoup on `<p>`/`<td>` matched |
-| `STRATEGY_UPS` | `"ups_template"` | UPS carrier template matched |
-| `STRATEGY_USPS` | `"usps_template"` | USPS carrier template matched |
-| `STRATEGY_FEDEX` | `"fedex_template"` | FedEx carrier template matched |
-| `STRATEGY_REGEX` | `"regex_fallback"` | Tier 1 labeled-keyword regex matched |
-| `STRATEGY_BROAD_REGEX` | `"broad_regex"` | Tier 2 broad token sweep matched |
-
 ---
 
-## External API Summary
+## Parsing Strategies
 
-### parcelapp.net
+`EmailParser.parse()` evaluates strategies in this order. First match wins.
 
-| Endpoint | Method | Auth | Rate Limit | Purpose |
-|---|---|---|---|---|
-| `https://api.parcel.app/external/add-delivery/` | POST | `api-key` header | 20/day (hard, all responses count) | Forward a new shipment tracking number |
-| `https://api.parcel.app/external/deliveries/` | GET | `api-key` header | 20/hour | Retrieve delivery list for cleanup |
-
-### Gmail API
-
-| Operation | Method | Scope |
-|---|---|---|
-| `GET /gmail/v1/users/me/messages` | List messages matching query | `gmail.readonly` |
-| `GET /gmail/v1/users/me/messages/{id}` | Fetch full message | `gmail.readonly` |
-
-Auth is OAuth2. The coordinator calls `OAuth2Session.async_ensure_token_valid()` at the top of each poll cycle. Token refresh is handled entirely by the HA OAuth2 framework; the coordinator reads only `access_token` from the refreshed session.
-
-### IMAP
-
-The `ImapClient` runs an entire IMAP session (connect → login → SELECT INBOX → SEARCH SINCE {date} → FETCH UIDs → logout) inside a single `hass.async_add_executor_job` call. This is required because `imaplib` is synchronous and HA's executor is thread-safe for single calls but not for stateful connections shared across threads. Three TLS modes are supported: `ssl` (default port 993), `starttls` (port 587), `none` (port 143).
-
----
-
-## Configuration and Options
-
-### Stored in `entry.data` (encrypted, never in `options`)
-
-| Key | Type | Description |
-|---|---|---|
-| `api_key` | `str` | parcelapp.net API key |
-| `connection_type` | `"gmail"` \| `"imap"` | Email source selection |
-| `token` | `dict` | Gmail OAuth2 token (Gmail path only) |
-| `imap_host` | `str` | IMAP server hostname (IMAP path only) |
-| `imap_port` | `int` | IMAP server port (IMAP path only) |
-| `imap_username` | `str` | IMAP login username (IMAP path only) |
-| `imap_password` | `str` | IMAP login password, stored encrypted (IMAP path only) |
-| `imap_tls` | `"ssl"` \| `"starttls"` \| `"none"` | TLS mode (IMAP path only) |
-
-### Stored in `entry.options` (user-configurable post-setup)
-
-| Key | Default | Description |
-|---|---|---|
-| `poll_interval` | `30` (minutes) | How often the coordinator runs `_async_update_data` |
-| `gmail_query` | (see `const.py`) | Gmail search query string |
-| `imap_search` | `OR OR OR SUBJECT "shipped" ...` | IMAP SEARCH criteria |
-| `rescan_window_days` | `30` | Lookback window in days; extended to 365 in debug mode |
-| `enable_broad_scan` | `False` | Enable Tier 2 broad token sweep (higher recall, higher false-positive risk) |
-| `debug_mode` | `False` | Dry-run mode: scan and parse, but suppress all parcelapp.net POSTs |
-
----
-
-## Diagnostic Sensors
-
-Six diagnostic sensors are registered statically at setup time via `sensor.py::async_setup_entry`. All share the same `DeviceInfo` as the shipment sensors (one HA device per config entry) and use `EntityCategory.DIAGNOSTIC` and `SensorStateClass.MEASUREMENT`.
-
-| Sensor class | `unique_id` suffix | `native_value` | Key attributes |
+| Priority | Strategy | Condition | Description |
 |---|---|---|---|
-| `EmailsScannedSensor` | `_emails_scanned` | `emails_returned_total` | `last_poll_returned`, `poll_duration_ms`, `effective_query_used` |
-| `NewEmailsInspectedSensor` | `_new_emails_inspected` | `emails_scanned_total` | `last_poll_count` |
-| `EmailsMatchedSensor` | `_emails_matched` | `emails_matched_total` | `last_poll_matched`, `last_poll_skip_reasons` |
-| `TrackingNumbersFoundSensor` | `_tracking_numbers_found` | `tracking_numbers_found_total` | `last_poll_found` |
-| `KeywordHitsSensor` | `_keyword_hits` | `keyword_hits_total` | `per_keyword` breakdown |
-| `ActivityLogSensor` | `_activity_log` | `scan_events_total` | `recent_events` (last 10 from a `deque(maxlen=50)`) |
+| 0 | Carrier template registry | HTML contains `ups.com` / `usps.com` / `fedex.com` AND not `shopify` | Carrier-specific bounded regex (`_UPS_TRACKING_RE`, `_USPS_TRACKING_RE`, `_FEDEX_TRACKING_RE`) + href fallback. Sets `strategy_used` to `ups_template`, `usps_template`, or `fedex_template` |
+| 1 | HTML template (`html_template`) | Always attempted if carrier template fails | BeautifulSoup scan of `<p>` and `<td>` elements for order `#`, carrier `via`, and 10–40 char alphanumeric tokens validated against `_TRACKING_PATTERNS` |
+| 2 | Regex Tier 1 (`regex_fallback`) | HTML template finds no tracking | Full `get_text()` + labeled anchor `Tracking number: ...` regex + href fallback via `_extract_tracking_from_hrefs()` |
+| 3 | Regex Tier 2 (`broad_regex`) | Tier 1 fails AND `enable_broad_scan=True` AND no carrier detected | Sweeps all 10–40 char tokens and href query params; returns longest match; sets `candidate_tokens` in `ParseResult` |
 
-The `scan_events` ring buffer stores the 50 most recent scan events. Each event is a `dict` with keys: `timestamp`, `message_id` (prefixed `gmail:` or `imap:`), `subject`, `sender`, `strategy`, `tracking_number`, `outcome`.
+Tracking number validation uses `_TRACKING_PATTERNS`:
+- UPS: `^1Z[A-Z0-9]{16}$`
+- USPS domestic: `^9[12345][0-9]{15,24}$`
+- USPS international: `^[A-Z]{2}[0-9]{9}[A-Z]{2}$`
+- FedEx: `^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$`
+- DHL: `^[0-9]{10,11}$`
 
-Possible `outcome` values: `no_html_body`, `no_match`, `skipped_dedup`, `skipped_quota`, `already_added`, `posted`, `dry_run_suppressed`, `error`.
+---
+
+## Entity Model
+
+All entities share one `DeviceInfo(identifiers={(DOMAIN, entry.entry_id)}, name="Shop2Parcel")` per config entry.
+
+| Entity Class | Platform | `unique_id` pattern | State | Key attributes |
+|---|---|---|---|---|
+| `ShipmentSensor` | `sensor` | `shop2parcel_{entry_id}_{message_id}` | `"in_transit"` (static) | `order_name`, `tracking_number`, `carrier`, `email_date` |
+| `HasActiveShipmentsBinarySensor` | `binary_sensor` | `shop2parcel_{entry_id}_has_active_shipments` | `True` when `len(coordinator.data) > 0` | — |
+| `EmailsScannedSensor` | `sensor` (diagnostic) | `shop2parcel_{entry_id}_emails_scanned` | `emails_returned_total` | `last_poll_returned`, `query_used`, `effective_query_used`, `poll_duration_ms` |
+| `NewEmailsInspectedSensor` | `sensor` (diagnostic) | `shop2parcel_{entry_id}_new_emails_inspected` | `emails_scanned_total` | `last_poll_count` |
+| `EmailsMatchedSensor` | `sensor` (diagnostic) | `shop2parcel_{entry_id}_emails_matched` | `emails_matched_total` | `last_poll_matched`, `last_poll_skip_reasons` |
+| `TrackingNumbersFoundSensor` | `sensor` (diagnostic) | `shop2parcel_{entry_id}_tracking_numbers_found` | `tracking_numbers_found_total` | `last_poll_found` |
+| `KeywordHitsSensor` | `sensor` (diagnostic) | `shop2parcel_{entry_id}_keyword_hits` | `keyword_hits_total` | `last_poll_hits`, `per_keyword` |
+| `ActivityLogSensor` | `sensor` (diagnostic) | `shop2parcel_{entry_id}_activity_log` | `scan_events_total` | `recent_events` (last 10 scan event dicts) |
+
+Diagnostic sensors are registered in `sensor.py::async_setup_entry` because `"diagnostic_sensor"` is not a built-in HA platform domain. `ShipmentSensor` instances are added dynamically via `coordinator.async_add_listener` callback — new entities appear when `coordinator.data` gains a key not present at setup time.
+
+---
+
+## Configuration and Secrets Handling
+
+Credentials are stored in `entry.data` (HA's encrypted config entry storage), never in `entry.options` or `configuration.yaml`.
+
+| Key (`CONF_*`) | Storage | Description |
+|---|---|---|
+| `api_key` | `entry.data` | parcelapp.net API key |
+| `token` | `entry.data` | Gmail OAuth2 token dict (access + refresh token) |
+| `imap_password` | `entry.data` | IMAP account password |
+| `imap_host`, `imap_port`, `imap_username`, `imap_tls` | `entry.data` | IMAP server connection details |
+| `connection_type` | `entry.data` | `"gmail"` or `"imap"` |
+| `poll_interval` | `entry.options` | Poll interval in minutes (5–1440, default 30) |
+| `gmail_query` | `entry.options` | Gmail search query string |
+| `imap_search` | `entry.options` | IMAP SEARCH criteria string |
+| `rescan_window_days` | `entry.options` | Lookback window in days (7–365, default 30; Gmail only) |
+| `enable_broad_scan` | `entry.options` | Gate for Tier 2 parser (default `False`) |
+| `debug_mode` | `entry.options` | Dry-run mode — suppresses all POSTs (default `False`) |
+
+The `diagnostics.py` module redacts `api_key`, `imap_password`, `token`, `access_token`, and `refresh_token` from the HA diagnostics download (`TO_REDACT` set).
+
+The `OptionsFlowHandler` subclasses `OptionsFlowWithReload` — saving options automatically reloads the config entry, re-instantiating the coordinator with the new `update_interval`.
+
+---
+
+## Error Handling Strategy
+
+The integration separates error taxonomy across two layers.
+
+**`api/` layer** — raises typed exceptions; no HA imports:
+
+| Exception | Meaning |
+|---|---|
+| `GmailAuthError` | OAuth2 token expired or revoked |
+| `GmailTransientError` | Network failure or Gmail 5xx |
+| `ImapAuthError` | IMAP login failure |
+| `ImapTransientError` | IMAP connection failure, timeout, or socket error |
+| `ParcelAppAuthError` | Invalid `api-key` (HTTP 401/403) |
+| `ParcelAppQuotaError` | HTTP 429 — 20/day add-delivery quota exhausted; carries optional `reset_at` epoch |
+| `ParcelAppTransientError` | Network error or parcelapp 5xx |
+| `ParcelAppInvalidTrackingError` | HTTP 400 with unrecognized tracking number; still consumes one quota slot |
+| `ParcelAppAlreadyAddedError` | HTTP 400 with `"You have already added this delivery to the app"` — treated as idempotent success |
+
+**Coordinator layer** — translates to HA exceptions:
+
+| Condition | HA exception raised | Effect |
+|---|---|---|
+| `GmailAuthError`, `ImapAuthError`, `ParcelAppAuthError` | `ConfigEntryAuthFailed` | HA triggers reauth flow |
+| `GmailTransientError`, `ImapTransientError` | `UpdateFailed` | HA retains last known state; logs warning; retries next poll |
+| `ParcelAppQuotaError` | Sets `_quota_exhausted_until`; skips POST for the rest of the cycle | No exception raised — poll continues without forwarding |
+| `ParcelAppTransientError` | Logs warning; `continue` — skips this message | No exception raised — remaining messages are still processed |
+| `ParcelAppInvalidTrackingError` | Logs error; records normalized TN in dedup store | Suppresses infinite retries for malformed tracking numbers |
+| `ParcelAppAlreadyAddedError` | Records normalized TN in dedup store | Permanent dedup suppression |
+
+`async_cleanup_delivered()` catches all exceptions internally and returns early without raising — it is a background maintenance task, not a poll cycle, so raising would violate the `async_track_time_interval` callback contract.
+
+---
+
+## Deduplication
+
+Dedup is tracking-number-based (not message-ID-based, which was the v1 approach).
+
+1. After a successful POST (or `ParcelAppAlreadyAddedError`), the normalized tracking number (`strip().upper()`) is appended as a key to `_submitted_tracking_numbers: OrderedDict[str, None]`.
+2. The `OrderedDict` is capped at `MAX_SUBMITTED_TRACKING_NUMBERS = 1000` entries using `popitem(last=False)` (LRU eviction of the oldest entry).
+3. On every poll cycle, before any POST attempt, the normalized TN is checked in O(1) against the dict.
+4. The current state of `_submitted_tracking_numbers` and `_quota_exhausted_until` is persisted to the HA Store after every mutation.
+5. On HA startup, `_async_load_store()` hydrates these fields before the first refresh, preventing duplicate POSTs across restarts.
+
+---
+
+## Connection Type Selection
+
+The `connection_type` key in `entry.data` determines which coordinator is instantiated at setup time:
+
+```python
+# __init__.py — async_setup_entry
+if conn_type == CONNECTION_TYPE_IMAP:
+    coordinator = ImapCoordinator(hass, entry)
+else:
+    coordinator = GmailCoordinator(hass, entry)
+```
+
+**Gmail path** requires:
+- A Google Cloud project with Gmail API enabled
+- OAuth2 credentials (client ID + client secret) registered in HA's Application Credentials UI
+- `https://www.googleapis.com/auth/gmail.readonly` scope
+- `google-api-python-client>=2.194.0` and `google-auth>=2.0.0` (declared in `manifest.json` `requirements`)
+
+**IMAP path** requires:
+- IMAP server host, port, username, password, and TLS mode (`ssl` / `starttls` / `none`)
+- Uses Python's stdlib `imaplib`; no extra requirements
+- Opens a fresh connection per poll (stateful IMAP connections must not be shared across threads)
+
+---
+
+## CI/CD Pipeline
+
+| Workflow | File | Trigger | Jobs |
+|---|---|---|---|
+| `pytest + lint` | `.github/workflows/pytest.yml` | Push and PR on all branches | `pytest` (Python 3.14, `pytest tests/ -v --tb=short`), `lint` (ruff check, ruff format --check, mypy) |
+| `hassfest` | `.github/workflows/hassfest.yml` | Push and PR on all branches | Validates `manifest.json` via `home-assistant/actions/hassfest` |
+| `HACS Action` | `.github/workflows/hacs.yml` | Push and PR on all branches | Validates HACS repo structure (`category: integration`, `ignore: brands`) |
+| `Release` | `.github/workflows/release.yml` | Push of `v*` tag | Validates that `manifest.json` version matches the tag, auto-detects pre-release (`-rc`/`-beta`/`-alpha`), creates GitHub Release with auto-generated notes |
+
+The release workflow enforces that `manifest.json` `version` must match the pushed tag before the release is created. Tags containing `-rc`, `-beta`, or `-alpha` are published as GitHub pre-releases automatically.

@@ -1,181 +1,330 @@
 <!-- generated-by: gsd-doc-writer -->
 # Testing
 
+Shop2Parcel uses [pytest](https://pytest.org) with `pytest-homeassistant-custom-component` to run 294 test functions across 18 test files. Tests cover the full integration stack: email parsing, HTTP clients, coordinator logic, entity registration, options flows, diagnostics, and debug mode.
+
+---
+
 ## Test Framework and Setup
 
-Shop2Parcel uses [pytest](https://docs.pytest.org/) with [pytest-homeassistant-custom-component](https://pypi.org/project/pytest-homeassistant-custom-component/) as its primary test harness. This package mirrors the test infrastructure used by Home Assistant core and supplies the `hass` fixture, `MockConfigEntry`, and the full HA async test harness without requiring a running HA instance.
+| Tool | Purpose |
+|------|---------|
+| `pytest` | Test runner |
+| `pytest-asyncio` | `async def test_*` support (`asyncio_mode = "auto"` in `pyproject.toml`) |
+| `pytest-homeassistant-custom-component` | `hass` fixture, `MockConfigEntry`, HA async test harness |
+| `aioresponses` | Intercept outbound `aiohttp` HTTP calls without network access |
 
-| Library | Purpose |
-|---------|---------|
-| `pytest` | Test runner and assertion framework |
-| `pytest-homeassistant-custom-component` | HA fixtures (`hass`, `MockConfigEntry`, `enable_custom_integrations`) |
-| `pytest-asyncio` | Async test support (`asyncio_mode = "auto"` — all `async def test_` functions run automatically) |
-| `aioresponses` | Intercepts outbound `aiohttp` HTTP calls in tests without real network access |
+All four are declared in `pyproject.toml` under `[project.optional-dependencies] dev`:
 
-Before running tests, install the project with its dev dependencies:
+```toml
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "aioresponses",
+    "pytest-homeassistant-custom-component",
+]
+```
+
+No additional global setup is required beyond installing the dev dependencies.
+
+---
+
+## Running Tests
+
+Install the package and its dev dependencies first:
 
 ```bash
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-All dev dependencies are declared under `[project.optional-dependencies] dev` in `pyproject.toml`.
-
-**Google API mocking note:** `tests/conftest.py` installs `MagicMock` stubs for `google`, `google.oauth2`, `googleapiclient`, and `googleapiclient.errors` into `sys.modules` before any integration import occurs. This is required because `gmail_client.py` imports from `googleapiclient` at module load time, and the Google client library is not installed in the test environment.
-
-## Running Tests
-
-All commands use the project's virtual environment Python.
-
-**Run the full test suite:**
-
-```bash
-.venv/bin/pytest
-```
-
-**Run with verbose output and short tracebacks (matches CI):**
+Run the full test suite:
 
 ```bash
 .venv/bin/pytest tests/ -v --tb=short
 ```
 
-**Run a single test file:**
+Run a single test file:
 
 ```bash
 .venv/bin/pytest tests/test_coordinator.py -v
 ```
 
-**Run a single test by name:**
+Run a single test by name:
 
 ```bash
 .venv/bin/pytest tests/test_coordinator.py::test_new_shipment_is_posted -v
 ```
 
-**Run only the API unit tests:**
+Run only the API-layer tests:
 
 ```bash
 .venv/bin/pytest tests/api/ -v
 ```
 
-**Run with coverage reporting** (source scoped to `custom_components/`):
+Run tests matching a keyword:
 
 ```bash
-.venv/bin/pytest --cov=custom_components --cov-report=term-missing
+.venv/bin/pytest tests/ -k "imap" -v
 ```
 
-The `testpaths`, `asyncio_mode`, and `pythonpath` settings in `pyproject.toml` are applied automatically — no extra flags needed for a standard run.
+---
 
 ## Test Structure
 
-Tests are organized under `tests/` with a flat module layer for integration-level tests and a nested `tests/api/` layer for unit tests of the API client modules.
+The test suite is split between top-level integration tests (require the `hass` fixture and full HA component loading) and unit tests in `tests/api/` (no HA fixture needed).
 
 ```
 tests/
-├── conftest.py                  # Shared fixtures and Google API sys.modules stubs
-├── fixtures/                    # HTML email fixtures for email parser tests
+├── conftest.py                   # Shared fixtures and sys.modules mocks
+├── fixtures/                     # HTML/text email fixtures for parser tests
 │   ├── shopify_shipping_email.html
 │   ├── ups_shipping.html
 │   ├── usps_shipping.html
 │   ├── fedex_shipping.html
 │   ├── href_tracking.html
 │   └── plain_text_tracking.txt
-├── test_init.py                 # Integration setup and teardown
-├── test_coordinator.py          # Coordinator polling, forwarding, deduplication (65 tests)
-├── test_config_flow.py          # Config flow UI steps (26 tests)
-├── test_options_flow.py         # Options flow UI steps
-├── test_sensor.py               # Sensor entity state (7 tests)
-├── test_binary_sensor.py        # Binary sensor entity state
-├── test_diagnostic_sensor.py    # Diagnostic sensor entity state
-├── test_diagnostics.py          # HA diagnostics dump
-├── test_debug_mode.py           # Debug/dry-run mode (DBG-01 through DBG-06)
-├── test_multi_account.py        # Multi-account isolation (MULT-01, MULT-02)
-├── test_store_migration.py      # Store v1→v2 migration (D-01, D-02, D-03)
-├── test_const.py                # Constants sanity checks
-└── api/
-    ├── test_carrier_codes.py    # Carrier code lookup
-    ├── test_email_parser.py     # EmailParser parsing strategies (60 tests)
-    ├── test_exceptions.py       # Custom exception hierarchy
-    ├── test_gmail_client.py     # GmailClient HTTP interactions (19 tests)
-    ├── test_imap_client.py      # ImapClient IMAP interactions (11 tests)
-    └── test_parcelapp.py        # ParcelAppClient HTTP interactions (20 tests)
+├── api/
+│   ├── test_carrier_codes.py     #  2 tests — normalize_carrier lookup table
+│   ├── test_email_parser.py      # 60 tests — EmailParser strategies and ShipmentData
+│   ├── test_exceptions.py        # 10 tests — exception taxonomy
+│   ├── test_gmail_client.py      # 19 tests — GmailClient + build_incremental_query
+│   ├── test_imap_client.py       # 11 tests — ImapClient, EXAMINE, error mapping
+│   └── test_parcelapp.py         # 20 tests — ParcelAppClient HTTP scenarios
+├── test_binary_sensor.py         #  2 tests — HasActiveShipmentsBinarySensor
+├── test_config_flow.py           # 26 tests — OAuth2 + IMAP config flow steps
+├── test_const.py                 #  9 tests — normalize_tracking_number
+├── test_coordinator.py           # 65 tests — coordinator polling, dedup, error handling, scan events
+├── test_debug_mode.py            # 12 tests — DBG-01..DBG-06 dry-run mode
+├── test_diagnostic_sensor.py     # 12 tests — 6 diagnostic sensor entities
+├── test_diagnostics.py           # 13 tests — HA diagnostics platform output
+├── test_init.py                  #  8 tests — async_setup_entry / async_unload_entry
+├── test_multi_account.py         #  4 tests — two concurrent config entries
+├── test_options_flow.py          # 10 tests — options form validation and persistence
+├── test_sensor.py                #  7 tests — ShipmentSensor entity lifecycle
+└── test_store_migration.py       #  4 tests — v1→v2 Store migration
 ```
+
+**Total: 294 test functions across 18 files.**
+
+### Top-level test files
+
+| File | Tests | What it covers |
+|------|------:|----------------|
+| `test_binary_sensor.py` | 2 | `HasActiveShipmentsBinarySensor` is `on` when data is non-empty, `off` when empty |
+| `test_config_flow.py` | 26 | OAuth2 flow handler, IMAP flow steps, reauth paths, error mapping for `ImapAuthError` / `ImapTransientError` / `ParcelAppAuthError` |
+| `test_const.py` | 9 | `normalize_tracking_number`: whitespace stripping, uppercasing, idempotence |
+| `test_coordinator.py` | 65 | Full coordinator cycle (Gmail and IMAP), dedup persistence, quota exhaustion, error handling (`ConfigEntryAuthFailed`, `UpdateFailed`), cleanup logic, scan event ring buffer, LRU eviction, `already_added` handling |
+| `test_debug_mode.py` | 12 | Debug/dry-run mode: options toggle (DBG-01), 365-day window override (DBG-02), dedup bypass (DBG-03), no POST (DBG-04), `[Shop2Parcel DEBUG]` INFO logs (DBG-05), persistent notifications (DBG-06) — all for Gmail and IMAP variants |
+| `test_diagnostic_sensor.py` | 12 | All 6 diagnostic sensor entities registered at setup; state values and attributes after a poll cycle |
+| `test_diagnostics.py` | 13 | HA diagnostics platform: output shape, credential redaction (Gmail and IMAP), `recent_shipments` cap, JSON-safe `scan_events`, `activity_log` key |
+| `test_init.py` | 8 | `async_setup_entry` wires the correct coordinator subclass, Store is loaded before first poll, auth failure sets `SETUP_ERROR` state, `async_unload_entry` cancels the cleanup timer |
+| `test_multi_account.py` | 4 | Two config entries coexist without collision, separate `Store` keys per entry, `ImapCoordinator` instantiates `ImapClient`, entity unique IDs are non-colliding |
+| `test_options_flow.py` | 10 | Options form defaults, validation ranges (`poll_interval`, `rescan_window_days`), IMAP vs Gmail schema branching, `rescan_window_days` persisted |
+| `test_sensor.py` | 7 | `ShipmentSensor` created per shipment, attributes, `in_transit` state, stable `unique_id`, device grouping, entity cleanup, entity appears when coordinator data gains a new key |
+| `test_store_migration.py` | 4 | Store `_async_migrate_func` v1→v2: old keys dropped, `submitted_tracking_numbers` seeded, `quota_exhausted_until` preserved, future versions pass through unchanged |
+
+### `tests/api/` unit tests
+
+These tests have no dependency on the `hass` fixture and run without a Home Assistant instance.
+
+| File | Tests | What it covers |
+|------|------:|----------------|
+| `test_carrier_codes.py` | 2 | `normalize_carrier` maps Shopify carrier names to parcelapp codes (12 parametrized cases), fallback to `pholder` |
+| `test_email_parser.py` | 60 | `EmailParser` HTML strategy, regex fallback, broad-regex tier-2 strategy, carrier-specific templates (UPS/USPS/FedEx), href tracking extraction, `ParseResult` shape, `ShipmentData` dataclass, strategy constants, `infer_carrier` logic |
+| `test_exceptions.py` | 10 | Exception taxonomy: `GmailAuthError`, `GmailTransientError`, `ImapAuthError`, `ImapTransientError`, `ParcelAppAuthError`, `ParcelAppTransientError`, `ParcelAppQuotaError`, `ParcelAppInvalidTrackingError`, no HA imports |
+| `test_gmail_client.py` | 19 | `GmailClient` using a mocked `googleapiclient`, `build_incremental_query`, `extract_html_body`, auth error classification |
+| `test_imap_client.py` | 11 | `ImapClient` constructor, EXAMINE (read-only select), no mutating IMAP commands, `ImapAuthError` on login failure, `ImapTransientError` on non-OK select, `since_date` search criteria, socket leak regressions (CR-02) |
+| `test_parcelapp.py` | 20 | `ParcelAppClient.async_add_delivery` and `async_get_deliveries`: 200 success, 401 → `ParcelAppAuthError`, 429 → `ParcelAppQuotaError` with `reset_at`, 400 → `ParcelAppInvalidTrackingError`, 400 + error body → `ParcelAppAlreadyAddedError`, 5xx → `ParcelAppTransientError`, network error, `VIEW_DELIVERIES_URL` request |
+
+---
+
+## Fixtures (`tests/conftest.py`)
+
+`conftest.py` provides two `MockConfigEntry` fixtures and a shared coordinator setup helper.
+
+### `mock_config_entry`
+
+A `MockConfigEntry` configured for the Gmail/OAuth2 connection type. Used by most integration tests.
+
+```python
+MockConfigEntry(
+    domain=DOMAIN,
+    data={
+        "auth_implementation": DOMAIN,
+        "token": {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+            "token_type": "Bearer",
+            "scope": "https://www.googleapis.com/auth/gmail.readonly",
+        },
+        "api_key": "test-parcelapp-key",
+    },
+    unique_id="user@gmail.com",
+)
+```
+
+### `mock_imap_config_entry`
+
+A `MockConfigEntry` for the IMAP connection type:
+
+```python
+MockConfigEntry(
+    domain=DOMAIN,
+    data={
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_password": "app-password-here",
+        "imap_tls": "ssl",
+        "api_key": "test-parcelapp-key",
+    },
+    options={
+        "imap_search": 'SUBJECT "shipped"',
+        "poll_interval": 30,
+    },
+    unique_id="user@example.com@imap.example.com",
+)
+```
+
+### `setup_coordinator_with_data(hass, mock_config_entry, data)`
+
+A shared async helper that sets up the full integration with pre-seeded coordinator data. All external dependencies are patched (GmailClient, ParcelAppClient, EmailParser, Store, OAuth2 flow) so no real I/O occurs. Returns the configured coordinator instance:
+
+```python
+from tests.conftest import setup_coordinator_with_data
+from custom_components.shop2parcel.api.email_parser import ShipmentData
+
+async def test_my_feature(hass, mock_config_entry):
+    data = {
+        "msg_a": ShipmentData(
+            tracking_number="1Z999AA10123456784",
+            carrier_name="UPS",
+            order_name="#1234",
+            message_id="msg_a",
+            email_date=1745452800,
+        )
+    }
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, data)
+    # assert entity state, coordinator.data, etc.
+```
+
+### Google API mocking
+
+`conftest.py` registers mocks for `google`, `google.oauth2`, `google.oauth2.credentials`, `googleapiclient`, and `googleapiclient.discovery` in `sys.modules` before any shop2parcel import. A minimal `_StubHttpError` is also registered so `googleapiclient.errors.HttpError` is resolvable during coordinator tests without the real library installed.
+
+---
 
 ## Writing New Tests
 
-**File naming:** Test files follow the `test_*.py` convention. Files under `tests/` correspond to integration modules; files under `tests/api/` correspond to modules in `custom_components/shop2parcel/api/`.
+### Integration tests (with `hass` fixture)
 
-**Async tests:** With `asyncio_mode = "auto"` in `pyproject.toml`, any `async def test_` function is automatically treated as an async test — no `@pytest.mark.asyncio` decorator is needed (though `tests/test_diagnostics.py` uses explicit markers for compatibility reasons).
+Use `setup_coordinator_with_data` for entity and coordinator state tests. Patch only the specific collaborator you want to exercise; the helper patches everything else.
 
-**Core fixtures from `tests/conftest.py`:**
+For tests that exercise the coordinator's `_async_update_data` path directly (error handling, scan events, dedup logic), construct the coordinator manually and call `_async_load_store` then `_async_update_data` under a full patch context. See `test_coordinator.py::test_new_shipment_is_posted` for the canonical Gmail patch set, or `test_coordinator.py::test_imap_basic_poll_cycle` for the IMAP variant.
 
-- `hass` — provided automatically by `pytest-homeassistant-custom-component`; a fully initialized but isolated HA instance
-- `enable_custom_integrations` — `autouse=True` fixture that allows the HA component loader to find `custom_components/` during tests
-- `mock_config_entry` — a `MockConfigEntry` pre-populated with valid Gmail OAuth2 token data and a `test-parcelapp-key`
-- `mock_imap_config_entry` — a `MockConfigEntry` pre-populated with valid IMAP connection data
-- `setup_coordinator_with_data(hass, mock_config_entry, data)` — shared helper that patches all coordinator dependencies (GmailClient, ParcelAppClient, EmailParser, Store, OAuth2 flow) and seeds `coordinator.data` with a supplied dict; returns the configured coordinator
+### `aioresponses` for HTTP mocking
 
-**Mocking coordinator dependencies:** Integration tests that exercise the coordinator must patch all I/O. The standard pattern patches at the module where the name is looked up:
+For `ParcelAppClient` unit tests, use `aioresponses` as a context manager to intercept `aiohttp` calls:
 
 ```python
-with (
-    patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
-    patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
-    patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
-    patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-    patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow") as mock_oauth,
-):
-    mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-    mock_store_cls.return_value.async_save = AsyncMock()
-    # ... configure mocks and run assertions
-```
-
-**Mocking HTTP responses:** Tests for `ParcelAppClient` and similar HTTP clients use `aioresponses` to intercept `aiohttp` calls:
-
-```python
+import aiohttp
+import pytest
 from aioresponses import aioresponses
+from custom_components.shop2parcel.api.parcelapp import ADD_DELIVERY_URL, ParcelAppClient
+from custom_components.shop2parcel.api.exceptions import ParcelAppQuotaError
 
-async def test_add_delivery_success(client):
-    with aioresponses() as m:
-        m.post("https://web.parcelapp.net/...", status=200)
-        await client.async_add_delivery(...)
+
+@pytest.fixture
+async def client():
+    async with aiohttp.ClientSession() as session:
+        yield ParcelAppClient(session=session, api_key="test-key-123")
+
+
+async def test_quota_error(client):
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, payload={"error": "quota exceeded"}, status=429)
+        with pytest.raises(ParcelAppQuotaError):
+            await client.async_add_delivery("TRACK123", "ups", "Order #1")
 ```
 
-**Email parser tests** use real HTML fixture files from `tests/fixtures/`. Load them via the provided fixtures (`shopify_html`, `ups_html`, `usps_html`, `fedex_html`) or read them directly with `pathlib.Path`.
+### IMAP mocking
 
-**Test doc-string conventions:** Each test function carries a doc-string with the requirement ID it covers (e.g., `"""FWRD-01: New parsed shipment triggers ParcelAppClient.async_add_delivery."""`). Use the same convention when adding tests for a new requirement.
+For `ImapClient` unit tests, mock `imaplib.IMAP4_SSL` with `spec=imaplib.IMAP4_SSL`. The `spec` argument ensures calls to undeclared IMAP4 methods raise `AttributeError`, enforcing the read-only contract:
 
-## Coverage Requirements
+```python
+from unittest.mock import MagicMock, patch
+import imaplib
+from custom_components.shop2parcel.api.imap_client import ImapClient
 
-No minimum coverage thresholds are configured. The `[tool.coverage.run]` section in `pyproject.toml` scopes coverage collection to `custom_components/` when `--cov` is passed, but CI does not enforce a threshold — coverage is measured for visibility, not as a gate.
+
+async def _inline_executor(func, *args):
+    return func(*args)
+
+
+def test_my_imap_scenario():
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com", 993, "user@example.com", "password",
+            "ssl", 'SUBJECT "shipped"', "1-Jan-2026",
+        )
+    # assert mock_conn method calls
+```
+
+### File naming convention
+
+Test files for integration-level tests are named `tests/test_{module_name}.py`. API layer test files are named `tests/api/test_{api_module_name}.py`. Test functions are named `test_{what_it_checks}`.
+
+---
+
+## Coverage
+
+No minimum coverage thresholds are configured. Coverage collection is defined in `pyproject.toml`:
+
+```toml
+[tool.coverage.run]
+source = ["custom_components"]
+```
 
 To generate a local coverage report:
 
 ```bash
-.venv/bin/pytest --cov=custom_components --cov-report=term-missing --cov-report=html
+.venv/bin/pytest tests/ --cov=custom_components --cov-report=term-missing
 ```
 
-The HTML report is written to `htmlcov/`.
+---
 
 ## CI Integration
 
-Tests run in the **`pytest + lint`** workflow (`.github/workflows/pytest.yml`) on every push and pull request to any branch.
+Tests run automatically on every push and pull request via `.github/workflows/pytest.yml`.
+
+**Workflow:** `pytest + lint`
+**Trigger:** push or PR to any branch (`branches: ["**"]`)
+**Python version:** 3.14
+
+The workflow has two parallel jobs:
 
 **`pytest` job:**
+1. Checks out the repository
+2. Sets up Python 3.14 with pip caching
+3. Installs the package and dev dependencies: `pip install ".[dev]"`
+4. Runs the full test suite: `python -m pytest tests/ -v --tb=short`
 
-| Setting | Value |
-|---------|-------|
-| Workflow file | `.github/workflows/pytest.yml` |
-| Trigger | Push or PR to any branch |
-| Runner | `ubuntu-latest` |
-| Python version | `3.14` |
-| Install command | `pip install ".[dev]"` |
-| Test command | `python -m pytest tests/ -v --tb=short` |
+**`ruff + mypy` job:**
+1. Checks out the repository
+2. Sets up Python 3.14 with pip caching
+3. Installs lint tools: `pip install ".[dev]" ruff mypy`
+4. Runs `ruff check .`
+5. Runs `ruff format --check .`
+6. Runs `mypy custom_components/shop2parcel/`
 
-**`ruff + mypy` job** (runs in parallel with the pytest job):
-
-| Tool | Command |
-|------|---------|
-| ruff lint | `ruff check .` |
-| ruff format | `ruff format --check .` |
-| mypy | `mypy custom_components/shop2parcel/` |
-
-Both jobs must pass for a PR to be considered ready to merge. The `hassfest` and `hacs` workflows (`.github/workflows/hassfest.yml` and `.github/workflows/hacs.yml`) run separately to validate `manifest.json` and HACS packaging requirements.
+Both jobs must pass for a PR to be mergeable. The `hassfest.yml` and `hacs.yml` workflows additionally validate `manifest.json` and HACS packaging requirements on every PR.

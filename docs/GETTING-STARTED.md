@@ -1,197 +1,235 @@
 <!-- generated-by: gsd-doc-writer -->
-# Getting Started with Shop2Parcel
+# Getting Started
 
-This guide walks you from a fresh Home Assistant instance to a working Shop2Parcel integration — sensors appearing for your Shopify shipments, tracking forwarded to Parcel automatically.
-
-Two connection paths are available. Choose the one that fits your setup:
-
-- **Gmail OAuth2** — connects via the Gmail API using a Google Cloud OAuth2 credential. More setup steps upfront, but no password to manage and access is scoped to read-only.
-- **IMAP** — connects to any IMAP server (Gmail, Outlook, iCloud, self-hosted, etc.) with a username and password (or app password). Simpler to configure if IMAP is already enabled on your account.
-
-Both paths require a [Parcel](https://web.parcelapp.net) account with an API key.
+This guide walks you through installing and configuring Shop2Parcel for the first time. By the end you will have the integration running, shipping confirmation emails forwarded to Parcel, and at least one shipment sensor visible in Home Assistant.
 
 ---
 
 ## Prerequisites
 
-### Home Assistant and HACS
+### Home Assistant
 
-- Home Assistant `2025.1.0` or later
-- HACS installed in Home Assistant (required for custom repository installation)
+- Home Assistant **2025.1.0 or later** (declared in `hacs.json`)
+- HACS (Home Assistant Community Store) installed — [HACS installation guide](https://hacs.xyz/docs/setup/download)
 
-### Gmail OAuth2 path
+### Parcel account
 
-- Gmail account that receives Shopify shipping confirmation emails
-- Google Cloud project with the Gmail API enabled and OAuth2 credentials created (see [Gmail OAuth2 Setup](#gmail-oauth2-setup) below)
+- A [Parcel](https://parcelapp.net) account at [web.parcelapp.net](https://web.parcelapp.net)
+- Your **Parcel API key** — found in the Parcel web app under **Settings → API**
+- The free Parcel tier allows up to **20 new tracking numbers per day**. Shop2Parcel pauses forwarding when this limit is reached and resumes automatically at midnight UTC.
 
-### IMAP path
+### Email access — choose one
 
-- Any email account accessible via IMAP with IMAP access enabled
-- App password if your provider requires two-factor authentication (required for Gmail IMAP with 2FA; required for iCloud)
+**Option A: Gmail OAuth2 (recommended)**
 
-### Both paths
+- A Gmail account that receives Shopify shipping confirmation emails or direct carrier notifications
+- A **Google Cloud project** with the Gmail API enabled and OAuth2 credentials created (see [Gmail OAuth2 setup](#step-2-gmail-oauth2-setup) below)
 
-- Parcel account at [web.parcelapp.net](https://web.parcelapp.net) with an API key
+**Option B: IMAP**
+
+- Any email account accessible via IMAP (Gmail, Outlook, iCloud, self-hosted, etc.)
+- IMAP access enabled for the account
+- An **app password** if your provider requires two-factor authentication (required for Gmail IMAP with 2FA enabled)
 
 ---
 
-## Step 1 — Install via HACS
+## Step 1: Install via HACS
 
-1. Open **HACS** in your Home Assistant sidebar.
+1. Open HACS in Home Assistant.
 2. Click the three-dot menu (top right) and select **Custom repositories**.
-3. Enter `https://github.com/Pascal-ZeGerman/shop2parcel`, set the category to **Integration**, and click **Add**.
+3. Enter `https://github.com/Pascal-ZeGerman/shop2parcel`, select category **Integration**, and click **Add**.
 4. Find **Shop2Parcel** in the integrations list and click **Download**.
-5. Restart Home Assistant.
+5. **Restart Home Assistant** — the integration will not appear until after a restart.
 
 ---
 
-## Step 2 — Get your Parcel API key
+## Step 2: Gmail OAuth2 Setup
 
-Both setup paths require a Parcel API key before you can complete the wizard.
+Skip this section if you are using IMAP — go to [Step 3: Add the Integration](#step-3-add-the-integration).
 
-1. Sign in at [web.parcelapp.net](https://web.parcelapp.net).
-2. Go to **Settings → API Key**.
-3. Copy the key — you will paste it into the Shop2Parcel setup wizard in the final step.
+Shop2Parcel reads Gmail using Google's Gmail API. You need a personal OAuth2 client credential registered in HA's Application Credentials UI before adding the integration.
 
-> The free Parcel tier allows up to 20 new tracking numbers per day. If you exceed this, Shop2Parcel pauses forwarding new shipments until midnight UTC and then resumes automatically. Existing tracked shipments are not affected.
-
----
-
-## Step 3 — Add the Integration
-
-Go to **Settings → Devices & Services → + Add Integration** and search for **Shop2Parcel**.
-
-The setup wizard opens with a connection type picker. Choose your path and follow the steps below.
-
----
-
-## Gmail OAuth2 Setup
-
-Complete this section before starting the setup wizard if you are using the Gmail path.
-
-### A. Create a Google Cloud project and enable the Gmail API
+### 2a. Create a Google Cloud project and enable the Gmail API
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/).
-2. Click the project selector at the top and choose **New Project**. Name it (e.g., `shop2parcel-ha`) and click **Create**.
+2. Click the project selector at the top and choose **New Project**. Give it a name (e.g., `shop2parcel-ha`) and click **Create**.
 3. In the left menu go to **APIs & Services → Library**.
 4. Search for **Gmail API** and click **Enable**.
 
-### B. Configure the OAuth consent screen
+### 2b. Configure the OAuth consent screen
 
 1. In the left menu go to **APIs & Services → OAuth consent screen**.
 2. Choose **External** and click **Create**.
-3. Fill in the required fields: App name (`Shop2Parcel`), User support email, Developer contact email. Click **Save and Continue**.
-4. On the **Scopes** page click **Add or Remove Scopes**, search for `gmail.readonly`, check it, and click **Update**. Click **Save and Continue**.
-5. On the **Test users** page add your own Gmail address. Click **Save and Continue**.
-6. Review and click **Back to Dashboard**.
+3. Fill in the required fields:
+   - **App name**: `Shop2Parcel`
+   - **User support email**: your own email address
+   - **Developer contact information**: your own email address
+4. Click **Save and Continue**.
+5. On the **Scopes** page click **Add or Remove Scopes**, search for `gmail.readonly`, check it, and click **Update**. Click **Save and Continue**.
+6. On the **Test users** page click **+ Add Users** and add your own Gmail address. Click **Save and Continue**.
+7. Review and click **Back to Dashboard**.
 
-### C. Create OAuth2 client credentials
+> The app will show as "unverified" in the Google consent screen. This is normal for a personal app — you will be prompted to click **Advanced → Go to Shop2Parcel (unsafe)** during the OAuth2 flow in Home Assistant.
+
+### 2c. Create OAuth2 client credentials
 
 1. In the left menu go to **APIs & Services → Credentials**.
 2. Click **+ Create Credentials → OAuth client ID**.
-3. Choose application type **Web application**. Name it (e.g., `shop2parcel-ha`) and click **Create**.
-4. Copy the **Client ID** and **Client Secret** shown in the dialog.
+3. Choose application type **Web application**.
+4. Give it a name (e.g., `shop2parcel-ha`) and click **Create**.
+5. Copy the **Client ID** and **Client Secret** shown in the dialog.
 
-> Keep your Client Secret private — never commit it to git or share it publicly.
+> Keep your Client Secret private. Never commit it to git or paste it into a public issue.
 
-### D. Enter credentials in Home Assistant
+### 2d. Register credentials in Home Assistant
 
-Before the setup wizard can start the OAuth2 flow, Home Assistant needs your Client ID and Secret in its Application Credentials store.
+1. In Home Assistant go to **Settings → Devices & Services**.
+2. Click **Application Credentials** (top right, or search for it in the menu).
+3. Click **+ Add Application Credentials** and select **Shop2Parcel** from the integration list.
+4. Paste your **Client ID** and **Client Secret** and click **Create**.
 
-When you select **Gmail** in the connection type picker, Home Assistant will prompt you to enter your **Client ID** and **Client Secret** in an Application Credentials dialog (or direct you to **Settings → Application Credentials** if they are not yet stored).
-
-### E. Complete the OAuth2 consent flow
-
-After the credentials are saved, Home Assistant opens a Google OAuth2 consent screen in your browser. You may see an "unverified app" warning — this is expected for a personal OAuth2 application. Click **Advanced → Go to Shop2Parcel (unsafe)** to proceed and grant the `gmail.readonly` scope.
-
-### F. Enter your Parcel API key
-
-After the OAuth2 consent completes, the wizard shows a final form. Paste your Parcel API key and confirm the entry name (pre-filled as `Shop2Parcel (your@gmail.com)`). Click **Submit**.
-
-The integration validates the API key against the parcelapp.net view-deliveries endpoint. If validation fails, check that you copied the key correctly.
+You only need to do this once. The credentials are stored in HA's encrypted storage.
 
 ---
 
-## IMAP Setup
+## Step 3: Add the Integration
 
-### A. Enable IMAP on your email account
+1. Go to **Settings → Devices & Services**.
+2. Click **+ Add Integration** (bottom right).
+3. Search for **Shop2Parcel** and click it.
+4. The setup wizard shows a **connection type** picker:
 
-- **Gmail:** Go to **Gmail Settings → See all settings → Forwarding and POP/IMAP → Enable IMAP**. If your Google account has 2FA enabled, generate an App Password at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) and use that as the password.
-- **Outlook / Hotmail:** IMAP is enabled by default. Use your Microsoft account password or, for accounts with 2FA, generate an App Password.
-- **iCloud:** Generate an app-specific password at [appleid.apple.com](https://appleid.apple.com). Use `imap.mail.me.com` as the host.
-- **Self-hosted:** Confirm IMAP is enabled in your mail server configuration.
+### Option A: Gmail OAuth2
 
-### B. Enter IMAP credentials in the wizard
+1. Select **Gmail** and click **Submit**.
+2. A browser pop-up opens for Google's OAuth2 consent screen. If you see an "unverified app" warning, click **Advanced → Go to Shop2Parcel (unsafe)** and grant the `gmail.readonly` scope.
+3. After authorizing, the wizard returns to Home Assistant and shows the **finish** step.
+4. Enter your **Parcel API key** (from [web.parcelapp.net](https://web.parcelapp.net) → Settings → API) and optionally change the entry name.
+5. Click **Submit**. The integration validates the API key against parcelapp.net before saving.
 
-Select **IMAP** in the connection type picker. The wizard shows a single form with these fields:
+### Option B: IMAP
 
-| Field | Description | Default |
-|-------|-------------|---------|
-| IMAP host | Hostname of your IMAP server (e.g., `imap.gmail.com`, `imap.outlook.com`) | — |
-| Port | IMAP port number | `993` |
-| Username | Your email address | — |
-| Password | Your account password or app password | — |
-| TLS mode | `ssl`, `starttls`, or `none` | `ssl` |
+1. Select **IMAP** and click **Submit**.
+2. Enter your IMAP server details:
 
-Port `993` with TLS mode `ssl` is correct for most providers. Use port `143` for `starttls` or `none`.
+   | Field | Example | Notes |
+   |-------|---------|-------|
+   | IMAP server hostname | `imap.gmail.com` | For Outlook: `imap.outlook.com`; for iCloud: `imap.mail.me.com` |
+   | Port | `993` | 993 for SSL (default); 143 for STARTTLS |
+   | Username | `you@gmail.com` | Your full email address |
+   | Password | — | Use an app password if your provider requires 2FA |
+   | TLS mode | `ssl` | `ssl` (recommended), `starttls`, or `none` |
 
-After you submit, Shop2Parcel performs a live connection test against the IMAP server. If it fails, an error is shown — check the hostname, port, credentials, and TLS mode.
+3. Click **Submit**. The config flow tests the IMAP connection before proceeding. If it fails, check the hostname, port, and credentials.
+4. On the next step, enter your **Parcel API key** and click **Submit**.
 
-### C. Enter your Parcel API key
-
-On success, the wizard proceeds to the final form. Paste your Parcel API key and confirm the entry name (pre-filled as `Shop2Parcel (username@host)`). Click **Submit**.
-
----
-
-## First Run
-
-After setup completes, Shop2Parcel creates a device entry and begins polling on the default 30-minute interval. Within the first poll cycle, any Shopify shipping confirmation emails already in the inbox (within the default lookback window) are processed and forwarded to Parcel.
-
-Sensor entities appear under **Settings → Devices & Services → Shop2Parcel**:
-
-- `sensor.shop2parcel_<order_number>` — one per tracked shipment
-- `binary_sensor.shop2parcel_has_active_shipments` — `on` when at least one active shipment is present
-- Six diagnostic sensors tracking poll statistics and scan activity
-
-To trigger an immediate poll without waiting 30 minutes, go to **Settings → Devices & Services → Shop2Parcel → three-dot menu → Reload**.
+You can run setup again to add a second account (Gmail or IMAP) as a separate integration entry.
 
 ---
 
-## Common Setup Issues
+## Step 4: Verify the Integration is Working
 
-**"Invalid auth" error during IMAP setup**
+After setup completes the integration entry appears in **Settings → Devices & Services** under **Shop2Parcel**. Click the entry to open the device page.
 
-The username/password combination was rejected by the IMAP server. If your account uses 2FA, you must use an app password rather than your regular account password. Gmail and iCloud both require this.
+### Expected entities
 
-**"Cannot connect" error during IMAP setup**
+The following entities are created immediately on first load. They all belong to a single **Shop2Parcel** device per config entry.
 
-The IMAP server was unreachable. Check:
-- Hostname spelling (e.g., `imap.gmail.com` not `smtp.gmail.com`)
-- Port number matches the TLS mode (`993` for `ssl`, `143` for `starttls` or `none`)
-- IMAP is enabled in your email provider settings
+**Binary sensor:**
 
-**"Invalid API key" error in the Parcel step**
+| Entity | What it shows |
+|--------|---------------|
+| `binary_sensor.shop2parcel_has_active_shipments` | `on` when at least one shipment is in the coordinator, `off` when none are present |
 
-The parcelapp.net API key was not accepted. Verify you copied the full key from **web.parcelapp.net → Settings → API Key** without trailing spaces.
+**Diagnostic sensors** (visible under the device, category: Diagnostic):
 
-**Google "unverified app" warning during OAuth2**
+| Entity | What it measures |
+|--------|-----------------|
+| `sensor.shop2parcel_emails_returned` | Total emails returned by Gmail/IMAP before deduplication |
+| `sensor.shop2parcel_new_emails_inspected` | Emails that passed the dedup check and were parsed |
+| `sensor.shop2parcel_emails_matched` | Emails that produced a recognized shipment |
+| `sensor.shop2parcel_tracking_numbers_found` | Cumulative tracking numbers extracted |
+| `sensor.shop2parcel_keyword_hits` | Cumulative fallback regex matches (broad-scan arm) |
+| `sensor.shop2parcel_activity_log` | Count of all scan events; `recent_events` attribute holds the last 10 events |
 
-This is expected. Your Google Cloud project is in testing mode and is not verified by Google. Click **Advanced → Go to Shop2Parcel (unsafe)** to proceed. Only your own Gmail address (added as a test user in step B5) can authorize.
+> Entity IDs above use the default HA naming convention. If you have multiple Shop2Parcel entries, HA appends a suffix to disambiguate.
 
-**Gmail OAuth2 reauth required after token revocation**
+**Shipment sensors** — one per forwarded shipment:
 
-If the integration card shows an error requiring re-authentication, click **Re-authenticate** and complete the Google OAuth2 consent flow again. This happens when the Google Cloud project is modified or the test user list changes, which revokes previously issued refresh tokens.
+Each shipment that is successfully parsed and forwarded to Parcel creates a new sensor entity. The sensor is named **Shipment `<order_name>`** under the Shop2Parcel device (e.g., **Shipment #1234**). The unique ID is composed as `shop2parcel_{entry_id}_{message_id}` — stable across HA restarts.
 
-**No shipments appear after the first poll**
+| Attribute | Value |
+|-----------|-------|
+| State | `in_transit` (static — no per-poll status fetch in v1) |
+| `order_name` | Shopify order name (e.g., `#1234`) |
+| `tracking_number` | Tracking number extracted from the email |
+| `carrier` | Carrier name (e.g., `UPS`, `FedEx`, `USPS`) |
+| `email_date` | Date the shipping email was received |
 
-1. Confirm that shipping emails from `no-reply@shopify.com` exist in the monitored inbox.
-2. Enable **Debug mode** via **Settings → Devices & Services → Shop2Parcel → Configure → Debug mode**. Debug mode extends the scan window and suppresses actual Parcel POSTs — useful for verifying email parsing without consuming the 20/day quota.
-3. Reload the integration and check the `sensor.shop2parcel_emails_returned` and `sensor.shop2parcel_emails_matched` values to see where emails are being filtered.
-4. Download the diagnostics report (click **Download Diagnostics** on the integration card) for a detailed activity log.
+### Triggering a first poll
+
+The coordinator polls on a schedule (default: every **30 minutes**). To trigger an immediate poll:
+
+1. Go to **Settings → Devices & Services → Shop2Parcel**.
+2. Click the three-dot menu on the integration card.
+3. Select **Reload**.
+
+After reload completes, check `sensor.shop2parcel_emails_returned` — if the number is greater than zero, emails are being retrieved. If `sensor.shop2parcel_emails_matched` is also non-zero, shipments have been found and forwarded to Parcel.
+
+---
+
+## Common First-Run Issues
+
+### No entities appear at all
+
+- Confirm the integration was added successfully — it should show in **Settings → Devices & Services** without an error badge.
+- Restart Home Assistant if the integration entry shows a "loading" state that does not resolve.
+
+### Diagnostic sensors show zeros after reload
+
+The poll ran but no emails matched. Check:
+
+1. The monitored inbox contains shipping confirmation emails from `no-reply@shopify.com` (or UPS/USPS/FedEx for direct carrier emails).
+2. For Gmail: paste the Gmail search query shown in **Options** directly into the Gmail search bar to confirm it returns the expected emails.
+3. Enable **Debug mode** via **Settings → Devices & Services → Shop2Parcel → Configure** to re-scan all emails without posting to Parcel — this extends the Gmail scan window to 365 days and logs detailed outcomes per email.
+
+### "Unverified app" warning during Gmail OAuth2
+
+This is expected for a personal Google Cloud project. Click **Advanced → Go to Shop2Parcel (unsafe)** to proceed. The `gmail.readonly` scope grants read-only access — no emails can be sent or modified.
+
+### Gmail OAuth2: "Invalid client" error
+
+The Client ID or Client Secret entered in Application Credentials is incorrect or copied with extra whitespace. Remove the existing Application Credentials entry and re-enter the values exactly as shown in the Google Cloud Console.
+
+### IMAP: "invalid_auth" error
+
+- Confirm the username (full email address) and password are correct.
+- If you use Gmail with 2FA, you must use an **app password** — generate one at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Your regular Google password will not work.
+- For iCloud accounts, generate an app-specific password at [appleid.apple.com](https://appleid.apple.com).
+
+### IMAP: "imap_cannot_connect" error
+
+- Verify the hostname and port. Port 993 requires TLS mode `ssl`; port 143 uses `starttls` or `none`.
+- Common hostnames: Gmail → `imap.gmail.com`; Outlook/Hotmail → `imap.outlook.com`; iCloud → `imap.mail.me.com`.
+- Confirm IMAP access is enabled in your email provider's settings (Gmail: **Settings → See all settings → Forwarding and POP/IMAP → Enable IMAP**).
+
+### Parcel API key rejected
+
+The key is validated by calling the parcelapp.net view-deliveries endpoint at setup time. If this step fails with `invalid_api_key`, re-copy the key from [web.parcelapp.net](https://web.parcelapp.net) → Settings → API and ensure no trailing spaces are included.
+
+### Shipments found but no sensor created
+
+The tracking number was previously submitted and the dedup check skipped it. Check `sensor.shop2parcel_activity_log` attributes — the `recent_events` list shows the outcome for each inspected email (`already_added` entries indicate duplicates). If the sensor was previously removed from the entity registry, reload the integration to re-register it.
+
+### Re-authentication required (Gmail)
+
+If the integration card shows an error badge with a re-authenticate prompt, click **Re-authenticate** and complete the Google consent flow again. This occurs when the refresh token is revoked — typically because the Google Cloud project was modified or the test user list was changed after initial authorization.
 
 ---
 
 ## Next Steps
 
-- See [CONFIGURATION.md](CONFIGURATION.md) for poll interval, Gmail search query, IMAP search criteria, and all other configurable options.
-- See [ARCHITECTURE.md](ARCHITECTURE.md) for a description of how the integration works internally.
+- See [CONFIGURATION.md](CONFIGURATION.md) for all credential fields, options, and per-environment settings.
+- See [ARCHITECTURE.md](ARCHITECTURE.md) for a component diagram and data flow description.
+- Adjust the poll interval or Gmail query via **Settings → Devices & Services → Shop2Parcel → Configure**.
+- Enable **Debug mode** to verify email parsing before forwarding live shipments to Parcel.
