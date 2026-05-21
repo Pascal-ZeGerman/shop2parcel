@@ -86,19 +86,19 @@ class ParcelAppClient:
                     reset_at: int | None = None
                     try:
                         data = await resp.json(content_type=None)
-                        reset_at = data.get("reset_at")
-                    except ValueError:
-                        pass  # Non-JSON body — reset_at stays None.
-                    except aiohttp.ContentTypeError:
-                        pass  # Wrong content-type body — reset_at stays None.
+                        if isinstance(data, dict):
+                            reset_at = data.get("reset_at")
+                    except (ValueError, aiohttp.ContentTypeError):
+                        pass  # Non-JSON or wrong content-type body — reset_at stays None.
                     raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
                 if resp.status == 400:
                     try:
                         data = await resp.json(content_type=None)
-                        msg = data.get("error_message", "Bad request")
-                    except ValueError:
-                        msg = "Bad request (non-JSON body)"
-                    except aiohttp.ContentTypeError:
+                        if isinstance(data, dict):
+                            msg = data.get("error_message", "Bad request")
+                        else:
+                            msg = "Bad request (unexpected JSON shape)"
+                    except (ValueError, aiohttp.ContentTypeError):
                         msg = "Bad request (non-JSON body)"
                     if msg == "You have already added this delivery to the app":
                         raise ParcelAppAlreadyAddedError(msg)
