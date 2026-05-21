@@ -105,7 +105,7 @@ async def async_get_config_entry_diagnostics(
         # diagnostics download to JSON.  (RESEARCH.md Pitfall 1)
         if "scan_events" in poll_stats:
             poll_stats["scan_events"] = list(poll_stats["scan_events"])
-        activity_log = list(diag_obj.scan_events)
+        activity_log = list(poll_stats.get("scan_events", []))
 
     # Build recent_shipments — 10 most recent by email_date. Insertion order is not
     # used because the dict is repopulated across polls and restarts in poll-discovery
