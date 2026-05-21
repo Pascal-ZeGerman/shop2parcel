@@ -287,6 +287,63 @@ async def test_get_deliveries_uses_filter_mode_param(client):
 
 
 # ---------------------------------------------------------------------------
+# async_add_delivery — null / missing / empty error_message (W5/P13-WR-05)
+# ---------------------------------------------------------------------------
+
+
+async def test_add_delivery_400_with_null_error_message_raises_with_default(client):
+    """W5/P13-WR-05: 400 body with error_message=null falls back to 'Bad request'."""
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=400,
+            payload={"success": False, "error_message": None},
+        )
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert str(exc_info.value) == "Bad request"
+
+
+async def test_add_delivery_400_with_missing_error_message_raises_with_default(client):
+    """W5/P13-WR-05: 400 body with no error_message key falls back to 'Bad request'."""
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=400,
+            payload={"success": False},
+        )
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert str(exc_info.value) == "Bad request"
+
+
+async def test_add_delivery_400_with_empty_string_error_message_raises_with_default(client):
+    """W5/P13-WR-05: 400 body with error_message='' falls back to 'Bad request'."""
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=400,
+            payload={"success": False, "error_message": ""},
+        )
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert str(exc_info.value) == "Bad request"
+
+
+async def test_add_delivery_400_with_non_string_error_message_raises_with_default(client):
+    """W5/P13-WR-05: 400 body with error_message=42 (non-string) falls back to 'Bad request'."""
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=400,
+            payload={"success": False, "error_message": 42},
+        )
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert str(exc_info.value) == "Bad request"
+
+
+# ---------------------------------------------------------------------------
 # Static / no-HA-import check
 # ---------------------------------------------------------------------------
 

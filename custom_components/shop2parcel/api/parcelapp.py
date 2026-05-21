@@ -92,10 +92,14 @@ class ParcelAppClient:
                         pass  # Non-JSON or wrong content-type body — reset_at stays None.
                     raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
                 if resp.status == 400:
+                    msg = "Bad request"
                     try:
                         data = await resp.json(content_type=None)
                         if isinstance(data, dict):
-                            msg = data.get("error_message", "Bad request")
+                            msg_value = data.get("error_message")
+                            if isinstance(msg_value, str) and msg_value.strip():
+                                msg = msg_value
+                            # else: keep default — covers None, non-string, empty string
                         else:
                             msg = "Bad request (unexpected JSON shape)"
                     except (ValueError, aiohttp.ContentTypeError):
