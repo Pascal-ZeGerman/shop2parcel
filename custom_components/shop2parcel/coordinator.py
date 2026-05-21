@@ -316,21 +316,30 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         )
 
     async def _async_save_store(self) -> None:
-        """Persist current dedup + quota state to Store."""
+        """Schedule a debounced persist of current dedup + quota state to Store.
+
+        Uses async_delay_save (W1/P13-WR-06) so rapid per-message saves within
+        a single poll are coalesced into one write. async_delay_save is
+        synchronous — it schedules the write; it does NOT write immediately.
+
+        The try/except only guards against scheduling errors; the actual write
+        errors surface in HA logs when the delayed timer fires.
+        """
         try:
-            await self._store.async_save(
-                {
+            self._store.async_delay_save(
+                lambda: {
                     "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
                     "quota_exhausted_until": self._quota_exhausted_until,
-                }
+                },
+                delay=5,
             )
             _LOGGER.debug(
-                "Saved %d submitted tracking numbers to store",
+                "Scheduled debounced save for %d submitted tracking numbers",
                 len(self._submitted_tracking_numbers),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
-                "Failed to persist dedup state — dedup may re-submit on next restart: %s",
+                "Failed to schedule dedup state save — dedup may re-submit on next restart: %s",
                 err,
                 exc_info=True,
             )

@@ -266,7 +266,7 @@ async def test_dbg03_gmail_dedup_bypass(hass, mock_config_entry):
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
             return_value=([{"id": "msg1"}], "q after:X")
         )
@@ -289,9 +289,9 @@ async def test_dbg03_gmail_dedup_bypass(hass, mock_config_entry):
     assert len(skipped_dedup_events) == 0, (
         f"Expected no skipped_dedup events in debug mode, got: {skipped_dedup_events}"
     )
-    # Store NOT written (no dedup persistence in debug mode)
-    assert mock_store_cls.return_value.async_save.call_count == 0, (
-        f"Expected _async_save_store call_count=0, got {mock_store_cls.return_value.async_save.call_count}"
+    # Store NOT written (no dedup persistence in debug mode) — W17/P14-WR-02
+    assert mock_store_cls.return_value.async_delay_save.call_count == 0, (
+        f"Expected async_delay_save call_count=0 in debug mode, got {mock_store_cls.return_value.async_delay_save.call_count}"
     )
 
 
@@ -326,7 +326,7 @@ async def test_dbg03_imap_dedup_bypass(hass, mock_imap_config_entry):
         ),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
             return_value=[{"uid": 1, "raw": raw_email}]
         )
@@ -345,8 +345,109 @@ async def test_dbg03_imap_dedup_bypass(hass, mock_imap_config_entry):
     assert len(skipped_dedup_events) == 0, (
         f"Expected no skipped_dedup events in debug mode, got: {skipped_dedup_events}"
     )
-    assert mock_store_cls.return_value.async_save.call_count == 0, (
-        f"Expected _async_save_store call_count=0, got {mock_store_cls.return_value.async_save.call_count}"
+    # Store NOT written (no dedup persistence in debug mode) — W17/P14-WR-02
+    assert mock_store_cls.return_value.async_delay_save.call_count == 0, (
+        f"Expected async_delay_save call_count=0 in debug mode, got {mock_store_cls.return_value.async_delay_save.call_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# W17/P14-WR-02: stale-quota NOT cleared in debug mode
+# ---------------------------------------------------------------------------
+
+
+async def test_debug_mode_does_not_clear_stale_quota_gmail(hass, mock_config_entry):
+    """W17/P14-WR-02 Gmail: stale _quota_exhausted_until is NOT cleared in debug mode."""
+    import time as _time_mod
+
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={CONF_DEBUG_MODE: True},
+    )
+    past_epoch = int(_time_mod.time()) - 3600  # 1 hour in the past
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.persistent_notification"
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        delay_save_mock = MagicMock()
+        mock_store_cls.return_value.async_delay_save = delay_save_mock
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([], "q after:X")
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        coord._quota_exhausted_until = past_epoch
+        await coord._async_update_data()
+
+    # Quota timestamp must be UNCHANGED in debug mode
+    assert coord._quota_exhausted_until == past_epoch, (
+        f"Expected quota_exhausted_until unchanged ({past_epoch}), got {coord._quota_exhausted_until}"
+    )
+    # Store must NOT be written in debug mode
+    assert delay_save_mock.call_count == 0, (
+        f"Expected async_delay_save call_count=0 in debug mode, got {delay_save_mock.call_count}"
+    )
+
+
+async def test_debug_mode_does_not_clear_stale_quota_imap(hass, mock_imap_config_entry):
+    """W17/P14-WR-02 IMAP: stale _quota_exhausted_until is NOT cleared in debug mode."""
+    import time as _time_mod
+
+    mock_imap_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_imap_config_entry,
+        options={
+            "imap_search": 'SUBJECT "shipped"',
+            "poll_interval": 30,
+            CONF_DEBUG_MODE: True,
+        },
+    )
+    past_epoch = int(_time_mod.time()) - 3600  # 1 hour in the past
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.persistent_notification"
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        delay_save_mock = MagicMock()
+        mock_store_cls.return_value.async_delay_save = delay_save_mock
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        coord._quota_exhausted_until = past_epoch
+        await coord._async_update_data()
+
+    # Quota timestamp must be UNCHANGED in debug mode
+    assert coord._quota_exhausted_until == past_epoch, (
+        f"Expected quota_exhausted_until unchanged ({past_epoch}), got {coord._quota_exhausted_until}"
+    )
+    # Store must NOT be written in debug mode
+    assert delay_save_mock.call_count == 0, (
+        f"Expected async_delay_save call_count=0 in debug mode, got {delay_save_mock.call_count}"
     )
 
 

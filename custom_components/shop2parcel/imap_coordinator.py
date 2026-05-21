@@ -463,9 +463,11 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 notification_id=debug_mode_notification_id(entry.entry_id),
             )
 
-        # Clear stale quota block.
+        # Clear stale quota block from Store once the window has expired.
+        # W17/P14-WR-02: skip in debug mode — zero store writes is the DBG-03 contract.
         if (
-            not quota_blocked
+            not debug_mode
+            and not quota_blocked
             and self._quota_exhausted_until is not None
             and int(time.time()) >= self._quota_exhausted_until
         ):

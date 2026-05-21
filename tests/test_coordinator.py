@@ -284,10 +284,10 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
 
 
 async def test_store_saved_after_post(hass, mock_config_entry):
-    """FWRD-03: Store.async_save called immediately after each successful POST.
+    """FWRD-03: Store.async_delay_save scheduled immediately after each successful POST.
 
-    Phase 10 change: saves are now per-POST (not deferred to end of loop).
-    Two distinct shipments → at least 2 save calls.
+    W1/P13-WR-06: saves are now debounced via async_delay_save (synchronous schedule).
+    Two distinct shipments → at least 2 schedule calls.
     """
     mock_config_entry.add_to_hass(hass)
     with (
@@ -310,8 +310,8 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        save_mock = AsyncMock()
-        mock_store_cls.return_value.async_save = save_mock
+        save_mock = MagicMock()
+        mock_store_cls.return_value.async_delay_save = save_mock
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
             return_value=([{"id": "msg1"}, {"id": "msg2"}], "q after:0")
         )
@@ -341,8 +341,8 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         await coord._async_update_data()
-        # Phase 10: immediate save after each POST — at least 2 saves for 2 distinct shipments.
-        assert save_mock.await_count >= 2
+        # W1: debounced save scheduled after each POST — at least 2 schedule calls.
+        assert save_mock.call_count >= 2
 
 
 # -------- FWRD-04: quota handling ---------------------------------------
@@ -371,7 +371,7 @@ async def test_quota_exhaustion(hass, mock_config_entry):
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
             return_value=([{"id": "msg1"}], "q after:0")
         )
@@ -387,7 +387,7 @@ async def test_quota_exhaustion(hass, mock_config_entry):
         # Should NOT raise — quota is handled gracefully
         data = await coord._async_update_data()
         assert coord._quota_exhausted_until == 1234567890
-        mock_store_cls.return_value.async_save.assert_called()
+        mock_store_cls.return_value.async_delay_save.assert_called()
         # Shipment NOT in data when quota is blocked — withheld so it is re-fetched and
         # POSTed correctly on the next cycle after quota resets (FWRD-02 fix, CR-02).
         assert "msg1" not in data
@@ -551,8 +551,8 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        save_mock = AsyncMock()
-        mock_store_cls.return_value.async_save = save_mock
+        save_mock = MagicMock()
+        mock_store_cls.return_value.async_delay_save = save_mock
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
             return_value=([{"id": "msg_recover"}], "q after:0")
         )
@@ -578,8 +578,8 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
         # Quota window was cleared
         assert coord._quota_exhausted_until is None
-        # Save was called at least once after recovery
-        assert save_mock.await_count >= 1
+        # Debounced save was scheduled at least once after recovery
+        assert save_mock.call_count >= 1
 
 
 # -------- FWRD-05: error translation taxonomy ---------------------------
@@ -2466,14 +2466,17 @@ async def test_load_store_debug_log(hass, mock_config_entry, caplog):
 
 
 async def test_save_store_debug_log(hass, mock_config_entry, caplog):
-    """DEDUP-03: _async_save_store emits a DEBUG log with the count of saved TNs."""
+    """DEDUP-03: _async_save_store emits a DEBUG log with the count of scheduled TNs.
+
+    W1/P13-WR-06: log message updated to reflect debounced scheduling via async_delay_save.
+    """
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         coord = GmailCoordinator(hass, mock_config_entry)
         coord._submitted_tracking_numbers = OrderedDict([("TN_A", None), ("TN_B", None)])
         with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
@@ -2481,7 +2484,7 @@ async def test_save_store_debug_log(hass, mock_config_entry, caplog):
     debug_messages = " ".join(
         r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
     )
-    assert "Saved 2 submitted tracking numbers to store" in debug_messages
+    assert "Scheduled debounced save for 2 submitted tracking numbers" in debug_messages
 
 
 async def test_already_added_gmail_writes_dedup(hass, mock_config_entry):
@@ -2508,7 +2511,7 @@ async def test_already_added_gmail_writes_dedup(hass, mock_config_entry):
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
             return_value=([{"id": "msg1"}], "q after:0")
         )
@@ -2527,7 +2530,7 @@ async def test_already_added_gmail_writes_dedup(hass, mock_config_entry):
 
     assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
     assert "msg1" not in data
-    mock_store_cls.return_value.async_save.assert_called()
+    mock_store_cls.return_value.async_delay_save.assert_called()
 
 
 async def test_already_added_gmail_emits_scan_event(hass, mock_config_entry):
@@ -2598,7 +2601,7 @@ async def test_already_added_imap_writes_dedup(hass, mock_imap_config_entry):
         ),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
         mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
@@ -2612,7 +2615,7 @@ async def test_already_added_imap_writes_dedup(hass, mock_imap_config_entry):
 
     assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
     assert "100" not in data
-    mock_store_cls.return_value.async_save.assert_called()
+    mock_store_cls.return_value.async_delay_save.assert_called()
 
 
 async def test_imap_invalid_tracking_suppresses_retry(hass, mock_imap_config_entry):
@@ -3188,3 +3191,42 @@ async def test_scan_events_total_equals_emails_scanned_total_in_full_cycle(
     assert coord._diagnostics.scan_events_total == 3
     # emails_scanned_total increments at all three exits (including invalid_internal_date)
     assert coord._diagnostics.emails_scanned_total == 3
+
+
+# ---------------------------------------------------------------------------
+# W1/P13-WR-06: debounced Store writes
+# ---------------------------------------------------------------------------
+
+
+async def test_save_store_uses_async_delay_save_not_async_save(hass, mock_config_entry):
+    """W1/P13-WR-06: _async_save_store schedules via async_delay_save (not async_save).
+
+    Calling _async_save_store directly must invoke async_delay_save once with
+    delay=5 and must NOT call async_save at all.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        delay_save_mock = MagicMock()
+        async_save_mock = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = delay_save_mock
+        mock_store_cls.return_value.async_save = async_save_mock
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        await coord._async_save_store()
+
+    # async_delay_save called once with delay=5
+    delay_save_mock.assert_called_once()
+    _, kwargs = delay_save_mock.call_args
+    assert kwargs.get("delay") == 5
+    # async_save must NOT be called (W1: debounce replaces immediate write)
+    async_save_mock.assert_not_called()

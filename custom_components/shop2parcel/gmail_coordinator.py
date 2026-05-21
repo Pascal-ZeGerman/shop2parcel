@@ -492,8 +492,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         # this, a past-epoch timestamp would accumulate across restarts indefinitely.
         # Skip when quota_blocked=True: the timestamp was just set this cycle and must
         # not be cleared in the same pass (even if reset_at is already in the past).
+        # W17/P14-WR-02: skip in debug mode — zero store writes is the DBG-03 contract.
         if (
-            not quota_blocked
+            not debug_mode
+            and not quota_blocked
             and self._quota_exhausted_until is not None
             and int(time.time()) >= self._quota_exhausted_until
         ):
