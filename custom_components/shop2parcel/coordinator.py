@@ -164,7 +164,19 @@ class Shop2ParcelStore(Store):
                 "submitted_tracking_numbers": [],
                 "quota_exhausted_until": old_data.get("quota_exhausted_until"),
             }
-        # Future major versions: return data unchanged (caller will handle).
+        if old_major_version > self.version:
+            _LOGGER.warning(
+                "Store contains data from a newer Shop2Parcel version (%d.%d > %d.%d) for entry %s; "
+                "downgrade not supported, discarding unknown schema.",
+                old_major_version,
+                old_minor_version,
+                self.version,
+                self.minor_version,
+                self.key.removeprefix("shop2parcel."),
+            )
+            return {"submitted_tracking_numbers": [], "quota_exhausted_until": None}
+        # Same major, future minor — passthrough.  Minor-version changes are backward
+        # compatible by convention so no migration is needed.
         return old_data
 
 
@@ -213,8 +225,18 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         stored = await self._store.async_load() or {}
         stored_list = stored.get("submitted_tracking_numbers", [])
-        self._submitted_tracking_numbers = OrderedDict((tn, None) for tn in stored_list)
-        self._quota_exhausted_until = stored.get("quota_exhausted_until")
+        if not isinstance(stored_list, list):
+            _LOGGER.warning(
+                "submitted_tracking_numbers in store is not a list (type=%s); "
+                "treating as empty — dedup will repopulate from parcelapp 'already added' 400s.",
+                type(stored_list).__name__,
+            )
+            stored_list = []
+        self._submitted_tracking_numbers = OrderedDict(
+            (tn, None) for tn in stored_list if isinstance(tn, str)
+        )
+        qe = stored.get("quota_exhausted_until")
+        self._quota_exhausted_until = qe if isinstance(qe, int) else None
         _LOGGER.debug(
             "Loaded %d submitted tracking numbers from store",
             len(self._submitted_tracking_numbers),

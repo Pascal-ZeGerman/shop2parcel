@@ -2681,3 +2681,65 @@ async def test_already_added_imap_emits_scan_event(hass, mock_imap_config_entry)
     assert event["tracking_number"] == shipment.tracking_number
     assert event["outcome"] == "already_added"
     assert coord._diagnostics.scan_events_total >= 1
+
+
+# -------- Store load hardening (W2/P13-WR-07) --------------------------------
+
+
+async def test_load_store_with_null_submitted_tracking_numbers_does_not_crash(
+    hass, mock_config_entry
+):
+    """W2/P13-WR-07: Non-list submitted_tracking_numbers (None) treated as empty without crash."""
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={"submitted_tracking_numbers": None, "quota_exhausted_until": None}
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()  # must not raise
+
+    assert coord._submitted_tracking_numbers == OrderedDict()
+
+
+async def test_load_store_filters_non_string_entries(hass, mock_config_entry):
+    """W2/P13-WR-07: Non-string items in submitted_tracking_numbers list are filtered."""
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": [None, 42, "VALID"],
+                "quota_exhausted_until": None,
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert list(coord._submitted_tracking_numbers.keys()) == ["VALID"]
+
+
+async def test_load_store_with_non_int_quota_exhausted_until(hass, mock_config_entry):
+    """W2/P13-WR-07: Non-int quota_exhausted_until is treated as None."""
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": [],
+                "quota_exhausted_until": "not an int",
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert coord._quota_exhausted_until is None

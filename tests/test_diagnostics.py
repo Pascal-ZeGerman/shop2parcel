@@ -196,6 +196,18 @@ async def test_diagnostics_activity_log_contains_events(hass, mock_config_entry)
 
 
 @pytest.mark.asyncio
+async def test_diagnostics_non_dataclass_diagnostics_returns_empty(hass, mock_config_entry):
+    """C1/P12-CR-01: non-dataclass coordinator._diagnostics must not crash and returns empty stats."""
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
+    coordinator._diagnostics = object()  # not a dataclass — triggers the guard branch
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    # Must not raise AttributeError — the guard must swallow gracefully
+    assert isinstance(result, dict)
+    assert result["poll_stats"] == {}
+    assert result["activity_log"] == []
+
+
+@pytest.mark.asyncio
 async def test_diagnostics_activity_log_contains_imap_events(hass, mock_config_entry):
     """activity_log contains IMAP-prefixed scan events — message_id prefix is an observable invariant."""
     coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
