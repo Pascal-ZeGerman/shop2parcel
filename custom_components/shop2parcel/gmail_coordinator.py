@@ -83,7 +83,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         except aiohttp.ClientResponseError as err:
             # 4xx from Google's token endpoint means the refresh token is invalid/revoked.
             # Raising ConfigEntryAuthFailed triggers HA's reauth flow instead of a retry loop.
-            if err.status < 500:
+            if err.status is not None and err.status < 500:
                 raise ConfigEntryAuthFailed(
                     f"Gmail OAuth token rejected by Google (HTTP {err.status})"
                 ) from err
@@ -91,7 +91,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         except (TimeoutError, aiohttp.ClientError) as err:
             raise UpdateFailed(f"Network error during Gmail token refresh: {err}") from err
         except Exception as err:  # noqa: BLE001 — translate unexpected auth errors to HA exception
-            raise ConfigEntryAuthFailed("Gmail token refresh failed") from err
+            raise ConfigEntryAuthFailed(
+                f"Gmail token refresh failed unexpectedly ({type(err).__name__})"
+            ) from err
         # Read access_token from the session's token property. oauth_session.token is
         # self.config_entry.data["token"] — after async_ensure_token_valid() updates
         # the config entry, both references reflect the refreshed token.

@@ -8,6 +8,7 @@ from collections import OrderedDict, deque
 from datetime import date, datetime, time, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -1489,7 +1490,72 @@ async def test_oauth2_token_refresh_failure_raises_config_entry_auth_failed(
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
-        with pytest.raises(ConfigEntryAuthFailed, match="token refresh"):
+        with pytest.raises(ConfigEntryAuthFailed, match="Gmail token refresh failed"):
+            await coord._async_update_data()
+
+
+async def test_oauth2_4xx_raises_config_entry_auth_failed(hass, mock_config_entry):
+    """I-06b: 4xx ClientResponseError from token endpoint → ConfigEntryAuthFailed."""
+    mock_config_entry.add_to_hass(hass)
+    err = aiohttp.ClientResponseError(MagicMock(), (), status=401)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(
+            side_effect=err
+        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(ConfigEntryAuthFailed, match="HTTP 401"):
+            await coord._async_update_data()
+
+
+async def test_oauth2_5xx_raises_update_failed(hass, mock_config_entry):
+    """I-06c: 5xx ClientResponseError from token endpoint → UpdateFailed (transient)."""
+    mock_config_entry.add_to_hass(hass)
+    err = aiohttp.ClientResponseError(MagicMock(), (), status=503)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(
+            side_effect=err
+        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(UpdateFailed, match="server error"):
+            await coord._async_update_data()
+
+
+async def test_oauth2_network_error_raises_update_failed(hass, mock_config_entry):
+    """I-06d: Network-level ClientError (no response) → UpdateFailed, not ConfigEntryAuthFailed."""
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(
+            side_effect=aiohttp.ClientConnectorError(MagicMock(), OSError("connection refused"))
+        )
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(UpdateFailed, match="Network error"):
             await coord._async_update_data()
 
 
