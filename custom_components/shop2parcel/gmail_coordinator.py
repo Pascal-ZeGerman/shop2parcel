@@ -78,11 +78,28 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         oauth_session = config_entry_oauth2_flow.OAuth2Session(
             self.hass, self.config_entry, implementation
         )
+        if not oauth_session.token.get("refresh_token"):
+            raise ConfigEntryAuthFailed(
+                "Gmail OAuth refresh_token is missing — please re-authorize. "
+                "This typically means the original sign-in did not grant offline access."
+            )
         try:
             await oauth_session.async_ensure_token_valid()
         except aiohttp.ClientResponseError as err:
-            # 4xx from Google's token endpoint means the refresh token is invalid/revoked.
-            # Raising ConfigEntryAuthFailed triggers HA's reauth flow instead of a retry loop.
+            # 4xx from Google's token endpoint → raise ConfigEntryAuthFailed to trigger reauth.
+            # 400 invalid_grant: token expired or revoked (common in Google Testing mode where
+            # refresh tokens expire after 7 days). 401: credentials rejected/revoked.
+            if err.status == 400:
+                raise ConfigEntryAuthFailed(
+                    "Gmail OAuth token expired or revoked (HTTP 400). "
+                    "If your Google Cloud project is in Testing mode, refresh tokens expire "
+                    "after 7 days — please re-authorize."
+                ) from err
+            if err.status == 401:
+                raise ConfigEntryAuthFailed(
+                    "Gmail OAuth credentials rejected by Google (HTTP 401) — "
+                    "token may have been revoked. Please re-authorize."
+                ) from err
             if err.status is not None and err.status < 500:
                 raise ConfigEntryAuthFailed(
                     f"Gmail OAuth token rejected by Google (HTTP {err.status})"
