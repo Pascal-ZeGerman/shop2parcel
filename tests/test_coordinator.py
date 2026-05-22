@@ -121,6 +121,7 @@ async def test_new_shipment_is_posted(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -177,6 +178,7 @@ async def test_no_duplicate_post(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -254,6 +256,7 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -307,6 +310,7 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -368,6 +372,7 @@ async def test_quota_exhaustion(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -414,6 +419,7 @@ async def test_quota_exhausted_until_midnight(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -454,6 +460,7 @@ async def test_quota_exhausted_until_reset_at(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -494,6 +501,7 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -548,6 +556,7 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -605,6 +614,7 @@ async def test_parcelapp_transient_error_skipped(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -643,6 +653,7 @@ async def test_gmail_transient_raises_update_failed(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -670,6 +681,7 @@ async def test_gmail_auth_raises_config_entry_auth_failed(hass, mock_config_entr
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -699,7 +711,10 @@ async def test_missing_access_token_raises_config_entry_auth_failed(hass, mock_c
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         # Token dict present but access_token is missing — triggers the guard
-        mock_oauth.OAuth2Session.return_value.token = {"expires_at": 9999999999.0}
+        mock_oauth.OAuth2Session.return_value.token = {
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -707,6 +722,37 @@ async def test_missing_access_token_raises_config_entry_auth_failed(hass, mock_c
         await coord._async_load_store()
         with pytest.raises(ConfigEntryAuthFailed, match="access_token"):
             await coord._async_update_data()
+
+
+async def test_missing_refresh_token_raises_config_entry_auth_failed(hass, mock_config_entry):
+    """IN-02: oauth_session.token with no refresh_token → ConfigEntryAuthFailed before token refresh.
+
+    Guards against the case where HA stored a token without refresh_token (e.g. original
+    auth done without access_type=offline, or Google OAuth app in Testing mode).
+    Fires before async_ensure_token_valid() so the error is immediate and actionable.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        # Token dict has access_token but no refresh_token — triggers the early guard
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(ConfigEntryAuthFailed, match="refresh_token"):
+            await coord._async_update_data()
+        # async_ensure_token_valid must NOT be called — guard fires before it
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid.assert_not_called()
 
 
 async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
@@ -733,6 +779,7 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -949,6 +996,7 @@ async def test_diagnostics_emails_scanned_increments(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -998,6 +1046,7 @@ async def test_diagnostics_last_poll_fields_reset_per_cycle(hass, mock_config_en
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1071,6 +1120,7 @@ async def test_diagnostics_no_html_body_skip_reason(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1119,6 +1169,7 @@ async def test_diagnostics_tracking_dedup_skip_counted(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1445,6 +1496,7 @@ async def test_parcelapp_auth_error_mid_loop_raises_config_entry_auth_failed(
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1635,6 +1687,7 @@ async def test_gmail_poll_passes_rescan_window_to_client(hass, mock_config_entry
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1687,6 +1740,7 @@ async def test_gmail_poll_uses_default_rescan_window_when_unset(hass, mock_confi
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1756,6 +1810,7 @@ async def test_scan_event_gmail_posted(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1805,6 +1860,7 @@ async def test_scan_event_gmail_no_match(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1853,6 +1909,7 @@ async def test_scan_event_gmail_parse_error(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1905,6 +1962,7 @@ async def test_scan_event_gmail_skipped_dedup(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -1962,6 +2020,7 @@ async def test_scan_event_gmail_skipped_quota(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -2012,6 +2071,7 @@ async def test_scan_events_not_reset_between_polls(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -2257,6 +2317,7 @@ async def test_scan_events_accumulate_across_gmail_and_imap(
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -2446,6 +2507,7 @@ async def test_gmail_coordinator_uses_tracking_number_as_description_when_order_
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -2565,6 +2627,7 @@ async def test_already_added_gmail_writes_dedup(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -2611,6 +2674,7 @@ async def test_already_added_gmail_emits_scan_event(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -2881,6 +2945,7 @@ async def test_scan_event_gmail_invalid_internal_date_emits_event(hass, mock_con
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -2924,6 +2989,7 @@ async def test_scan_event_gmail_parcelapp_quota_emits_event(hass, mock_config_en
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -2970,6 +3036,7 @@ async def test_scan_event_gmail_parcelapp_invalid_tracking_emits_event(hass, moc
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -3014,6 +3081,7 @@ async def test_scan_event_gmail_parcelapp_transient_emits_event(hass, mock_confi
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -3152,6 +3220,7 @@ async def test_parse_exception_error_msg_strips_html_tags(hass, mock_config_entr
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -3223,6 +3292,7 @@ async def test_scan_events_total_equals_emails_scanned_total_in_full_cycle(hass,
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())

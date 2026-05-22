@@ -78,6 +78,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         oauth_session = config_entry_oauth2_flow.OAuth2Session(
             self.hass, self.config_entry, implementation
         )
+        if not oauth_session.token.get("refresh_token"):
+            raise ConfigEntryAuthFailed(
+                "Gmail OAuth refresh_token is missing — please re-authorize the integration"
+            )
         try:
             await oauth_session.async_ensure_token_valid()
         except aiohttp.ClientResponseError as err:
