@@ -1504,9 +1504,7 @@ async def test_oauth2_4xx_raises_config_entry_auth_failed(hass, mock_config_entr
             "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
         ) as mock_oauth,
     ):
-        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(
-            side_effect=err
-        )
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(side_effect=err)
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -1526,9 +1524,7 @@ async def test_oauth2_5xx_raises_update_failed(hass, mock_config_entry):
             "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
         ) as mock_oauth,
     ):
-        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(
-            side_effect=err
-        )
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(side_effect=err)
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
