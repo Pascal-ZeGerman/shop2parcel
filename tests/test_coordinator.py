@@ -1566,6 +1566,61 @@ async def test_oauth2_4xx_raises_config_entry_auth_failed(hass, mock_config_entr
             await coord._async_update_data()
 
 
+async def test_oauth2_400_raises_testing_mode_hint(hass, mock_config_entry):
+    """I-06e: HTTP 400 from token endpoint → ConfigEntryAuthFailed with Testing-mode hint.
+
+    400 invalid_grant is the most common failure in Google OAuth Testing mode where
+    refresh tokens expire after 7 days. The error message must mention both
+    'expired or revoked' and the 7-day Testing mode context.
+    """
+    mock_config_entry.add_to_hass(hass)
+    err = aiohttp.ClientResponseError(MagicMock(), (), status=400)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(side_effect=err)
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(ConfigEntryAuthFailed, match="Testing mode"):
+            await coord._async_update_data()
+
+
+async def test_oauth2_other_4xx_raises_generic_message(hass, mock_config_entry):
+    """I-06f: Non-400/401 4xx from token endpoint → ConfigEntryAuthFailed with generic message."""
+    mock_config_entry.add_to_hass(hass)
+    err = aiohttp.ClientResponseError(MagicMock(), (), status=403)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock(side_effect=err)
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with pytest.raises(ConfigEntryAuthFailed, match="HTTP 403"):
+            await coord._async_update_data()
+
+
 async def test_oauth2_5xx_raises_update_failed(hass, mock_config_entry):
     """I-06c: 5xx ClientResponseError from token endpoint → UpdateFailed (transient)."""
     mock_config_entry.add_to_hass(hass)
