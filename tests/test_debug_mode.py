@@ -155,6 +155,7 @@ async def test_dbg02_gmail_window_override(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -269,6 +270,7 @@ async def test_dbg03_gmail_dedup_bypass(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -387,6 +389,7 @@ async def test_debug_mode_does_not_clear_stale_quota_gmail(hass, mock_config_ent
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -482,6 +485,7 @@ async def test_dbg04_gmail_no_post(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -591,6 +595,7 @@ async def test_dbg05_gmail_info_log(hass, mock_config_entry, caplog):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -721,6 +726,7 @@ async def test_dbg06_gmail_notification(hass, mock_config_entry):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())

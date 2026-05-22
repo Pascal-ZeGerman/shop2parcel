@@ -108,6 +108,7 @@ async def setup_coordinator_with_data(hass, mock_config_entry, data: dict[str, S
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
             "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
