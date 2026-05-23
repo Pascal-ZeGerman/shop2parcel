@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch as _patch
 
 import pytest
+
+from homeassistant.core import EVENT_HOMEASSISTANT_STOP
 
 from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator, Shop2ParcelStore
@@ -215,9 +217,6 @@ async def test_load_store_skips_corrupt_persisted_shipments_entry(
 # Returns (coordinator, mock_store_instance) so tests can inspect store calls.
 # ---------------------------------------------------------------------------
 
-from unittest.mock import patch as _patch  # noqa: E402 — after all regular imports
-
-
 async def _setup_coordinator(hass, config_entry, coordinator_cls):
     """Set up a coordinator with mocked store, clients, and parser.
 
@@ -234,8 +233,6 @@ async def _setup_coordinator(hass, config_entry, coordinator_cls):
 
     if coordinator_cls is GmailCoordinator:
         coordinator = await setup_coordinator_with_data(hass, config_entry, {})
-        # Re-apply persistent patches so _async_update_data() calls after setup
-        # do not hit the real OAuth2 infrastructure.
         _oauth_patcher = _patch(
             "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
         )
@@ -255,16 +252,12 @@ async def _setup_coordinator(hass, config_entry, coordinator_cls):
         # Overwrite the coordinator's _email_client with the new mock so the
         # persistent patch takes effect for subsequent _async_update_data() calls.
         coordinator._email_client = mock_gmail_cls.return_value
-        # Register cleanup via hass event loop (runs at end of test).
-        hass.async_add_executor_job(lambda: None)  # ensure loop is live
 
         def _stop_patchers():
             _oauth_patcher.stop()
             _gmail_patcher.stop()
 
         # Stop patchers when HA shuts down (end of test teardown).
-        from homeassistant.core import EVENT_HOMEASSISTANT_STOP
-
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, lambda _: _stop_patchers())
     else:
         coordinator = await setup_imap_coordinator_with_data(hass, config_entry, {})

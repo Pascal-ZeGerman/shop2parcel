@@ -532,11 +532,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
             await self._async_save_store()
 
         if not debug_mode:
-            trimmed = dict(current_data)
-            while len(trimmed) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                oldest = next(iter(trimmed))
-                del trimmed[oldest]
-            self._pending_shipments = trimmed
+            while len(current_data) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                del current_data[next(iter(current_data))]
+            self._pending_shipments = current_data
             await self._async_save_store()
 
         return current_data
