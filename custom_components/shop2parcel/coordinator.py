@@ -48,6 +48,17 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 3
 
+# Required fields and expected types for persisted_shipments store entries.
+# Used by _async_load_store to validate each entry before reconstructing ShipmentData.
+# Defined module-level for reuse and static-analysis visibility.
+_SHIPMENT_FIELD_TYPES: dict[str, type] = {
+    "tracking_number": str,
+    "carrier_name": str,
+    "order_name": str,
+    "message_id": str,
+    "email_date": int,
+}
+
 
 def _extract_email_meta(msg: dict) -> dict:
     """Extract subject, from, date, and snippet from a Gmail message dict.
@@ -254,6 +265,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
+        # Phase 13.1: shipment persistence across HA restarts.
+        # _pending_shipments: current live shipments to be persisted to store on next save.
+        # _restored_shipments: shipments loaded from store on startup (pre-first-poll).
+        self._pending_shipments: dict[str, ShipmentData] = {}
+        self._restored_shipments: dict[str, ShipmentData] = {}
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
@@ -325,6 +341,26 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         _LOGGER.debug(
             "Loaded %d submitted tracking numbers from store",
             len(self._submitted_tracking_numbers),
+        )
+        # Phase 13.1 (R5): load persisted_shipments with per-entry type validation.
+        # Each entry must be a dict with exactly the 5 fields in _SHIPMENT_FIELD_TYPES.
+        # Invalid entries are skipped with a WARNING (T-13.1-04 / ASVS V5).
+        restored: dict[str, ShipmentData] = {}
+        raw_shipments = stored.get("persisted_shipments", {})
+        if isinstance(raw_shipments, dict):
+            for msg_id, entry in raw_shipments.items():
+                if not isinstance(entry, dict) or not all(
+                    k in entry and isinstance(entry[k], t)
+                    for k, t in _SHIPMENT_FIELD_TYPES.items()
+                ):
+                    _LOGGER.warning(
+                        "persisted_shipments entry for %r is invalid — skipping", msg_id
+                    )
+                    continue
+                restored[msg_id] = ShipmentData(**{k: entry[k] for k in _SHIPMENT_FIELD_TYPES})
+        self._restored_shipments = restored
+        _LOGGER.debug(
+            "Restored %d persisted shipments from store", len(self._restored_shipments)
         )
 
     async def _async_save_store(self) -> None:
