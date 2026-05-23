@@ -223,11 +223,49 @@ async def _setup_coordinator(hass, config_entry, coordinator_cls):
 
     Returns (coordinator, mock_store_instance) where mock_store_instance exposes
     async_delay_save (MagicMock) so tests can inspect persisted_shipments.
+
+    For GmailCoordinator: applies persistent patches for the OAuth2 flow and
+    GmailClient so _async_update_data() can be called after setup without
+    the real OAuth infrastructure being invoked.  The patches are started
+    here (rather than scoped to the setup call) so subsequent direct calls to
+    coordinator._async_update_data() in tests continue to see the mocks.
     """
     from tests.conftest import setup_coordinator_with_data, setup_imap_coordinator_with_data
 
     if coordinator_cls is GmailCoordinator:
         coordinator = await setup_coordinator_with_data(hass, config_entry, {})
+        # Re-apply persistent patches so _async_update_data() calls after setup
+        # do not hit the real OAuth2 infrastructure.
+        _oauth_patcher = _patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        )
+        mock_oauth = _oauth_patcher.start()
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        _gmail_patcher = _patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient"
+        )
+        mock_gmail_cls = _gmail_patcher.start()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        # Overwrite the coordinator's _email_client with the new mock so the
+        # persistent patch takes effect for subsequent _async_update_data() calls.
+        coordinator._email_client = mock_gmail_cls.return_value
+        # Register cleanup via hass event loop (runs at end of test).
+        hass.async_add_executor_job(lambda: None)  # ensure loop is live
+
+        def _stop_patchers():
+            _oauth_patcher.stop()
+            _gmail_patcher.stop()
+
+        # Stop patchers when HA shuts down (end of test teardown).
+        from homeassistant.core import EVENT_HOMEASSISTANT_STOP
+
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, lambda _: _stop_patchers())
     else:
         coordinator = await setup_imap_coordinator_with_data(hass, config_entry, {})
     return coordinator, coordinator._store
