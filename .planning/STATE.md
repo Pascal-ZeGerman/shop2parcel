@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Debug Switch
 status: executing
-stopped_at: Phase 13.1 context gathered
-last_updated: "2026-05-23T13:26:56.331Z"
-last_activity: 2026-05-23 -- Phase 13.1 planning complete
+stopped_at: Completed 13.1-02-PLAN.md
+last_updated: "2026-05-23T13:55:00.000Z"
+last_activity: 2026-05-23 -- Phase 13.1 Plan 02 complete (tests a, d, f GREEN)
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
   percent: 67
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-05-17)
 ## Current Position
 
 Phase: 13.1 — Sensor Restore on Restart (INSERTED, urgent)
-Plan: —
-Status: Ready to execute
-Last activity: 2026-05-23 -- Phase 13.1 planning complete
+Plan: 02 complete (Plan 03 remaining)
+Status: Executing
+Last activity: 2026-05-23 -- Phase 13.1 Plan 02 complete (tests a, d, f GREEN; b, c, e RED until Plan 03)
 
 ## Performance Metrics
 
@@ -86,6 +86,9 @@ Recent decisions affecting current work:
 - ParcelAppClient session injection pattern — Phase 4 coordinator injects shared HA session, client never creates its own
 - v0.1.0 released (D-10 + D-11) — first HACS-installable tag, all 4 CI workflows green, GitHub Release at https://github.com/Pascal-ZeGerman/shop2parcel/releases/tag/v0.1.0
 - v1.1 scanning architecture: full-window scan always on (no message-ID/UID gate), dedup shifts to persisted tracking-number set in HA Store
+- Phase 13.1: STORAGE_VERSION bumped to 3; v2->v3 migration preserves submitted_tracking_numbers + quota_exhausted_until, seeds persisted_shipments as {}
+- Phase 13.1: _SHIPMENT_FIELD_TYPES module-level constant used for per-entry type validation in _async_load_store (T-13.1-04 ASVS V5)
+- Phase 13.1: _pending_shipments assigned before _async_save_store() so debounced lambda captures updated state
 
 ### Roadmap Evolution
 
@@ -152,6 +155,6 @@ Items acknowledged and deferred at v1.1 milestone close on 2026-05-17:
 
 ## Session Continuity
 
-Last session: 2026-05-23T13:26:56.258Z
+Last session: 2026-05-23T13:38:41.732Z
 Stopped at: Phase 13.1 context gathered
 Next action: /gsd:new-milestone
