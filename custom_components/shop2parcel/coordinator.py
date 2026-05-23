@@ -19,7 +19,7 @@ import email as _email_stdlib
 import logging
 import re
 from collections import OrderedDict, deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from typing import Any
@@ -46,7 +46,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 2
+STORAGE_VERSION = 3
 
 
 def _extract_email_meta(msg: dict) -> dict:
@@ -200,6 +200,18 @@ class Shop2ParcelStore(Store):
             return {
                 "submitted_tracking_numbers": [],
                 "quota_exhausted_until": old_data.get("quota_exhausted_until"),
+            }
+        if old_major_version == 2:
+            entry_id = self.key.removeprefix("shop2parcel.")
+            _LOGGER.warning(
+                "Migrated Shop2Parcel Store to v3 for entry %s — "
+                "persisted_shipments starts empty; sensors will restore after first poll.",
+                entry_id,
+            )
+            return {
+                "submitted_tracking_numbers": old_data.get("submitted_tracking_numbers", []),
+                "quota_exhausted_until": old_data.get("quota_exhausted_until"),
+                "persisted_shipments": {},
             }
         if old_major_version > self.version:
             _LOGGER.warning(

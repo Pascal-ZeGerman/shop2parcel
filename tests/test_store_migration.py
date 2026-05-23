@@ -82,11 +82,11 @@ async def test_migrate_func_future_version_returns_data_unchanged(
     store: Shop2ParcelStore,
 ) -> None:
     """Same-major future-minor versions are returned unchanged (passthrough)."""
-    # version=2 is the current; old_major_version=2 (same) → passthrough
-    store.version = 2
+    # version=3 is the current; old_major_version=3 (same) → passthrough
+    store.version = 3
     store.minor_version = 1
     old_data = {"submitted_tracking_numbers": ["X"], "quota_exhausted_until": None}
-    result = await store._async_migrate_func(2, 0, old_data)
+    result = await store._async_migrate_func(3, 0, old_data)
     assert result == old_data
 
 
