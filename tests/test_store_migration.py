@@ -208,3 +208,260 @@ async def test_load_store_skips_corrupt_persisted_shipments_entry(
     assert len(warning_records) == 1 and "corrupt_msg" in warning_records[0].getMessage(), (
         "Exactly 1 WARNING mentioning 'corrupt_msg' must be emitted for the invalid entry"
     )
+
+
+# ---------------------------------------------------------------------------
+# Helper: set up a coordinator (Gmail or IMAP) with full mock infrastructure.
+# Returns (coordinator, mock_store_instance) so tests can inspect store calls.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch as _patch  # noqa: E402 — after all regular imports
+
+
+async def _setup_coordinator(hass, config_entry, coordinator_cls):
+    """Set up a coordinator with mocked store, clients, and parser.
+
+    Returns (coordinator, mock_store_instance) where mock_store_instance exposes
+    async_delay_save (MagicMock) so tests can inspect persisted_shipments.
+    """
+    from tests.conftest import setup_coordinator_with_data, setup_imap_coordinator_with_data
+
+    if coordinator_cls is GmailCoordinator:
+        coordinator = await setup_coordinator_with_data(hass, config_entry, {})
+    else:
+        coordinator = await setup_imap_coordinator_with_data(hass, config_entry, {})
+    return coordinator, coordinator._store
+
+
+# ---------------------------------------------------------------------------
+# R1/test-b: shipments are saved to store after a successful poll (RED)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("coordinator_cls", [GmailCoordinator, ImapCoordinator])
+async def test_shipments_saved_to_store_after_poll(
+    hass,
+    mock_config_entry,
+    mock_imap_config_entry,
+    coordinator_cls,
+) -> None:
+    """R1: After _async_update_data yields a shipment, the mocked store's
+    async_delay_save must have been called with a lambda that materialises a
+    dict containing 'persisted_shipments' with the new shipment's fields.
+
+    RED: fails until Plan 03 adds _pending_shipments assignment + _async_save_store()
+    call at end of _async_update_data in both coordinators.
+    """
+    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+
+    # Build the expected shipment
+    expected_shipment = ShipmentData(
+        tracking_number="TN_NEW",
+        carrier_name="UPS",
+        order_name="#1001",
+        message_id="MSG_NEW",
+        email_date=1700000000,
+    )
+
+    # Pre-populate coordinator with the shipment (simulates a poll that found it)
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator.async_set_updated_data({"MSG_NEW": expected_shipment})
+
+    # Trigger a poll with no new emails (the FIFO-cap + save logic fires at end of poll)
+    coordinator._restored_shipments = {}
+    await coordinator._async_update_data()
+
+    # Inspect the lambda passed to async_delay_save
+    assert mock_store.async_delay_save.called, (
+        "async_delay_save must be called at end of _async_update_data"
+    )
+    save_lambda = mock_store.async_delay_save.call_args[0][0]
+    materialized = save_lambda()
+    assert "persisted_shipments" in materialized, (
+        "async_delay_save lambda must include 'persisted_shipments' key"
+    )
+    assert "MSG_NEW" in materialized["persisted_shipments"], (
+        "persisted_shipments must contain the shipment keyed by message_id"
+    )
+    entry = materialized["persisted_shipments"]["MSG_NEW"]
+    assert entry == {
+        "tracking_number": "TN_NEW",
+        "carrier_name": "UPS",
+        "order_name": "#1001",
+        "message_id": "MSG_NEW",
+        "email_date": 1700000000,
+    }, f"persisted_shipments entry has wrong fields: {entry!r}"
+
+
+# ---------------------------------------------------------------------------
+# R2/test-c: restored shipments appear in the first poll after restart (RED)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("coordinator_cls", [GmailCoordinator, ImapCoordinator])
+async def test_restored_shipments_present_in_first_poll(
+    hass,
+    mock_config_entry,
+    mock_imap_config_entry,
+    coordinator_cls,
+) -> None:
+    """R2: When coordinator.data is None (first poll after restart) and
+    _restored_shipments has entries, _async_update_data must seed current_data
+    from _restored_shipments so the returned dict contains those shipments.
+
+    RED: fails until Plan 03 changes the seed expression in both coordinators.
+    """
+    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+
+    coordinator, _mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+
+    # Simulate a restart: data is None, _restored_shipments has 2 entries
+    coordinator.async_set_updated_data(None)  # type: ignore[arg-type]
+    coordinator._restored_shipments = {
+        "A": ShipmentData(tracking_number="TNA", carrier_name="UPS", order_name="#A", message_id="A", email_date=1),
+        "B": ShipmentData(tracking_number="TNB", carrier_name="FedEx", order_name="#B", message_id="B", email_date=2),
+    }
+
+    result = await coordinator._async_update_data()
+
+    assert "A" in result, (
+        "restored shipment 'A' must be present in first-poll result"
+    )
+    assert "B" in result, (
+        "restored shipment 'B' must be present in first-poll result"
+    )
+    assert isinstance(result["A"], ShipmentData), (
+        "result['A'] must be a ShipmentData instance"
+    )
+    assert result["A"].tracking_number == "TNA", (
+        f"result['A'].tracking_number must be 'TNA', got: {result['A'].tracking_number!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R4/test-d: cleanup removes delivered shipment from store (RED)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("coordinator_cls", [GmailCoordinator, ImapCoordinator])
+async def test_cleanup_removes_shipment_from_store(
+    hass,
+    mock_config_entry,
+    mock_imap_config_entry,
+    coordinator_cls,
+) -> None:
+    """R4: async_cleanup_delivered must assign _pending_shipments = new_data and
+    call _async_save_store so the delivered shipment is removed from the store.
+
+    RED: fails until Plan 02 appends _pending_shipments assignment + save to
+    async_cleanup_delivered.
+    """
+    from datetime import datetime as _datetime
+
+    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+
+    shipment_y = ShipmentData(tracking_number="TNY", carrier_name="UPS", order_name="#Y", message_id="Y", email_date=1)
+    shipment_z = ShipmentData(tracking_number="TNZ", carrier_name="FedEx", order_name="#Z", message_id="Z", email_date=2)
+    coordinator.async_set_updated_data({"Y": shipment_y, "Z": shipment_z})
+
+    # Reset call count so only the cleanup save counts
+    mock_store.async_delay_save.reset_mock()
+
+    # Patch ParcelAppClient so async_get_deliveries returns "Y" as delivered
+    with _patch(
+        "custom_components.shop2parcel.coordinator.ParcelAppClient"
+    ) as mock_parcel_cls:
+        mock_parcel_cls.return_value.async_get_deliveries = AsyncMock(
+            return_value=[
+                {"tracking_number": "TNY", "status_code": 0},
+                {"tracking_number": "TNZ", "status_code": 1},
+            ]
+        )
+        await coordinator.async_cleanup_delivered(_datetime.now())
+
+    assert "Y" not in coordinator._pending_shipments, (
+        "delivered shipment 'Y' must be removed from _pending_shipments after cleanup"
+    )
+    assert "Z" in coordinator._pending_shipments, (
+        "non-delivered shipment 'Z' must remain in _pending_shipments after cleanup"
+    )
+    assert mock_store.async_delay_save.called or mock_store.async_save.called, (
+        "store save must be triggered after cleanup removes delivered shipments"
+    )
+    # Inspect the lambda from the most recent delay_save call
+    if mock_store.async_delay_save.called:
+        save_lambda = mock_store.async_delay_save.call_args[0][0]
+        materialized = save_lambda()
+        assert "Y" not in materialized.get("persisted_shipments", {}), (
+            "persisted_shipments must not contain delivered shipment 'Y' after cleanup"
+        )
+        assert "Z" in materialized.get("persisted_shipments", {}), (
+            "persisted_shipments must still contain non-delivered shipment 'Z'"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R1/test-e: FIFO cap evicts oldest entry when >1000 shipments (RED)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("coordinator_cls", [GmailCoordinator, ImapCoordinator])
+async def test_fifo_cap_evicts_oldest_entry(
+    hass,
+    mock_config_entry,
+    mock_imap_config_entry,
+    coordinator_cls,
+) -> None:
+    """R1: When current_data exceeds MAX_SUBMITTED_TRACKING_NUMBERS (1000),
+    the FIFO cap must evict the oldest entries (by insertion order) so that
+    persisted_shipments contains exactly 1000 entries after the poll.
+
+    RED: fails until Plan 03 adds the while-len-trim loop before
+    self._pending_shipments = trimmed in _async_update_data.
+    """
+    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+
+    # Seed coordinator with 1001 entries in known insertion order
+    oversize_data: dict[str, ShipmentData] = {}
+    for i in range(1001):
+        msg_id = f"msg_{i:04d}"
+        oversize_data[msg_id] = ShipmentData(
+            tracking_number=f"TN{i:04d}",
+            carrier_name="UPS",
+            order_name=f"#{i}",
+            message_id=msg_id,
+            email_date=i,
+        )
+    coordinator.async_set_updated_data(oversize_data)
+    coordinator._restored_shipments = {}
+
+    # Reset call counter before the poll
+    mock_store.async_delay_save.reset_mock()
+
+    # Run a poll with no new emails — FIFO trim + save fires at end
+    await coordinator._async_update_data()
+
+    assert mock_store.async_delay_save.called, (
+        "async_delay_save must be called at end of _async_update_data"
+    )
+    save_lambda = mock_store.async_delay_save.call_args[0][0]
+    materialized = save_lambda()
+    persisted = materialized.get("persisted_shipments", {})
+
+    assert len(persisted) == MAX_SUBMITTED_TRACKING_NUMBERS, (
+        f"persisted_shipments must be capped at {MAX_SUBMITTED_TRACKING_NUMBERS}, "
+        f"got {len(persisted)}"
+    )
+    assert "msg_0000" not in persisted, (
+        "oldest entry 'msg_0000' must be evicted by FIFO cap"
+    )
+    assert "msg_1000" in persisted, (
+        "newest entry 'msg_1000' must be retained after FIFO cap"
+    )
+    assert "msg_0001" in persisted, (
+        "second-oldest entry 'msg_0001' must be retained after FIFO cap"
+    )
