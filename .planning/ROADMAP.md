@@ -39,7 +39,7 @@ Full phase details: [.planning/milestones/v1.1-ROADMAP.md](./milestones/v1.1-ROA
 ### 📋 v1.2 Debug Switch (Phases 13–14)
 
 - [x] **Phase 13: Dedup Store Persistence Fix** (2/2 plans) — completed 2026-05-19
-- [ ] **Phase 13.1: Sensor Restore on Restart** (INSERTED) — Extend dedup store to persist ShipmentData so sensors survive HA restarts
+- [x] **Phase 13.1: Sensor Restore on Restart** (INSERTED) — Extend dedup store to persist ShipmentData so sensors survive HA restarts (completed 2026-05-23)
 - [ ] **Phase 14: Debug/Dry-Run Mode** — Add configurable debug toggle that suppresses all side effects and emits verbose diagnostics
 
 ## Phase Details
@@ -71,20 +71,20 @@ Plans:
 **Goal:** Extend the HA Store schema (v2 → v3) to persist `coordinator.data` (`ShipmentData` objects) across HA restarts, so shipments older than the scan window are not permanently lost and all previously tracked sensors reappear after the first poll completes.
 **Requirements**: R1, R2, R3, R4, R5, R6 (locked in 13.1-SPEC.md)
 **Depends on:** Phase 13
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Plans:
 **Wave 1**
 
-- [ ] 13.1-01-PLAN.md — TDD RED: add 6 new test cases + update stale future-major test in tests/test_store_migration.py (R6 covers R1-R5)
+- [x] 13.1-01-PLAN.md — TDD RED: add 6 new test cases + update stale future-major test in tests/test_store_migration.py (R6 covers R1-R5)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 13.1-02-PLAN.md — Base coordinator changes: STORAGE_VERSION=3, v2→v3 migration, _pending_shipments/_restored_shipments fields, _async_load_store resilience, _async_save_store lambda extension, async_cleanup_delivered persists (R3, R5, R4, R1 partial)
+- [x] 13.1-02-PLAN.md — Base coordinator changes: STORAGE_VERSION=3, v2→v3 migration, _pending_shipments/_restored_shipments fields, _async_load_store resilience, _async_save_store lambda extension, async_cleanup_delivered persists (R3, R5, R4, R1 partial)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 13.1-03-PLAN.md — Subclass changes: GmailCoordinator + ImapCoordinator seed expression and end-of-poll FIFO-trim + save block (R1, R2)
+- [x] 13.1-03-PLAN.md — Subclass changes: GmailCoordinator + ImapCoordinator seed expression and end-of-poll FIFO-trim + save block (R1, R2)
 
 ### Phase 14: Debug/Dry-Run Mode
 
@@ -132,5 +132,5 @@ Plans:
 | 11. Activity Log & Debug Logging | v1.1 | 3/3 | Complete | 2026-05-12 |
 | 12. Address Tech Debt | v1.1 | 3/3 | Complete | 2026-05-14 |
 | 13. Dedup Store Persistence Fix | v1.2 | 2/2 | Complete   | 2026-05-23 |
-| 13.1. Sensor Restore on Restart | v1.2 | 0/3 | Not started | - |
+| 13.1. Sensor Restore on Restart | v1.2 | 3/3 | Complete   | 2026-05-23 |
 | 14. Debug/Dry-Run Mode | v1.2 | 0/4 | Not started | - |
