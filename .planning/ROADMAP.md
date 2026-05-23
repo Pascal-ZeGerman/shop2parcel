@@ -4,7 +4,7 @@
 
 - ✅ **v1.0 MVP** — Phases 1–9 (shipped 2026-05-04)
 - ✅ **v1.1 Debug-Ready** — Phases 10–12 (shipped 2026-05-17)
-- 📋 **v1.2 Debug Switch** — Phases 13–14 (in progress)
+- ✅ **v1.2 Debug Switch** — Phases 13–14 (complete 2026-05-20)
 
 ## Phases
 
@@ -36,11 +36,11 @@ Full phase details: [.planning/milestones/v1.1-ROADMAP.md](./milestones/v1.1-ROA
 
 </details>
 
-### 📋 v1.2 Debug Switch (Phases 13–14)
+### ✅ v1.2 Debug Switch (Phases 13–14) — COMPLETE 2026-05-20
 
 - [x] **Phase 13: Dedup Store Persistence Fix** (2/2 plans) — completed 2026-05-19
 - [x] **Phase 13.1: Sensor Restore on Restart** (INSERTED) — Extend dedup store to persist ShipmentData so sensors survive HA restarts (completed 2026-05-23)
-- [ ] **Phase 14: Debug/Dry-Run Mode** — Add configurable debug toggle that suppresses all side effects and emits verbose diagnostics
+- [x] **Phase 14: Debug/Dry-Run Mode** (4/4 plans) — completed 2026-05-20
 
 ## Phase Details
 
@@ -100,20 +100,20 @@ Plans:
   5. When debug mode is on, each email's subject, sender, parse result, tracking candidates, and final outcome appear in the HA log at INFO level
   6. While debug mode is active, a Home Assistant persistent notification appears on every poll cycle, ensuring users are aware the integration is not submitting real data
 
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 **Wave 1**
 
-- [ ] 14-01-PLAN.md — Add CONF_DEBUG_MODE constant and debug_mode boolean field to both Gmail and IMAP options flow branches (DBG-01)
+- [x] 14-01-PLAN.md — Add CONF_DEBUG_MODE constant and debug_mode boolean field to both Gmail and IMAP options flow branches (DBG-01)
 
 **Wave 2** *(parallel — no file overlap)*
 
-- [ ] 14-02-PLAN.md — Gmail coordinator: window override, dedup bypass, dry-run POST suppression, INFO logs, persistent notification lifecycle (DBG-02, DBG-03, DBG-04, DBG-05, DBG-06)
-- [ ] 14-03-PLAN.md — IMAP coordinator: identical debug mode logic, symmetric with Gmail implementation (DBG-02, DBG-03, DBG-04, DBG-05, DBG-06)
+- [x] 14-02-PLAN.md — Gmail coordinator: window override, dedup bypass, dry-run POST suppression, INFO logs, persistent notification lifecycle (DBG-02, DBG-03, DBG-04, DBG-05, DBG-06)
+- [x] 14-03-PLAN.md — IMAP coordinator: identical debug mode logic, symmetric with Gmail implementation (DBG-02, DBG-03, DBG-04, DBG-05, DBG-06)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 14-04-PLAN.md — All DBG test coverage in tests/test_debug_mode.py: 12 tests, 2 per DBG requirement × Gmail/IMAP (DBG-01 through DBG-06)
+- [x] 14-04-PLAN.md — All DBG test coverage in tests/test_debug_mode.py: 12 tests, 2 per DBG requirement × Gmail/IMAP (DBG-01 through DBG-06)
 
 ## Progress
 
@@ -133,4 +133,4 @@ Plans:
 | 12. Address Tech Debt | v1.1 | 3/3 | Complete | 2026-05-14 |
 | 13. Dedup Store Persistence Fix | v1.2 | 2/2 | Complete   | 2026-05-23 |
 | 13.1. Sensor Restore on Restart | v1.2 | 3/3 | Complete   | 2026-05-23 |
-| 14. Debug/Dry-Run Mode | v1.2 | 0/4 | Not started | - |
+| 14. Debug/Dry-Run Mode | v1.2 | 4/4 | Complete | 2026-05-20 |
