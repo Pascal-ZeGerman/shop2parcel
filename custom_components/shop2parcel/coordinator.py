@@ -378,6 +378,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 lambda: {
                     "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
                     "quota_exhausted_until": self._quota_exhausted_until,
+                    "persisted_shipments": {
+                        msg_id: asdict(shipment)
+                        for msg_id, shipment in self._pending_shipments.items()
+                    },
                 },
                 delay=5,
             )
@@ -463,3 +467,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if entity_id is not None:
                 entity_registry.async_remove(entity_id)
                 _LOGGER.info("Removed delivered shipment entity: %s", entity_id)
+        # Phase 13.1 (R4): persist the post-cleanup state so delivered shipments
+        # are removed from the store. Runs only when removed_ids was non-empty
+        # (the `if not removed_ids: return` guard at line ~397 short-circuits otherwise).
+        self._pending_shipments = new_data
+        await self._async_save_store()
