@@ -159,7 +159,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             session=async_get_clientsession(self.hass),
             api_key=entry.data[CONF_API_KEY],
         )
-        current_data: dict[str, ShipmentData] = dict(self.data or {})
+        current_data: dict[str, ShipmentData] = (
+            dict(self.data) if self.data is not None else dict(self._restored_shipments)
+        )
         now = int(time.time())
         quota_blocked = (
             self._quota_exhausted_until is not None and now < self._quota_exhausted_until
@@ -472,6 +474,14 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             and int(time.time()) >= self._quota_exhausted_until
         ):
             self._quota_exhausted_until = None
+            await self._async_save_store()
+
+        if not debug_mode:
+            trimmed = dict(current_data)
+            while len(trimmed) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                oldest = next(iter(trimmed))
+                del trimmed[oldest]
+            self._pending_shipments = trimmed
             await self._async_save_store()
 
         return current_data
