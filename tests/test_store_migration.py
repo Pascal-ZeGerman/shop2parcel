@@ -90,12 +90,12 @@ async def test_migrate_unknown_future_major_returns_empty(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """W16/P13-WR-08: Future major version → returns empty recoverable state + WARNING log."""
-    store.version = 2
+    store.version = 3
     store.minor_version = 1
     old_data = {"submitted_tracking_numbers": ["TN1", "TN2"], "quota_exhausted_until": 9999}
 
     with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
-        result = await store._async_migrate_func(3, 0, old_data)
+        result = await store._async_migrate_func(4, 0, old_data)
 
     assert result["submitted_tracking_numbers"] == []
     assert result["quota_exhausted_until"] is None
