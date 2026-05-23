@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Debug Switch
-status: planning
-last_updated: "2026-05-18T19:28:16.183Z"
-last_activity: 2026-05-18
+status: executing
+stopped_at: Phase 13.1 context gathered
+last_updated: "2026-05-23T13:26:56.331Z"
+last_activity: 2026-05-23 -- Phase 13.1 planning complete
 progress:
-  total_phases: 0
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_phases: 3
+  completed_phases: 2
+  total_plans: 9
+  completed_plans: 7
+  percent: 67
 ---
 
 # Project State
@@ -24,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-05-17)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 13.1 — Sensor Restore on Restart (INSERTED, urgent)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-05-18 — Milestone v1.2 started
+Status: Ready to execute
+Last activity: 2026-05-23 -- Phase 13.1 planning complete
 
 ## Performance Metrics
 
@@ -94,6 +95,7 @@ Recent decisions affecting current work:
 - Phase 10 added (v1.1): Full-Window Scanning & Tracking Dedup — remove last_seen_message_id/last_imap_uid gates, add persisted tracking-number dedup
 - Phase 11 added (v1.1): Activity Log & Debug Logging — per-email scan event ring buffer + comprehensive DEBUG-level logging
 - Phase 12 added: Address tech debt
+- Phase 13.1 inserted after Phase 13: Sensor Restore on Restart — coordinator.data not persisted means all sensors unavailable after restart (HA log audit finding) (URGENT)
 
 ### Pending Todos
 
@@ -150,6 +152,6 @@ Items acknowledged and deferred at v1.1 milestone close on 2026-05-17:
 
 ## Session Continuity
 
-Last session: 2026-05-17
-Stopped at: v1.1 milestone archived — ready to plan v1.2
+Last session: 2026-05-23T13:26:56.258Z
+Stopped at: Phase 13.1 context gathered
 Next action: /gsd:new-milestone
