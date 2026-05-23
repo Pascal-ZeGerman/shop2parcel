@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Debug Switch
-status: milestone_complete
-stopped_at: Phase 14 all plans complete — v1.2 milestone complete
-last_updated: "2026-05-23T15:45:00.000Z"
-last_activity: 2026-05-23 -- Phase 14 complete (executed 2026-05-20, reconciled now) — v1.2 milestone all phases done
+status: shipped
+stopped_at: Phase 13.1 shipped — PR #16 open
+last_updated: "2026-05-23T16:30:00.000Z"
+last_activity: 2026-05-23 -- Phase 13.1 shipped — PR #16 https://github.com/Pascal-ZeGerman/shop2parcel/pull/16
 progress:
   total_phases: 3
   completed_phases: 3
