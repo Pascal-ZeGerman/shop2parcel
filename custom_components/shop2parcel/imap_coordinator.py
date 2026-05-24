@@ -357,6 +357,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 self._quota_exhausted_until = (
                     err.reset_at if err.reset_at is not None else _next_midnight_utc()
                 )
+                self._pending_shipments = current_data
                 await self._async_save_store()
                 _LOGGER.warning(
                     "parcelapp.net daily quota exhausted; forwarding paused until %s",
@@ -376,6 +377,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 self._submitted_tracking_numbers[normalized] = None
                 if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                     self._submitted_tracking_numbers.popitem(last=False)
+                self._pending_shipments = current_data
                 await self._async_save_store()
                 self._emit_scan_event(
                     message_id=f"imap:{uid_str}",
@@ -396,6 +398,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 self._submitted_tracking_numbers[normalized] = None
                 if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                     self._submitted_tracking_numbers.popitem(last=False)
+                self._pending_shipments = current_data
                 await self._async_save_store()
                 # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
                 self._emit_scan_event(
@@ -430,8 +433,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             self._submitted_tracking_numbers[normalized] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                 self._submitted_tracking_numbers.popitem(last=False)
-            await self._async_save_store()
             current_data[uid_str] = shipment
+            self._pending_shipments = current_data
+            await self._async_save_store()
             self._emit_scan_event(
                 message_id=f"imap:{uid_str}",
                 meta=imap_meta,

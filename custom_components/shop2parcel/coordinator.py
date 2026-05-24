@@ -419,21 +419,24 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         when the delayed timer fires.
         """
         try:
+            snapshot_tracking = list(self._submitted_tracking_numbers.keys())
+            snapshot_quota = self._quota_exhausted_until
+            snapshot_shipments = {
+                msg_id: asdict(shipment)
+                for msg_id, shipment in self._pending_shipments.items()
+            }
             self._store.async_delay_save(
                 lambda: {
-                    "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
-                    "quota_exhausted_until": self._quota_exhausted_until,
-                    "persisted_shipments": {
-                        msg_id: asdict(shipment)
-                        for msg_id, shipment in self._pending_shipments.items()
-                    },
+                    "submitted_tracking_numbers": snapshot_tracking,
+                    "quota_exhausted_until": snapshot_quota,
+                    "persisted_shipments": snapshot_shipments,
                 },
                 delay=5,
             )
             _LOGGER.debug(
                 "Scheduled debounced save for %d submitted tracking numbers and %d persisted shipments",
-                len(self._submitted_tracking_numbers),
-                len(self._pending_shipments),
+                len(snapshot_tracking),
+                len(snapshot_shipments),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
