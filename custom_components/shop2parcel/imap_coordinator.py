@@ -159,6 +159,10 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             session=async_get_clientsession(self.hass),
             api_key=entry.data[CONF_API_KEY],
         )
+        # self.data is None only until the first _async_update_data() completes successfully
+        # (DataUpdateCoordinator initialises data=None and only writes it on success).
+        # On repeated failures self.data stays None, so we continue seeding from the
+        # persisted store — correct, because the live set has not changed yet.
         current_data: dict[str, ShipmentData] = (
             dict(self.data) if self.data is not None else dict(self._restored_shipments)
         )
@@ -477,6 +481,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             await self._async_save_store()
 
         if not debug_mode:
+            # FIFO trim: current_data is a plain dict (not OrderedDict), so
+            # popitem(last=False) is not available. next(iter(...)) yields the
+            # insertion-order oldest key on CPython 3.7+ (guaranteed by PEP 468).
             while len(current_data) > MAX_SUBMITTED_TRACKING_NUMBERS:
                 del current_data[next(iter(current_data))]
             self._pending_shipments = current_data

@@ -8,7 +8,7 @@ base class, and module-level helpers. Poll logic lives in the subclasses:
 Locked decisions (CONTEXT.md):
 - D-01: data is dict[str, ShipmentData] keyed by Gmail message_id or IMAP UID.
 - D-02: data accumulates all ever-seen shipments — no status filtering here.
-- D-04: Store schema {"submitted_tracking_numbers": [...], "quota_exhausted_until": int | None}.
+- D-04: Store schema {"submitted_tracking_numbers": [...], "quota_exhausted_until": int | None, "persisted_shipments": {msg_id: ShipmentData-as-dict}}.
 - D-05: Quota exhausted -> polls continue, POST step skipped.
 - D-06: quota_exhausted_until = err.reset_at OR next_midnight_utc().
 """
@@ -39,6 +39,7 @@ from .api.exceptions import (
 from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_API_KEY,
+    CONF_DEBUG_MODE,
     CONF_POLL_INTERVAL,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
@@ -183,10 +184,12 @@ class PollStats:
 
 
 class Shop2ParcelStore(Store):
-    """HA Store subclass for Shop2Parcel with v1→v2 migration support.
+    """HA Store subclass for Shop2Parcel with v1→v2 and v2→v3 migration support.
 
     Overrides _async_migrate_func to drop the v1 forwarded_ids/last_imap_uid/
     last_email_timestamp schema and seed the v2 submitted_tracking_numbers schema.
+    v2→v3 seeds persisted_shipments: {} to enable sensor restore across HA restarts;
+    submitted_tracking_numbers and quota_exhausted_until are carried forward unchanged.
     """
 
     async def _async_migrate_func(
@@ -214,13 +217,22 @@ class Shop2ParcelStore(Store):
             }
         if old_major_version == 2:
             entry_id = self.key.removeprefix("shop2parcel.")
+            carried_tracking = old_data.get("submitted_tracking_numbers", [])
+            if not isinstance(carried_tracking, list):
+                _LOGGER.warning(
+                    "v2 store for entry %s had corrupt submitted_tracking_numbers "
+                    "(type=%s); resetting to empty during v3 migration.",
+                    entry_id,
+                    type(carried_tracking).__name__,
+                )
+                carried_tracking = []
             _LOGGER.warning(
                 "Migrated Shop2Parcel Store to v3 for entry %s — "
                 "persisted_shipments starts empty; sensors will restore after first poll.",
                 entry_id,
             )
             return {
-                "submitted_tracking_numbers": old_data.get("submitted_tracking_numbers", []),
+                "submitted_tracking_numbers": carried_tracking,
                 "quota_exhausted_until": old_data.get("quota_exhausted_until"),
                 "persisted_shipments": {},
             }
@@ -266,10 +278,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
         # Phase 13.1: shipment persistence across HA restarts.
-        # _pending_shipments: current live shipments to be persisted to store on next save.
+        # _pending_shipments: snapshot of current live shipments written to store at poll end
+        #   (and after cleanup). Always assigned immediately before _async_save_store() is called.
         # _restored_shipments: shipments loaded from store on startup (pre-first-poll).
         self._pending_shipments: dict[str, ShipmentData] = {}
         self._restored_shipments: dict[str, ShipmentData] = {}
+        self._store_loaded: bool = False
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
@@ -315,16 +329,27 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.scan_events_total += 1
 
     async def _async_load_store(self) -> None:
-        """Hydrate dedup + quota state from Store.
+        """Hydrate dedup, quota, and persisted shipments state from Store.
 
-        MUST be called before async_config_entry_first_refresh().  Failing to do so
+        MUST be called before async_config_entry_first_refresh(). Failing to do so
         leaves _submitted_tracking_numbers empty, causing every previously submitted
-        tracking number to be re-POSTed on startup.
+        tracking number to be re-POSTed on startup. It also leaves _restored_shipments
+        empty, causing all previously persisted sensors to disappear until their email
+        is re-scanned.
 
         async_setup_entry in __init__.py is the canonical caller; do not call this
         method from any other site without careful thought about sequencing.
         """
-        stored = await self._store.async_load() or {}
+        try:
+            stored = await self._store.async_load() or {}
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Failed to load Shop2Parcel store for entry %s — starting with empty state: %s",
+                self._store.key.removeprefix("shop2parcel."),
+                err,
+                exc_info=True,
+            )
+            stored = {}
         stored_list = stored.get("submitted_tracking_numbers", [])
         if not isinstance(stored_list, list):
             _LOGGER.warning(
@@ -347,31 +372,51 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Invalid entries are skipped with a WARNING (T-13.1-04 / ASVS V5).
         restored: dict[str, ShipmentData] = {}
         raw_shipments = stored.get("persisted_shipments", {})
-        if isinstance(raw_shipments, dict):
-            for msg_id, entry in raw_shipments.items():
-                if not isinstance(entry, dict) or not all(
-                    k in entry and isinstance(entry[k], t)
-                    for k, t in _SHIPMENT_FIELD_TYPES.items()
-                ):
-                    _LOGGER.warning(
-                        "persisted_shipments entry for %r is invalid — skipping", msg_id
-                    )
-                    continue
+        if not isinstance(raw_shipments, dict):
+            _LOGGER.warning(
+                "persisted_shipments in store is not a dict (type=%s) for entry %s; "
+                "treating as empty — all sensors will be empty until the next poll.",
+                type(raw_shipments).__name__,
+                self._store.key.removeprefix("shop2parcel."),
+            )
+            raw_shipments = {}
+        for msg_id, entry in raw_shipments.items():
+            if not isinstance(entry, dict) or not all(
+                k in entry and isinstance(entry[k], t)
+                for k, t in _SHIPMENT_FIELD_TYPES.items()
+            ):
+                _LOGGER.warning(
+                    "persisted_shipments entry for %r is invalid — skipping", msg_id
+                )
+                continue
+            try:
                 restored[msg_id] = ShipmentData(**{k: entry[k] for k in _SHIPMENT_FIELD_TYPES})
+            except TypeError as err:
+                _LOGGER.warning(
+                    "persisted_shipments entry for %r could not be reconstructed (%s) — skipping",
+                    msg_id,
+                    err,
+                )
         self._restored_shipments = restored
+        self._store_loaded = True
         _LOGGER.debug(
             "Restored %d persisted shipments from store", len(self._restored_shipments)
         )
 
     async def _async_save_store(self) -> None:
-        """Schedule a debounced persist of current dedup + quota state to Store.
+        """Schedule a debounced persist of current dedup, quota, and shipment state to Store.
 
         Uses async_delay_save (W1/P13-WR-06) so rapid per-message saves within
         a single poll are coalesced into one write. async_delay_save is
         synchronous — it schedules the write; it does NOT write immediately.
 
-        The try/except only guards against scheduling errors; the actual write
-        errors surface in HA logs when the delayed timer fires.
+        The lambda captures _pending_shipments by reference; callers MUST assign
+        self._pending_shipments before calling this method — the 5-second debounce
+        means the value at fire-time is what gets stored.
+
+        The try/except guards against AttributeError (uninitialized store/hass) and
+        other unexpected scheduling failures; actual write errors surface in HA logs
+        when the delayed timer fires.
         """
         try:
             self._store.async_delay_save(
@@ -386,8 +431,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 delay=5,
             )
             _LOGGER.debug(
-                "Scheduled debounced save for %d submitted tracking numbers",
+                "Scheduled debounced save for %d submitted tracking numbers and %d persisted shipments",
                 len(self._submitted_tracking_numbers),
+                len(self._pending_shipments),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
@@ -467,8 +513,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if entity_id is not None:
                 entity_registry.async_remove(entity_id)
                 _LOGGER.info("Removed delivered shipment entity: %s", entity_id)
-        # Phase 13.1 (R4): persist the post-cleanup state so delivered shipments
-        # are removed from the store. Runs only when removed_ids was non-empty
-        # (the `if not removed_ids: return` guard at line ~397 short-circuits otherwise).
-        self._pending_shipments = new_data
-        await self._async_save_store()
+        # Phase 13.1 (R4): persist the post-cleanup state so delivered shipments are removed
+        # from the store. Runs only when removed_ids was non-empty (the `if not removed_ids:
+        # return` guard above short-circuits otherwise). Gated on debug_mode to honour the
+        # DBG-03 contract (zero store writes in debug mode).
+        debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        if not debug_mode:
+            self._pending_shipments = new_data
+            await self._async_save_store()
