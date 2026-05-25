@@ -29,7 +29,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api.email_parser import ShipmentData
 from .api.exceptions import (
@@ -342,14 +342,25 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         try:
             stored = await self._store.async_load() or {}
-        except Exception as err:  # noqa: BLE001
+        except OSError as err:
             _LOGGER.error(
-                "Failed to load Shop2Parcel store for entry %s — starting with empty state: %s",
+                "Failed to load Shop2Parcel store for entry %s (I/O error) — "
+                "starting with empty state. Previously submitted tracking numbers "
+                "may be re-submitted on the next poll, consuming ParcelApp quota: %s",
                 self._store.key.removeprefix("shop2parcel."),
                 err,
                 exc_info=True,
             )
             stored = {}
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Unexpected error loading Shop2Parcel store for entry %s — "
+                "this may indicate a bug in the migration path: %s",
+                self._store.key.removeprefix("shop2parcel."),
+                err,
+                exc_info=True,
+            )
+            raise UpdateFailed(f"Shop2Parcel store migration failed: {err}") from err
         stored_list = stored.get("submitted_tracking_numbers", [])
         if not isinstance(stored_list, list):
             _LOGGER.warning(

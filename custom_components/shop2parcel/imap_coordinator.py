@@ -488,8 +488,17 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             # FIFO trim: current_data is a plain dict (not OrderedDict), so
             # popitem(last=False) is not available. next(iter(...)) yields the
             # insertion-order oldest key on CPython 3.7+ (guaranteed by PEP 468).
+            pre_trim_count = len(current_data)
             while len(current_data) > MAX_SUBMITTED_TRACKING_NUMBERS:
                 del current_data[next(iter(current_data))]
+            trimmed = pre_trim_count - len(current_data)
+            if trimmed:
+                _LOGGER.warning(
+                    "FIFO trim removed %d oldest shipment(s) — cap is %d. "
+                    "Oldest tracked parcels are no longer visible in HA.",
+                    trimmed,
+                    MAX_SUBMITTED_TRACKING_NUMBERS,
+                )
             self._pending_shipments = current_data
             await self._async_save_store()
 
