@@ -261,6 +261,17 @@ def test_fedex_template_extracts_tracking(fedex_html: str) -> None:
     assert result.skip_reason is None
 
 
+def test_fedex_template_extracts_tracking_id_label() -> None:
+    """PARSE-06b: FedEx template extracts 12-digit tracking using 'Tracking ID' label (FedEx Delivery Manager format)."""
+    html = "<html><body><p>fedex.com</p><p>Tracking ID\n521182326882</p></body></html>"
+    parser = EmailParser()
+    result = parser.parse(html, "fedex_msg2", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "521182326882"
+    assert result.shipment.carrier_name == "FedEx"
+    assert result.strategy_used == STRATEGY_FEDEX
+
+
 def test_ups_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> None:
     """PARSE-09 / T-Spoof mitigation: _detect_ups must NOT fire on Shopify fixture (contains ups.com link but also 'shopify')."""
     from custom_components.shop2parcel.api.email_parser import _detect_ups
