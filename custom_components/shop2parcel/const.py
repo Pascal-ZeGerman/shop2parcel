@@ -19,7 +19,7 @@ DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
 # guard. This restores correct match coverage for auto-archiving users.
 DEFAULT_GMAIL_QUERY = (
     "(from:no-reply@shopify.com OR from:mcinfo@ups.com OR "
-    "from:inform@informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR "
+    "from:USPSInformeddelivery@email.informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR "
     "from:TrackingUpdates@fedex.com) "
     "subject:(shipped OR delivered OR tracking OR package)"
     " OR "
