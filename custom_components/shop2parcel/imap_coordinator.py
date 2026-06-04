@@ -142,7 +142,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 since_date=since_date,
             )
         except ImapAuthError as err:
-            raise ConfigEntryAuthFailed("IMAP auth error") from err
+            raise ConfigEntryAuthFailed(f"IMAP auth error: {err}") from err
         except ImapTransientError as err:
             raise UpdateFailed(f"IMAP transient error: {err}") from err
 
@@ -213,6 +213,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     "Email parser raised an unexpected error for IMAP UID %s: %s",
                     uid_str,
                     parse_err,
+                    exc_info=True,
                 )
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1

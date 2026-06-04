@@ -114,6 +114,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         except (TimeoutError, aiohttp.ClientError) as err:
             raise UpdateFailed(f"Network error during Gmail token refresh: {err}") from err
         except Exception as err:  # noqa: BLE001 — translate unexpected auth errors to HA exception
+            _LOGGER.error(
+                "Gmail token refresh failed unexpectedly: %s", err, exc_info=True
+            )
             raise ConfigEntryAuthFailed(
                 f"Gmail token refresh failed unexpectedly ({type(err).__name__})"
             ) from err
@@ -160,7 +163,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 rescan_window_days=rescan_window_days,
             )
         except GmailAuthError as err:
-            raise ConfigEntryAuthFailed("Gmail auth error") from err
+            raise ConfigEntryAuthFailed(f"Gmail auth error: {err}") from err
         except GmailTransientError as err:
             raise UpdateFailed(f"Gmail transient error: {err}") from err
 
@@ -200,7 +203,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
             try:
                 msg = await gmail.async_get_message(access_token, msg_id)
             except GmailAuthError as err:
-                raise ConfigEntryAuthFailed("Gmail auth error") from err
+                raise ConfigEntryAuthFailed(f"Gmail auth error: {err}") from err
             except GmailTransientError as err:
                 raise UpdateFailed(f"Gmail transient error: {err}") from err
 
@@ -267,6 +270,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     "Email parser raised an unexpected error for message %s: %s",
                     msg_id,
                     parse_err,
+                    exc_info=True,
                 )
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
