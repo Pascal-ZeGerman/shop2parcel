@@ -1,11 +1,11 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.2
-milestone_name: Debug Switch
-status: shipped
-stopped_at: Phase 13.1 shipped — PR #16 open
-last_updated: "2026-05-23T16:30:00.000Z"
-last_activity: 2026-05-23 -- Phase 13.1 shipped — PR #16 https://github.com/Pascal-ZeGerman/shop2parcel/pull/16
+milestone: v1.0
+milestone_name: milestone
+status: completed
+stopped_at: context exhaustion at 77% (2026-06-02)
+last_updated: "2026-06-02T04:01:37.569Z"
+last_activity: "2026-05-23 -- Phase 14 reconciliation: confirmed 4/4 plans shipped on origin/main, WR-01..WR-04 all fixed in subsequent commits"
 progress:
   total_phases: 3
   completed_phases: 3
@@ -102,7 +102,9 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+| File | Title | Area |
+|------|-------|------|
+| [2026-06-02-add-forwarded-email-sender-configuration.md](./todos/pending/2026-06-02-add-forwarded-email-sender-configuration.md) | Add forwarded email sender configuration | api |
 
 ### Blockers/Concerns
 
@@ -157,6 +159,6 @@ Items acknowledged and deferred at v1.1 milestone close on 2026-05-17:
 
 ## Session Continuity
 
-Last session: 2026-05-23T15:45:00.000Z
-Stopped at: v1.2 milestone all phases complete (13, 13.1, 14)
+Last session: 2026-06-02T04:01:37.553Z
+Stopped at: context exhaustion at 77% (2026-06-02)
 Next action: Merge Phase 13.1 branch → /gsd:complete-milestone

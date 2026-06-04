@@ -329,63 +329,182 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_match")
                 continue
-            shipment = result.shipment
+            # Iterate all shipments from this email. Single-shipment emails have
+            # extra_shipments=[] so this loop runs once. Multi-package digests
+            # (e.g. USPS Informed Delivery) may have 2+ shipments; each gets its
+            # own storage key so coordinator.data creates a sensor per package.
+            for _si, shipment in enumerate([result.shipment, *result.extra_shipments]):
+                # First shipment uses msg_id for backward compat; extras get a
+                # composite key so they create distinct entities.
+                storage_key = msg_id if _si == 0 else f"{msg_id}::{shipment.tracking_number}"
 
-            # D-10: tracking-number dedup check (replaces message-ID skip gate).
-            # DBG-03: skip dedup entirely in debug mode.
-            normalized = normalize_tracking_number(shipment.tracking_number)
-            if not debug_mode:
-                if normalized in self._submitted_tracking_numbers:
-                    d.last_poll_emails_skipped_dedup += 1
+                # D-10: tracking-number dedup check (replaces message-ID skip gate).
+                # DBG-03: skip dedup entirely in debug mode.
+                normalized = normalize_tracking_number(shipment.tracking_number)
+                if not debug_mode:
+                    if normalized in self._submitted_tracking_numbers:
+                        d.last_poll_emails_skipped_dedup += 1
+                        self._emit_scan_event(
+                            message_id=f"gmail:{msg_id}",
+                            meta=email_meta,
+                            outcome="skipped_dedup",
+                            strategy=result.strategy_used or "unknown",
+                            tracking_number=shipment.tracking_number,
+                        )
+                        _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_dedup")
+                        continue
+
+                # Only increment match/found counters after dedup confirms this is a new tracking number.
+                d.emails_matched_total += 1
+                d.last_poll_emails_matched += 1
+                d.tracking_numbers_found_total += 1
+                d.last_poll_found.append(
+                    {
+                        "tracking_number": shipment.tracking_number,
+                        "carrier": shipment.carrier_name,
+                        "order_name": shipment.order_name,
+                        "message_id": msg_id,
+                        "candidates": result.candidate_tokens,
+                        **email_meta,
+                    }
+                )
+
+                # DBG-04: in debug mode, suppress POST and record dry_run_suppressed event.
+                if debug_mode:
                     self._emit_scan_event(
                         message_id=f"gmail:{msg_id}",
                         meta=email_meta,
-                        outcome="skipped_dedup",
+                        outcome="dry_run_suppressed",
                         strategy=result.strategy_used or "unknown",
                         tracking_number=shipment.tracking_number,
                     )
-                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_dedup")
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        email_meta.get("subject", ""),
+                        email_meta.get("from", ""),
+                        result.candidate_tokens,
+                        "dry_run_suppressed",
+                    )
                     continue
 
-            # Only increment match/found counters after dedup confirms this is a new tracking number.
-            d.emails_matched_total += 1
-            d.last_poll_emails_matched += 1
-            d.tracking_numbers_found_total += 1
-            d.last_poll_found.append(
-                {
-                    "tracking_number": shipment.tracking_number,
-                    "carrier": shipment.carrier_name,
-                    "order_name": shipment.order_name,
-                    "message_id": msg_id,
-                    "candidates": result.candidate_tokens,
-                    **email_meta,
-                }
-            )
+                # 5. Quota guard (D-05): when quota is exhausted, skip the POST.
+                if quota_blocked:
+                    self._emit_scan_event(
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                        outcome="skipped_quota",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    if debug_mode:
+                        _LOGGER.debug(
+                            "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                            email_meta.get("subject", ""),
+                            email_meta.get("from", ""),
+                            result.candidate_tokens,
+                            "skipped_quota",
+                        )
+                    else:
+                        _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_quota")
+                    continue
 
-            # DBG-04: in debug mode, suppress POST and record dry_run_suppressed event.
-            if debug_mode:
+                carrier_code = normalize_carrier(shipment.carrier_name)
+                try:
+                    await parcel_client.async_add_delivery(
+                        tracking_number=shipment.tracking_number,
+                        carrier_code=carrier_code,
+                        description=shipment.order_name or shipment.tracking_number,
+                    )
+                except ParcelAppAuthError as err:
+                    raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
+                except ParcelAppQuotaError as err:
+                    # D-06: prefer reset_at, else next midnight UTC.
+                    self._quota_exhausted_until = (
+                        err.reset_at if err.reset_at is not None else _next_midnight_utc()
+                    )
+                    self._pending_shipments = current_data
+                    await self._async_save_store()
+                    _LOGGER.warning(
+                        "parcelapp.net daily quota exhausted; forwarding paused until %s",
+                        self._quota_exhausted_until,
+                    )
+                    # C2/P11-CR-01: emit event for the email that triggered quota exhaustion.
+                    self._emit_scan_event(
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                        outcome="quota_exhausted_now",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    quota_blocked = True
+                    continue
+                except ParcelAppAlreadyAddedError:
+                    self._submitted_tracking_numbers[normalized] = None
+                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                        self._submitted_tracking_numbers.popitem(last=False)
+                    self._pending_shipments = current_data
+                    await self._async_save_store()
+                    self._emit_scan_event(
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                        outcome="already_added",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "already_added")
+                    continue
+                except ParcelAppInvalidTrackingError as err:
+                    _LOGGER.error(
+                        "Invalid tracking for message %s (permanent 400 — suppressing retries): %s",
+                        msg_id,
+                        err,
+                    )
+                    # Record normalized tracking number to suppress infinite retries.
+                    self._submitted_tracking_numbers[normalized] = None
+                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                        self._submitted_tracking_numbers.popitem(last=False)
+                    self._pending_shipments = current_data
+                    await self._async_save_store()
+                    # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
+                    self._emit_scan_event(
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                        outcome="invalid_tracking",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                        extra={
+                            "error_type": type(err).__name__,
+                            "error_msg": str(err)[:100],
+                        },
+                    )
+                    continue
+                except ParcelAppTransientError as err:
+                    _LOGGER.warning("parcelapp.net transient error for %s: %s", msg_id, err)
+                    # C2/P11-CR-01: emit event for transient errors.
+                    self._emit_scan_event(
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                        outcome="transient_error",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                        extra={
+                            "error_type": type(err).__name__,
+                            "error_msg": str(err)[:100],
+                        },
+                    )
+                    continue
+
+                # 6. Success — record tracking number dedup, save immediately (D-10/D-03).
+                self._submitted_tracking_numbers[normalized] = None
+                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                    self._submitted_tracking_numbers.popitem(last=False)
+                current_data[storage_key] = shipment
+                self._pending_shipments = current_data
+                await self._async_save_store()
                 self._emit_scan_event(
                     message_id=f"gmail:{msg_id}",
                     meta=email_meta,
-                    outcome="dry_run_suppressed",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                )
-                _LOGGER.debug(
-                    "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
-                    email_meta.get("subject", ""),
-                    email_meta.get("from", ""),
-                    result.candidate_tokens,
-                    "dry_run_suppressed",
-                )
-                continue
-
-            # 5. Quota guard (D-05): when quota is exhausted, skip the POST.
-            if quota_blocked:
-                self._emit_scan_event(
-                    message_id=f"gmail:{msg_id}",
-                    meta=email_meta,
-                    outcome="skipped_quota",
+                    outcome="posted",
                     strategy=result.strategy_used or "unknown",
                     tracking_number=shipment.tracking_number,
                 )
@@ -395,122 +514,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         email_meta.get("subject", ""),
                         email_meta.get("from", ""),
                         result.candidate_tokens,
-                        "skipped_quota",
+                        "posted",
                     )
                 else:
-                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_quota")
-                continue
-
-            carrier_code = normalize_carrier(shipment.carrier_name)
-            try:
-                await parcel_client.async_add_delivery(
-                    tracking_number=shipment.tracking_number,
-                    carrier_code=carrier_code,
-                    description=shipment.order_name or shipment.tracking_number,
-                )
-            except ParcelAppAuthError as err:
-                raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
-            except ParcelAppQuotaError as err:
-                # D-06: prefer reset_at, else next midnight UTC.
-                self._quota_exhausted_until = (
-                    err.reset_at if err.reset_at is not None else _next_midnight_utc()
-                )
-                self._pending_shipments = current_data
-                await self._async_save_store()
-                _LOGGER.warning(
-                    "parcelapp.net daily quota exhausted; forwarding paused until %s",
-                    self._quota_exhausted_until,
-                )
-                # C2/P11-CR-01: emit event for the email that triggered quota exhaustion.
-                self._emit_scan_event(
-                    message_id=f"gmail:{msg_id}",
-                    meta=email_meta,
-                    outcome="quota_exhausted_now",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                )
-                quota_blocked = True
-                continue
-            except ParcelAppAlreadyAddedError:
-                self._submitted_tracking_numbers[normalized] = None
-                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                    self._submitted_tracking_numbers.popitem(last=False)
-                self._pending_shipments = current_data
-                await self._async_save_store()
-                self._emit_scan_event(
-                    message_id=f"gmail:{msg_id}",
-                    meta=email_meta,
-                    outcome="already_added",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                )
-                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "already_added")
-                continue
-            except ParcelAppInvalidTrackingError as err:
-                _LOGGER.error(
-                    "Invalid tracking for message %s (permanent 400 — suppressing retries): %s",
-                    msg_id,
-                    err,
-                )
-                # Record normalized tracking number to suppress infinite retries.
-                self._submitted_tracking_numbers[normalized] = None
-                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                    self._submitted_tracking_numbers.popitem(last=False)
-                self._pending_shipments = current_data
-                await self._async_save_store()
-                # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
-                self._emit_scan_event(
-                    message_id=f"gmail:{msg_id}",
-                    meta=email_meta,
-                    outcome="invalid_tracking",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                    extra={
-                        "error_type": type(err).__name__,
-                        "error_msg": str(err)[:100],
-                    },
-                )
-                continue
-            except ParcelAppTransientError as err:
-                _LOGGER.warning("parcelapp.net transient error for %s: %s", msg_id, err)
-                # C2/P11-CR-01: emit event for transient errors.
-                self._emit_scan_event(
-                    message_id=f"gmail:{msg_id}",
-                    meta=email_meta,
-                    outcome="transient_error",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                    extra={
-                        "error_type": type(err).__name__,
-                        "error_msg": str(err)[:100],
-                    },
-                )
-                continue
-
-            # 6. Success — record tracking number dedup, save immediately (D-10/D-03).
-            self._submitted_tracking_numbers[normalized] = None
-            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                self._submitted_tracking_numbers.popitem(last=False)
-            current_data[msg_id] = shipment
-            self._pending_shipments = current_data
-            await self._async_save_store()
-            self._emit_scan_event(
-                message_id=f"gmail:{msg_id}",
-                meta=email_meta,
-                outcome="posted",
-                strategy=result.strategy_used or "unknown",
-                tracking_number=shipment.tracking_number,
-            )
-            if debug_mode:
-                _LOGGER.debug(
-                    "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
-                    email_meta.get("subject", ""),
-                    email_meta.get("from", ""),
-                    result.candidate_tokens,
-                    "posted",
-                )
-            else:
-                _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "posted")
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "posted")
 
         # Phase 7: capture per-poll timing (D-04, Specifics).
         d.last_poll_time = poll_start
