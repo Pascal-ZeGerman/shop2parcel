@@ -26,10 +26,11 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api.email_parser import ShipmentData
 from .api.exceptions import (
@@ -355,12 +356,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
                 "Unexpected error loading Shop2Parcel store for entry %s — "
-                "this may indicate a bug in the migration path: %s",
+                "HA will retry setup with backoff: %s",
                 self._store.key.removeprefix("shop2parcel."),
                 err,
                 exc_info=True,
             )
-            raise UpdateFailed(f"Shop2Parcel store migration failed: {err}") from err
+            # ConfigEntryNotReady signals HA to retry async_setup_entry with
+            # exponential backoff rather than treating this as a polling failure.
+            raise ConfigEntryNotReady(f"Shop2Parcel store load failed: {err}") from err
         stored_list = stored.get("submitted_tracking_numbers", [])
         if not isinstance(stored_list, list):
             _LOGGER.warning(
@@ -428,14 +431,18 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         The try/except guards against AttributeError (uninitialized store/hass) and
         other unexpected scheduling failures; actual write errors surface in HA logs
         when the delayed timer fires.
+
+        asdict() calls are intentionally outside the try block so a serialization
+        failure raises immediately (loud failure) rather than being silently swallowed
+        and producing a stale snapshot at the next debounce fire.
         """
+        snapshot_tracking = list(self._submitted_tracking_numbers.keys())
+        snapshot_quota = self._quota_exhausted_until
+        snapshot_shipments = {
+            msg_id: asdict(shipment)
+            for msg_id, shipment in self._pending_shipments.items()
+        }
         try:
-            snapshot_tracking = list(self._submitted_tracking_numbers.keys())
-            snapshot_quota = self._quota_exhausted_until
-            snapshot_shipments = {
-                msg_id: asdict(shipment)
-                for msg_id, shipment in self._pending_shipments.items()
-            }
             self._store.async_delay_save(
                 lambda: {
                     "submitted_tracking_numbers": snapshot_tracking,
@@ -494,6 +501,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             return
 
         # D-11: O(1) reverse lookup {tracking_number: message_id}
+        # Multi-shipment dedup invariant: storage keys are either a bare msg_id
+        # (single-shipment emails) or f"{msg_id}::{tracking_number}" (multi-shipment
+        # digests — see gmail_coordinator.py ~line 339, imap_coordinator.py ~line 284).
+        # Because this dict is keyed on tracking_number (unique per shipment), each
+        # composite key maps to a distinct entry — do NOT collapse composite keys back
+        # to bare msg_id in future refactors; each composite key is a distinct HA entity.
         tracking_to_msg_id = {
             shipment.tracking_number: msg_id for msg_id, shipment in self.data.items()
         }
