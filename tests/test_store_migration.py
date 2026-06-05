@@ -9,18 +9,17 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from unittest.mock import AsyncMock, MagicMock, patch as _patch
+from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import patch as _patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from homeassistant.core import EVENT_HOMEASSISTANT_STOP
-
 from custom_components.shop2parcel.api.email_parser import ShipmentData
+from custom_components.shop2parcel.const import DOMAIN, MAX_SUBMITTED_TRACKING_NUMBERS
 from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator, Shop2ParcelStore
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
 from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
-from custom_components.shop2parcel.const import DOMAIN, MAX_SUBMITTED_TRACKING_NUMBERS
 
 
 @pytest.fixture()
@@ -219,7 +218,7 @@ async def test_load_store_skips_corrupt_persisted_shipments_entry(
 # Returns (coordinator, mock_store_instance) so tests can inspect store calls.
 # ---------------------------------------------------------------------------
 
-async def _setup_coordinator(hass, config_entry, coordinator_cls):
+async def _setup_coordinator(hass, config_entry, coordinator_cls, request):
     """Set up a coordinator with mocked store, clients, and parser.
 
     Returns (coordinator, mock_store_instance) where mock_store_instance exposes
@@ -230,6 +229,9 @@ async def _setup_coordinator(hass, config_entry, coordinator_cls):
     the real OAuth infrastructure being invoked.  The patches are started
     here (rather than scoped to the setup call) so subsequent direct calls to
     coordinator._async_update_data() in tests continue to see the mocks.
+
+    Patch teardown is registered via request.addfinalizer so patches are
+    released even when a test assertion fails mid-test (leak-proof teardown).
     """
     from tests.conftest import setup_coordinator_with_data, setup_imap_coordinator_with_data
 
@@ -255,12 +257,9 @@ async def _setup_coordinator(hass, config_entry, coordinator_cls):
         # persistent patch takes effect for subsequent _async_update_data() calls.
         coordinator._email_client = mock_gmail_cls.return_value
 
-        def _stop_patchers():
-            _oauth_patcher.stop()
-            _gmail_patcher.stop()
-
-        # Stop patchers when HA shuts down (end of test teardown).
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, lambda _: _stop_patchers())
+        # Register finalizers so patches are stopped even on test assertion failure.
+        request.addfinalizer(_oauth_patcher.stop)
+        request.addfinalizer(_gmail_patcher.stop)
     else:
         coordinator = await setup_imap_coordinator_with_data(hass, config_entry, {})
     return coordinator, coordinator._store
@@ -277,6 +276,7 @@ async def test_shipments_saved_to_store_after_poll(
     mock_config_entry,
     mock_imap_config_entry,
     coordinator_cls,
+    request,
 ) -> None:
     """R1: After _async_update_data yields a shipment, the mocked store's
     async_delay_save must have been called with a lambda that materialises a
@@ -297,7 +297,7 @@ async def test_shipments_saved_to_store_after_poll(
     )
 
     # Pre-populate coordinator with the shipment (simulates a poll that found it)
-    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
     coordinator.async_set_updated_data({"MSG_NEW": expected_shipment})
 
     # Trigger a poll with no new emails (the FIFO-cap + save logic fires at end of poll)
@@ -337,6 +337,7 @@ async def test_restored_shipments_present_in_first_poll(
     mock_config_entry,
     mock_imap_config_entry,
     coordinator_cls,
+    request,
 ) -> None:
     """R2: When coordinator.data is None (first poll after restart) and
     _restored_shipments has entries, _async_update_data must seed current_data
@@ -346,7 +347,7 @@ async def test_restored_shipments_present_in_first_poll(
     """
     config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
 
-    coordinator, _mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator, _mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     # Simulate a restart: data is None, _restored_shipments has 2 entries
     coordinator.async_set_updated_data(None)  # type: ignore[arg-type]
@@ -382,6 +383,7 @@ async def test_cleanup_removes_shipment_from_store(
     mock_config_entry,
     mock_imap_config_entry,
     coordinator_cls,
+    request,
 ) -> None:
     """R4: async_cleanup_delivered must assign _pending_shipments = new_data and
     call _async_save_store so the delivered shipment is removed from the store.
@@ -393,7 +395,7 @@ async def test_cleanup_removes_shipment_from_store(
 
     config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
 
-    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     shipment_y = ShipmentData(tracking_number="TNY", carrier_name="UPS", order_name="#Y", message_id="Y", email_date=1)
     shipment_z = ShipmentData(tracking_number="TNZ", carrier_name="FedEx", order_name="#Z", message_id="Z", email_date=2)
@@ -449,6 +451,7 @@ async def test_fifo_cap_evicts_oldest_entry(
     mock_config_entry,
     mock_imap_config_entry,
     coordinator_cls,
+    request,
 ) -> None:
     """R1: When current_data exceeds MAX_SUBMITTED_TRACKING_NUMBERS (1000),
     the FIFO cap must evict the oldest entries (by insertion order) so that
@@ -459,7 +462,7 @@ async def test_fifo_cap_evicts_oldest_entry(
     """
     config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
 
-    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     # Seed coordinator with 1001 entries in known insertion order
     oversize_data: dict[str, ShipmentData] = {}
@@ -514,6 +517,7 @@ async def test_fifo_cap_at_boundary_does_not_evict(
     mock_config_entry,
     mock_imap_config_entry,
     coordinator_cls,
+    request,
 ) -> None:
     """R6 boundary: exactly MAX entries must not trigger eviction.
 
@@ -521,7 +525,7 @@ async def test_fifo_cap_at_boundary_does_not_evict(
     entry is removed — msg_0000 (oldest) must still be present.
     """
     config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
-    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     at_cap: dict[str, ShipmentData] = {
         f"msg_{i:04d}": ShipmentData(
@@ -558,12 +562,13 @@ async def test_second_poll_ignores_restored_shipments(
     mock_config_entry,
     mock_imap_config_entry,
     coordinator_cls,
+    request,
 ) -> None:
     """R2 complement: when self.data is not None (subsequent polls), current_data
     must seed from self.data and ignore _restored_shipments entirely.
     """
     config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
-    coordinator, _mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator, _mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     live_shipment = ShipmentData(
         tracking_number="TN_LIVE", carrier_name="UPS", order_name="#LIVE",
@@ -637,6 +642,7 @@ async def test_debug_mode_skips_fifo_trim_and_save(
     hass,
     coordinator_cls,
     make_entry,
+    request,
 ) -> None:
     """DBG-03: FIFO trim and end-of-poll store save must be skipped in debug mode.
 
@@ -644,7 +650,7 @@ async def test_debug_mode_skips_fifo_trim_and_save(
     populated and async_delay_save called, breaking the zero-write contract.
     """
     config_entry = make_entry()
-    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     shipment = ShipmentData(
         tracking_number="TN_DBG", carrier_name="UPS", order_name="#DBG",
@@ -676,6 +682,7 @@ async def test_cleanup_no_op_when_no_deliveries(
     mock_config_entry,
     mock_imap_config_entry,
     coordinator_cls,
+    request,
 ) -> None:
     """R4 guard: async_cleanup_delivered must not call the store when removed_ids
     is empty — the `if not removed_ids: return` guard must prevent unnecessary writes.
@@ -683,7 +690,7 @@ async def test_cleanup_no_op_when_no_deliveries(
     from datetime import datetime as _datetime
 
     config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
-    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls)
+    coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     shipment_z = ShipmentData(
         tracking_number="TNZ", carrier_name="FedEx", order_name="#Z",
