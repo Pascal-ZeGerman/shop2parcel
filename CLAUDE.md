@@ -113,10 +113,41 @@ Shop2Parcel is a Home Assistant custom integration that polls the Shopify API fo
 
 ### Release Process
 
-1. **Bump `manifest.json` version in the same PR** as the feature work — the release workflow validates that `manifest.json` version matches the tag and fails if they diverge. Never tag before the manifest bump is on master.
-2. **Tag after the PR is merged**: `git fetch origin master && git tag vX.Y.Z origin/master && git push origin vX.Y.Z`
-3. **Pre-release detection is automatic**: tags containing `-rc`, `-beta`, or `-alpha` are marked as GitHub pre-releases by the workflow.
-4. **If you tag before bumping the manifest**: open a hotfix PR with only the manifest bump, merge it, delete the tag, and re-push it pointing at the new master HEAD.
+#### CI/CD workflows (`.github/workflows/`)
+
+| Workflow | Trigger | What it does |
+|----------|---------|-------------|
+| `pytest.yml` | Every push / PR | Runs `pytest tests/ -v --tb=short` on Python 3.14 |
+| `pytest.yml` (lint job) | Every push / PR | `ruff check .`, `ruff format --check .`, `mypy custom_components/shop2parcel/` |
+| `hassfest.yml` | Every push / PR | Validates `manifest.json` via Home Assistant's `hassfest` action |
+| `hacs.yml` | Every push / PR | Validates HACS repo structure |
+| `codeql.yml` | Every push / PR | Static security analysis |
+| `release.yml` | Push of a `v*` tag | Validates manifest version matches tag, creates GitHub Release (pre-release if tag contains `-rc`, `-beta`, or `-alpha`) |
+
+#### Lint rules enforced locally and in CI
+
+- `ruff check .` — style/import linting (run `ruff check --fix .` to auto-fix)
+- `ruff format --check .` — formatting (run `ruff format .` to auto-format)
+- Both must pass before pushing; CI fails on either
+
+#### Cutting a release
+
+1. **Bump `manifest.json` version in the same PR** as the feature work — `release.yml` validates that `manifest.json` version exactly matches the tag (`TAG_VERSION="${GITHUB_REF_NAME#v}"`) and fails if they diverge. Never tag before the manifest bump is merged.
+2. **Tag after the PR is merged** (pointing at `origin/main`):
+   ```bash
+   git fetch origin main
+   git tag vX.Y.Z origin/main
+   git push origin vX.Y.Z
+   ```
+3. **Pre-release detection is automatic**: tags containing `-rc`, `-beta`, or `-alpha` are marked as GitHub pre-releases by `release.yml`.
+4. **If the tag already exists** (e.g. re-tagging after additional commits): delete and recreate it:
+   ```bash
+   git tag -d vX.Y.Z
+   git push origin :refs/tags/vX.Y.Z
+   git tag vX.Y.Z origin/main
+   git push origin vX.Y.Z
+   ```
+5. **If you tag before bumping the manifest**: open a hotfix PR with only the manifest bump, merge it, delete the tag, and re-push it pointing at the new `main` HEAD.
 <!-- GSD:conventions-end -->
 
 <!-- GSD:architecture-start source:ARCHITECTURE.md -->
