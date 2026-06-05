@@ -4,7 +4,7 @@
 
 - ✅ **v1.0 MVP** — Phases 1–9 (shipped 2026-05-04)
 - ✅ **v1.1 Debug-Ready** — Phases 10–12 (shipped 2026-05-17)
-- ✅ **v1.2 Debug Switch** — Phases 13–14 (complete 2026-05-20)
+- ✅ **v1.2 Debug Switch** — Phases 13–14 (shipped 2026-06-05)
 
 ## Phases
 
@@ -36,84 +36,16 @@ Full phase details: [.planning/milestones/v1.1-ROADMAP.md](./milestones/v1.1-ROA
 
 </details>
 
-### ✅ v1.2 Debug Switch (Phases 13–14) — COMPLETE 2026-05-20
+<details>
+<summary>✅ v1.2 Debug Switch (Phases 13–14) — SHIPPED 2026-06-05</summary>
 
-- [x] **Phase 13: Dedup Store Persistence Fix** (2/2 plans) — completed 2026-05-19
-- [x] **Phase 13.1: Sensor Restore on Restart** (INSERTED) — Extend dedup store to persist ShipmentData so sensors survive HA restarts (completed 2026-05-23)
-- [x] **Phase 14: Debug/Dry-Run Mode** (4/4 plans) — completed 2026-05-20
+- [x] Phase 13: Dedup Store Persistence Fix (2/2 plans) — completed 2026-05-23
+- [x] Phase 13.1: Sensor Restore on Restart (3/3 plans) — completed 2026-05-23
+- [x] Phase 14: Debug/Dry-Run Mode (4/4 plans) — completed 2026-05-20
 
-## Phase Details
+Full phase details: [.planning/milestones/v1.2-ROADMAP.md](./milestones/v1.2-ROADMAP.md)
 
-### Phase 13: Dedup Store Persistence Fix
-
-**Goal**: The dedup store reliably prevents re-submission of previously-rejected tracking numbers across HA restarts
-**Depends on**: Nothing (production bug fix, no new capability dependencies)
-**Requirements**: DEDUP-01, DEDUP-02, DEDUP-03
-**Success Criteria** (what must be TRUE):
-
-  1. A tracking number that received a 400 "already added" response is NOT written to the dedup store, so it does not persist and loop on the next HA restart
-  2. When parcelapp.net returns a 400 "already added" response, the coordinator treats it as an idempotent success (tracking number marked submitted, no retry)
-  3. When HA starts, the developer can see "loaded N tracking numbers" at DEBUG level in the HA logs, confirming the store persistence path without inspecting raw storage files
-  4. When a store save completes, the developer can see "saved N tracking numbers" at DEBUG level, confirming that write paths are observable
-
-**Plans:** 2/2 plans complete
-Plans:
-**Wave 1**
-
-- [x] 13-01-PLAN.md — Add ParcelAppAlreadyAddedError exception class and branch parcelapp.py 400 handling (DEDUP-01)
-
-**Wave 2** *(blocked on Wave 1 completion)*
-
-- [x] 13-02-PLAN.md — Wire already-added handler into both coordinators, add DEBUG store load/save logs, test coverage (DEDUP-01, DEDUP-02, DEDUP-03)
-
-### Phase 13.1: Sensor Restore on Restart — Extend dedup store to persist ShipmentData so sensors survive HA restarts (INSERTED)
-
-**Goal:** Extend the HA Store schema (v2 → v3) to persist `coordinator.data` (`ShipmentData` objects) across HA restarts, so shipments older than the scan window are not permanently lost and all previously tracked sensors reappear after the first poll completes.
-**Requirements**: R1, R2, R3, R4, R5, R6 (locked in 13.1-SPEC.md)
-**Depends on:** Phase 13
-**Plans:** 3/3 plans complete
-
-Plans:
-**Wave 1**
-
-- [x] 13.1-01-PLAN.md — TDD RED: add 6 new test cases + update stale future-major test in tests/test_store_migration.py (R6 covers R1-R5)
-
-**Wave 2** *(blocked on Wave 1 completion)*
-
-- [x] 13.1-02-PLAN.md — Base coordinator changes: STORAGE_VERSION=3, v2→v3 migration, _pending_shipments/_restored_shipments fields, _async_load_store resilience, _async_save_store lambda extension, async_cleanup_delivered persists (R3, R5, R4, R1 partial)
-
-**Wave 3** *(blocked on Wave 2 completion)*
-
-- [x] 13.1-03-PLAN.md — Subclass changes: GmailCoordinator + ImapCoordinator seed expression and end-of-poll FIFO-trim + save block (R1, R2)
-
-### Phase 14: Debug/Dry-Run Mode
-
-**Goal**: Users can enable a debug/dry-run toggle in the integration options that suppresses all parcelapp.net side effects and emits full per-email diagnostic output
-**Depends on**: Phase 13 (dedup fix must ship before debug mode, which bypasses dedup and would otherwise mask the persistence bug)
-**Requirements**: DBG-01, DBG-02, DBG-03, DBG-04, DBG-05, DBG-06
-**Success Criteria** (what must be TRUE):
-
-  1. User can enable or disable debug mode via the integration options flow in the HA UI (works for both Gmail and IMAP account types)
-  2. When debug mode is on, the scan window is automatically 365 days regardless of the user's configured rescan window
-  3. When debug mode is on, no POST is sent to parcelapp.net (dry-run — existing parcelapp data is untouched)
-  4. When debug mode is on, the dedup store is neither read nor written — every email is evaluated fresh on every poll
-  5. When debug mode is on, each email's subject, sender, parse result, tracking candidates, and final outcome appear in the HA log at INFO level
-  6. While debug mode is active, a Home Assistant persistent notification appears on every poll cycle, ensuring users are aware the integration is not submitting real data
-
-**Plans:** 4/4 plans complete
-
-**Wave 1**
-
-- [x] 14-01-PLAN.md — Add CONF_DEBUG_MODE constant and debug_mode boolean field to both Gmail and IMAP options flow branches (DBG-01)
-
-**Wave 2** *(parallel — no file overlap)*
-
-- [x] 14-02-PLAN.md — Gmail coordinator: window override, dedup bypass, dry-run POST suppression, INFO logs, persistent notification lifecycle (DBG-02, DBG-03, DBG-04, DBG-05, DBG-06)
-- [x] 14-03-PLAN.md — IMAP coordinator: identical debug mode logic, symmetric with Gmail implementation (DBG-02, DBG-03, DBG-04, DBG-05, DBG-06)
-
-**Wave 3** *(blocked on Wave 2 completion)*
-
-- [x] 14-04-PLAN.md — All DBG test coverage in tests/test_debug_mode.py: 12 tests, 2 per DBG requirement × Gmail/IMAP (DBG-01 through DBG-06)
+</details>
 
 ## Progress
 
@@ -131,6 +63,6 @@ Plans:
 | 10. Full-Window Scanning & Tracking Dedup | v1.1 | 3/3 | Complete | 2026-05-11 |
 | 11. Activity Log & Debug Logging | v1.1 | 3/3 | Complete | 2026-05-12 |
 | 12. Address Tech Debt | v1.1 | 3/3 | Complete | 2026-05-14 |
-| 13. Dedup Store Persistence Fix | v1.2 | 2/2 | Complete   | 2026-05-23 |
-| 13.1. Sensor Restore on Restart | v1.2 | 3/3 | Complete   | 2026-05-23 |
+| 13. Dedup Store Persistence Fix | v1.2 | 2/2 | Complete | 2026-05-23 |
+| 13.1. Sensor Restore on Restart | v1.2 | 3/3 | Complete | 2026-05-23 |
 | 14. Debug/Dry-Run Mode | v1.2 | 4/4 | Complete | 2026-05-20 |

@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-milestone_name: milestone
-status: completed
-stopped_at: context exhaustion at 77% (2026-06-02)
-last_updated: "2026-06-02T04:01:37.569Z"
-last_activity: "2026-05-23 -- Phase 14 reconciliation: confirmed 4/4 plans shipped on origin/main, WR-01..WR-04 all fixed in subsequent commits"
+milestone_name: Debug Switch
+status: Awaiting next milestone
+stopped_at: milestone close in progress
+last_updated: "2026-06-05T20:17:03.615Z"
+last_activity: 2026-06-05 — Milestone v1.2 completed and archived
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
+  total_phases: 15
+  completed_phases: 15
+  total_plans: 47
+  completed_plans: 47
   percent: 100
 ---
 
@@ -18,17 +18,17 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-05-17)
+See: .planning/PROJECT.md (updated 2026-06-05)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** v1.2 milestone complete — all phases (13, 13.1, 14) done; ready to close milestone
+**Current focus:** Planning next milestone
 
 ## Current Position
 
-Phase: 14 — Debug/Dry-Run Mode (last phase of v1.2)
-Plan: 04 complete (all 4 plans done, executed 2026-05-20)
-Status: Milestone complete — v1.2 ready to close
-Last activity: 2026-05-23 -- Phase 14 reconciliation: confirmed 4/4 plans shipped on origin/main, WR-01..WR-04 all fixed in subsequent commits
+Phase: Milestone v1.2 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-06-05 — Milestone v1.2 completed and archived
 
 ## Performance Metrics
 
@@ -157,8 +157,25 @@ Items acknowledged and deferred at v1.1 milestone close on 2026-05-17:
 | tech_debt | DBG-01..04 have no automated caplog test coverage | minor |
 | tech_debt | ParcelAppTransientError/InvalidTrackingError paths don't emit scan events | minor |
 
+Items acknowledged and deferred at v1.2 milestone close on 2026-06-05:
+
+| Category | Item | Status |
+|----------|------|--------|
+| debug_session | no-new-numbers-email-search-2026-05-17 — RESOLVED by Phase 13 (already-added 400s now treated as idempotent success; dedup store no longer writes rejected TNs) | resolved |
+| debug_session | oauth-token-rejected-after-update | root_cause_identified |
+| todo | add-forwarded-email-sender-configuration — future capability, not blocking v1.2 | deferred |
+| seed | SEED-001-debug-dry-run-mode — SHIPPED in Phase 14 (v1.2); seed can be closed | resolved |
+| seed | SEED-002-activity-log-human-readable-poll-summary — future feature | dormant |
+| quick_task | 17 quick tasks with missing summary files — administrative debt; work is completed | missing_summary |
+
+Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuing deferrals from v1.0/v1.1 (hardware-dependent live HA testing).
+
 ## Session Continuity
 
-Last session: 2026-06-02T04:01:37.553Z
-Stopped at: context exhaustion at 77% (2026-06-02)
-Next action: Merge Phase 13.1 branch → /gsd:complete-milestone
+Last session: 2026-06-05 — /gsd:complete-milestone v1.2
+Stopped at: milestone close in progress
+Next action: v1.2 archived; start /gsd:new-milestone for v1.3
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone

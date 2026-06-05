@@ -2,33 +2,35 @@
 
 ## What This Is
 
-Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) or any IMAP mailbox for Shopify shipping confirmation emails, extracts tracking data (tracking number, carrier, order number), and forwards it to parcelapp.net. Shipments appear as HA sensor entities automatically — no manual entry. Multiple accounts (Gmail and/or IMAP) can be configured per HA instance, each running its own polling coordinator.
+Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) or any IMAP mailbox for Shopify shipping confirmation emails, extracts tracking data (tracking number, carrier, order number), and forwards it to parcelapp.net. Shipments appear as HA sensor entities automatically — no manual entry. Multiple accounts (Gmail and/or IMAP) can be configured per HA instance, each running its own polling coordinator. A configurable debug/dry-run mode allows full diagnostic output without submitting real data to parcelapp.net.
 
 ## Core Value
 
 Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
 
-## Current Milestone: v1.2 Debug Switch
+## Current State: v1.2 Shipped
 
-**Goal:** Add a configurable debug/dry-run mode and fix the dedup store persistence bug causing repeated 400 errors on HA restart.
+**Shipped:** 2026-06-05 — v1.2 Debug Switch complete.
 
-**Target features:**
-- Dry-run / debug mode — disables Parcel App routing, dedup, and overrides scan window to 365d; emits verbose per-email diagnostic output (from SEED-001)
-- Fix dedup store persistence — 3 stuck message IDs loop with "already added" 400s on every HA restart (root cause identified in v1.1 debug session)
+- Dedup store persistence bug fixed: already-added 400s treated as idempotent success; no more restart loops
+- HA Store STORAGE_VERSION 3: persists `coordinator.data` (ShipmentData objects) across HA restarts — sensors reappear after first poll without manual intervention
+- Debug/dry-run mode: 365-day window override, dedup bypass, dry-run POST suppression, per-email INFO logging, persistent HA notification
+- **Codebase:** ~13,641 LOC total (integration + tests), 361 tests passing, manifest v1.2.x
+- **Connection methods:** Gmail OAuth2 and IMAP (app-password / SSL / STARTTLS)
+- **Carriers supported:** Shopify standard, UPS, USPS, FedEx
 
-## Previous State: v1.1 Shipped
+## Previous Milestones
 
-**Shipped:** 2026-05-17 — v1.1 Debug-Ready complete.
+<details>
+<summary>v1.1 Debug-Ready — shipped 2026-05-17</summary>
 
 - Full-window scanning always on; tracking-number-based dedup (LRU 1000) persisted across restarts
 - Per-email activity log ring buffer (50 events) + ActivityLogSensor + diagnostics download
 - Comprehensive `_LOGGER.debug()` — HA native debug toggle reveals full operational detail
 - Coordinator split into `GmailCoordinator` + `ImapCoordinator` subclasses
 - **Codebase:** ~3,600 LOC integration + ~6,000 LOC tests, 265 tests passing, manifest v1.1.1
-- **Connection methods:** Gmail OAuth2 and IMAP (app-password / SSL / STARTTLS)
-- **Carriers supported:** Shopify standard, UPS, USPS, FedEx
 
-## Previous Milestones
+</details>
 
 <details>
 <summary>v1.0 MVP — shipped 2026-05-04</summary>
@@ -63,18 +65,17 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - ✓ Tracking-number-based submission dedup — persisted OrderedDict (LRU cap 1000) replaces message-ID dedup; STORAGE_VERSION 1→2 migration — v1.1 (Phase 10)
 - ✓ Per-email diagnostic activity log — ring buffer of scan events (subject, sender, template matched, tracking data extracted, submission outcome) via ActivityLogSensor + diagnostics download — v1.1 (Phase 11)
 - ✓ HA debug mode integration — comprehensive _LOGGER.debug() calls across coordinator, parsers, and API clients; HA's native debug toggle reveals full operational detail — v1.1 (Phase 11)
+- ✓ Fixed dedup store persistence: already-added 400 responses treated as idempotent success; coordinator no longer writes rejected TNs to dedup store on restart — v1.2 (Phase 13)
+- ✓ HA Store STORAGE_VERSION 3: persists coordinator.data (ShipmentData objects) across restarts; v2→v3 migration with per-entry type validation — v1.2 (Phase 13.1)
+- ✓ Debug/dry-run mode: 365-day window override, dedup bypass, dry-run POST suppression, per-email INFO logging, persistent HA notification — v1.2 (Phase 14)
 
-### Active (v1.2)
-
-- [ ] Dry-run / debug mode — configurable mode disabling Parcel App routing, dedup, and setting scan window to 365d; posts verbose per-email diagnostic output (SEED-001)
-- [ ] Fix dedup store persistence: 3 stuck message IDs loop with "already added" 400s on every HA restart (deferred from v1.1 debug session)
-
-### Queued (future milestones)
+### Active (future milestones)
 
 - [ ] Delivery status tracking — shipment sensor state reflects current delivery status
 - [ ] Configurable cleanup grace period for delivered shipments (currently hardcoded 24h)
 - [ ] Reauth flow for IMAP credential failures (currently logs error, no HA Repairs notification)
 - [ ] Deduplication against tracking numbers already in parcelapp.net GET endpoint (server-side cross-check)
+- [ ] Add forwarded email sender configuration — allow configuring trusted forwarder addresses in options flow
 
 ### Out of Scope
 
@@ -83,14 +84,16 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - Writing back to Shopify (order updates, cancellations) — read-only
 - Multi-store Shopify support — single store per integration instance
 - European carrier templates (Amazon DE, DHL, DPD, Zalando, OTTO) — US-focused product
+- Debug mode as auto-trigger on HA debug logging — orthogonal concerns; would silently suppress real parcelapp POSTs when user enables HA debug logging
 
 ## Context
 
 - **Architecture:** `DataUpdateCoordinator` (one per account) → `GmailClient` or `ImapClient` → `EmailParser` → `ParcelAppClient`. Sensor entities subscribe to coordinator updates.
 - **Auth storage:** Gmail OAuth2 tokens and IMAP credentials stored in HA config entry `data` (encrypted at rest). Parcelapp API key also in `data`.
-- **Dedup:** `Shop2ParcelStore` (STORAGE_VERSION 2) persists `_submitted_tracking_numbers: OrderedDict[str, None]` (LRU cap 1000) across HA restarts. Replaces v1 message-ID/UID dedup.
+- **Dedup:** `Shop2ParcelStore` (STORAGE_VERSION 3) persists `_submitted_tracking_numbers: OrderedDict[str, None]` (LRU cap 1000) AND `_persisted_shipments: dict[str, ShipmentData]` across HA restarts. v2→v3 migration path included.
 - **Parser:** Template registry (CARRIER_REGISTRY) with `detect_fn` + `parse_fn` per carrier. Shopify fallback uses BS4 `<p>` scan then regex keyword match.
 - **Environment:** Raspberry Pi dev environment with PyPI network-blocked — aiohttp/aioresponses symlinked from sibling venv.
+- **Codebase:** ~13,641 LOC total (integration + tests), 361 tests, manifest v1.2.x.
 
 ## Constraints
 
@@ -119,10 +122,14 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 | `collections.deque(maxlen=50)` for activity log | Auto-eviction, no manual size check | ✓ Good — v1.1 |
 | Coordinator split into subclasses | 926-line monolith was unmanageable; subclass pattern clean | ✓ Good — v1.1 Phase 12 |
 | FedEx `_parse_fedex` href fallback added | FedEx Delivery Manager emails use href for TN, not text prefix | ✓ Fixed — PR #10 |
+| Already-added 400 routed as idempotent success | Previous code wrote rejected TNs back to dedup store, causing restart loops | ✓ Good — v1.2 Phase 13 |
+| STORAGE_VERSION 3 persists ShipmentData | Sensors vanished after HA restart because coordinator.data was not persisted | ✓ Good — v1.2 Phase 13.1 |
+| _SHIPMENT_FIELD_TYPES for per-entry validation | Prevents corrupt store entries from crashing coordinator on load | ✓ Good — v1.2 Phase 13.1 |
+| Debug mode as config option (not auto-trigger) | Debug logging and dry-run mode are orthogonal; debug mode suppresses real POSTs intentionally | ✓ Good — v1.2 Phase 14 |
 
 ## Evolution
 
-**After each milestone** (via `/gsd-complete-milestone`):
+**After each milestone** (via `/gsd:complete-milestone`):
 1. Full review of all sections
 2. Core Value check — still the right priority?
 3. Move shipped requirements to Validated
@@ -130,4 +137,4 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 5. Update Context with current state
 
 ---
-*Last updated: 2026-05-18 — v1.2 Debug Switch milestone started*
+*Last updated: 2026-06-05 after v1.2 milestone*
