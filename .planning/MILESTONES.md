@@ -1,5 +1,26 @@
 # Milestones
 
+## v1.2 Debug Switch (Shipped: 2026-06-05)
+
+**Phases completed:** 3 phases (13, 13.1, 14), 9 plans
+
+**Key accomplishments:**
+
+1. `ParcelAppAlreadyAddedError` exception class added — routes already-added 400 responses as idempotent success, ending the 3-stuck-message-ID restart loop (Phase 13)
+2. Store observability: `_async_load_store` / `_async_save_store` now log tracking-number count at DEBUG level (Phase 13)
+3. HA Store STORAGE_VERSION bumped to 3 — persists `coordinator.data` (ShipmentData objects) across HA restarts; v2→v3 migration with per-entry type validation via `_SHIPMENT_FIELD_TYPES` (Phase 13.1)
+4. GmailCoordinator and ImapCoordinator seed `_pending_shipments` from restored state; end-of-poll FIFO-trim + save block (Phase 13.1)
+5. Debug/dry-run mode: 365-day window override, dedup bypass, dry-run POST suppression, per-email INFO logging, persistent HA notification lifecycle (Phase 14)
+6. 12 new debug mode tests (2 per DBG requirement × Gmail/IMAP); test suite at 361 tests (Phase 14)
+
+**Stats:** 53 files changed · +8,746 / -1,398 lines · 2026-05-19 → 2026-05-23 (4 days)
+
+**Known deferred items at close:** 32 (see STATE.md Deferred Items)
+
+**Archive:** [.planning/milestones/v1.2-ROADMAP.md](./milestones/v1.2-ROADMAP.md)
+
+---
+
 ## v1.0 MVP (Shipped: 2026-05-04)
 
 **Phases completed:** 9 phases, 29 plans, 24 tasks
@@ -47,6 +68,7 @@
 **Stats:** 105 commits · 42 files changed · +5,410 / -1,116 lines · 2026-05-04 → 2026-05-17
 
 **Known deferred items at close:** 1 (see STATE.md Deferred Items)
+
 - `no-new-numbers-email-search-2026-05-17` — 3 stuck message IDs + dedup persistence investigation
 
 **Archive:** [.planning/milestones/v1.1-ROADMAP.md](./milestones/v1.1-ROADMAP.md)
