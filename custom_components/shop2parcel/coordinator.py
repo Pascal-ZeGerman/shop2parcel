@@ -396,12 +396,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raw_shipments = {}
         for msg_id, entry in raw_shipments.items():
             if not isinstance(entry, dict) or not all(
-                k in entry and isinstance(entry[k], t)
-                for k, t in _SHIPMENT_FIELD_TYPES.items()
+                k in entry and isinstance(entry[k], t) for k, t in _SHIPMENT_FIELD_TYPES.items()
             ):
-                _LOGGER.warning(
-                    "persisted_shipments entry for %r is invalid — skipping", msg_id
-                )
+                _LOGGER.warning("persisted_shipments entry for %r is invalid — skipping", msg_id)
                 continue
             try:
                 restored[msg_id] = ShipmentData(**{k: entry[k] for k in _SHIPMENT_FIELD_TYPES})
@@ -413,9 +410,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
         self._restored_shipments = restored
         self._store_loaded = True
-        _LOGGER.debug(
-            "Restored %d persisted shipments from store", len(self._restored_shipments)
-        )
+        _LOGGER.debug("Restored %d persisted shipments from store", len(self._restored_shipments))
 
     async def _async_save_store(self) -> None:
         """Schedule a debounced persist of current dedup, quota, and shipment state to Store.
@@ -439,8 +434,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         snapshot_tracking = list(self._submitted_tracking_numbers.keys())
         snapshot_quota = self._quota_exhausted_until
         snapshot_shipments = {
-            msg_id: asdict(shipment)
-            for msg_id, shipment in self._pending_shipments.items()
+            msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
         }
         try:
             self._store.async_delay_save(

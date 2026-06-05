@@ -149,9 +149,7 @@ async def test_migrate_func_v2_seeds_persisted_shipments(
     warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warning_records, "Expected at least one WARNING log record"
     messages = " ".join(r.getMessage() for r in warning_records)
-    assert "v3" in messages, (
-        f"WARNING log must mention 'v3', got: {messages!r}"
-    )
+    assert "v3" in messages, f"WARNING log must mention 'v3', got: {messages!r}"
     assert "test_entry_id" in messages, (
         f"WARNING log must contain entry_id 'test_entry_id', got: {messages!r}"
     )
@@ -218,6 +216,7 @@ async def test_load_store_skips_corrupt_persisted_shipments_entry(
 # Returns (coordinator, mock_store_instance) so tests can inspect store calls.
 # ---------------------------------------------------------------------------
 
+
 async def _setup_coordinator(hass, config_entry, coordinator_cls, request):
     """Set up a coordinator with mocked store, clients, and parser.
 
@@ -248,9 +247,7 @@ async def _setup_coordinator(hass, config_entry, coordinator_cls, request):
             "expires_at": 9999999999.0,
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
-        _gmail_patcher = _patch(
-            "custom_components.shop2parcel.gmail_coordinator.GmailClient"
-        )
+        _gmail_patcher = _patch("custom_components.shop2parcel.gmail_coordinator.GmailClient")
         mock_gmail_cls = _gmail_patcher.start()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         # Overwrite the coordinator's _email_client with the new mock so the
@@ -285,7 +282,9 @@ async def test_shipments_saved_to_store_after_poll(
     RED: fails until Plan 03 adds _pending_shipments assignment + _async_save_store()
     call at end of _async_update_data in both coordinators.
     """
-    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    config_entry = (
+        mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    )
 
     # Build the expected shipment
     expected_shipment = ShipmentData(
@@ -345,28 +344,34 @@ async def test_restored_shipments_present_in_first_poll(
 
     RED: fails until Plan 03 changes the seed expression in both coordinators.
     """
-    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    config_entry = (
+        mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    )
 
-    coordinator, _mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
+    coordinator, _mock_store = await _setup_coordinator(
+        hass, config_entry, coordinator_cls, request
+    )
 
     # Simulate a restart: data is None, _restored_shipments has 2 entries
     coordinator.async_set_updated_data(None)  # type: ignore[arg-type]
     coordinator._restored_shipments = {
-        "A": ShipmentData(tracking_number="TNA", carrier_name="UPS", order_name="#A", message_id="A", email_date=1),
-        "B": ShipmentData(tracking_number="TNB", carrier_name="FedEx", order_name="#B", message_id="B", email_date=2),
+        "A": ShipmentData(
+            tracking_number="TNA", carrier_name="UPS", order_name="#A", message_id="A", email_date=1
+        ),
+        "B": ShipmentData(
+            tracking_number="TNB",
+            carrier_name="FedEx",
+            order_name="#B",
+            message_id="B",
+            email_date=2,
+        ),
     }
 
     result = await coordinator._async_update_data()
 
-    assert "A" in result, (
-        "restored shipment 'A' must be present in first-poll result"
-    )
-    assert "B" in result, (
-        "restored shipment 'B' must be present in first-poll result"
-    )
-    assert isinstance(result["A"], ShipmentData), (
-        "result['A'] must be a ShipmentData instance"
-    )
+    assert "A" in result, "restored shipment 'A' must be present in first-poll result"
+    assert "B" in result, "restored shipment 'B' must be present in first-poll result"
+    assert isinstance(result["A"], ShipmentData), "result['A'] must be a ShipmentData instance"
     assert result["A"].tracking_number == "TNA", (
         f"result['A'].tracking_number must be 'TNA', got: {result['A'].tracking_number!r}"
     )
@@ -393,21 +398,25 @@ async def test_cleanup_removes_shipment_from_store(
     """
     from datetime import datetime as _datetime
 
-    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    config_entry = (
+        mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    )
 
     coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
-    shipment_y = ShipmentData(tracking_number="TNY", carrier_name="UPS", order_name="#Y", message_id="Y", email_date=1)
-    shipment_z = ShipmentData(tracking_number="TNZ", carrier_name="FedEx", order_name="#Z", message_id="Z", email_date=2)
+    shipment_y = ShipmentData(
+        tracking_number="TNY", carrier_name="UPS", order_name="#Y", message_id="Y", email_date=1
+    )
+    shipment_z = ShipmentData(
+        tracking_number="TNZ", carrier_name="FedEx", order_name="#Z", message_id="Z", email_date=2
+    )
     coordinator.async_set_updated_data({"Y": shipment_y, "Z": shipment_z})
 
     # Reset call count so only the cleanup save counts
     mock_store.async_delay_save.reset_mock()
 
     # Patch ParcelAppClient so async_get_deliveries returns "Y" as delivered
-    with _patch(
-        "custom_components.shop2parcel.coordinator.ParcelAppClient"
-    ) as mock_parcel_cls:
+    with _patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls:
         mock_parcel_cls.return_value.async_get_deliveries = AsyncMock(
             return_value=[
                 {"tracking_number": "TNY", "status_code": 0},
@@ -460,7 +469,9 @@ async def test_fifo_cap_evicts_oldest_entry(
     RED: fails until Plan 03 adds the while-len-trim loop before
     self._pending_shipments = trimmed in _async_update_data.
     """
-    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    config_entry = (
+        mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    )
 
     coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
@@ -495,15 +506,9 @@ async def test_fifo_cap_evicts_oldest_entry(
         f"persisted_shipments must be capped at {MAX_SUBMITTED_TRACKING_NUMBERS}, "
         f"got {len(persisted)}"
     )
-    assert "msg_0000" not in persisted, (
-        "oldest entry 'msg_0000' must be evicted by FIFO cap"
-    )
-    assert "msg_1000" in persisted, (
-        "newest entry 'msg_1000' must be retained after FIFO cap"
-    )
-    assert "msg_0001" in persisted, (
-        "second-oldest entry 'msg_0001' must be retained after FIFO cap"
-    )
+    assert "msg_0000" not in persisted, "oldest entry 'msg_0000' must be evicted by FIFO cap"
+    assert "msg_1000" in persisted, "newest entry 'msg_1000' must be retained after FIFO cap"
+    assert "msg_0001" in persisted, "second-oldest entry 'msg_0001' must be retained after FIFO cap"
 
 
 # ---------------------------------------------------------------------------
@@ -524,13 +529,18 @@ async def test_fifo_cap_at_boundary_does_not_evict(
     The trim uses `while len > MAX` (strictly greater), so at exactly cap no
     entry is removed — msg_0000 (oldest) must still be present.
     """
-    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    config_entry = (
+        mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    )
     coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     at_cap: dict[str, ShipmentData] = {
         f"msg_{i:04d}": ShipmentData(
-            tracking_number=f"TN{i:04d}", carrier_name="UPS",
-            order_name=f"#{i}", message_id=f"msg_{i:04d}", email_date=i,
+            tracking_number=f"TN{i:04d}",
+            carrier_name="UPS",
+            order_name=f"#{i}",
+            message_id=f"msg_{i:04d}",
+            email_date=i,
         )
         for i in range(MAX_SUBMITTED_TRACKING_NUMBERS)
     }
@@ -567,20 +577,30 @@ async def test_second_poll_ignores_restored_shipments(
     """R2 complement: when self.data is not None (subsequent polls), current_data
     must seed from self.data and ignore _restored_shipments entirely.
     """
-    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
-    coordinator, _mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
+    config_entry = (
+        mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    )
+    coordinator, _mock_store = await _setup_coordinator(
+        hass, config_entry, coordinator_cls, request
+    )
 
     live_shipment = ShipmentData(
-        tracking_number="TN_LIVE", carrier_name="UPS", order_name="#LIVE",
-        message_id="LIVE_KEY", email_date=100,
+        tracking_number="TN_LIVE",
+        carrier_name="UPS",
+        order_name="#LIVE",
+        message_id="LIVE_KEY",
+        email_date=100,
     )
     coordinator.async_set_updated_data({"LIVE_KEY": live_shipment})
 
     # _restored_shipments has a conflicting key — must NOT appear in result
     coordinator._restored_shipments = {
         "RESTORED_ONLY": ShipmentData(
-            tracking_number="TN_RESTORED", carrier_name="DHL", order_name="#RES",
-            message_id="RESTORED_ONLY", email_date=50,
+            tracking_number="TN_RESTORED",
+            carrier_name="DHL",
+            order_name="#RES",
+            message_id="RESTORED_ONLY",
+            email_date=50,
         )
     }
 
@@ -632,7 +652,11 @@ async def test_second_poll_ignores_restored_shipments(
                     "imap_tls": "ssl",
                     "api_key": "test-parcelapp-key",
                 },
-                options={"debug_mode": True, "imap_search": 'SUBJECT "shipped"', "poll_interval": 30},
+                options={
+                    "debug_mode": True,
+                    "imap_search": 'SUBJECT "shipped"',
+                    "poll_interval": 30,
+                },
                 unique_id="debug_imap@example.com@imap.example.com",
             ),
         ),
@@ -653,8 +677,11 @@ async def test_debug_mode_skips_fifo_trim_and_save(
     coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     shipment = ShipmentData(
-        tracking_number="TN_DBG", carrier_name="UPS", order_name="#DBG",
-        message_id="DBG", email_date=1,
+        tracking_number="TN_DBG",
+        carrier_name="UPS",
+        order_name="#DBG",
+        message_id="DBG",
+        email_date=1,
     )
     coordinator.async_set_updated_data({"DBG": shipment})
     coordinator._restored_shipments = {}
@@ -689,12 +716,17 @@ async def test_cleanup_no_op_when_no_deliveries(
     """
     from datetime import datetime as _datetime
 
-    config_entry = mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    config_entry = (
+        mock_config_entry if coordinator_cls is GmailCoordinator else mock_imap_config_entry
+    )
     coordinator, mock_store = await _setup_coordinator(hass, config_entry, coordinator_cls, request)
 
     shipment_z = ShipmentData(
-        tracking_number="TNZ", carrier_name="FedEx", order_name="#Z",
-        message_id="Z", email_date=2,
+        tracking_number="TNZ",
+        carrier_name="FedEx",
+        order_name="#Z",
+        message_id="Z",
+        email_date=2,
     )
     coordinator.async_set_updated_data({"Z": shipment_z})
     mock_store.async_delay_save.reset_mock()

@@ -259,9 +259,9 @@ def test_usps_single_package_has_empty_extra_shipments(usps_html: str) -> None:
 
 def test_usps_digest_extracts_all_tracking_numbers() -> None:
     """PARSE-05b: USPS Informed Delivery digest with 3 packages yields shipment + 2 extra_shipments."""
-    html = (
-        Path(__file__).parent.parent / "fixtures" / "usps_digest.html"
-    ).read_text(encoding="utf-8")
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest.html").read_text(
+        encoding="utf-8"
+    )
     parser = EmailParser()
     result = parser.parse(html, "digest_msg1", 1746000000)
     assert result.shipment is not None

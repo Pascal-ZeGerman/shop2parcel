@@ -114,9 +114,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         except (TimeoutError, aiohttp.ClientError) as err:
             raise UpdateFailed(f"Network error during Gmail token refresh: {err}") from err
         except Exception as err:  # noqa: BLE001 — translate unexpected auth errors to HA exception
-            _LOGGER.error(
-                "Gmail token refresh failed unexpectedly: %s", err, exc_info=True
-            )
+            _LOGGER.error("Gmail token refresh failed unexpectedly: %s", err, exc_info=True)
             raise ConfigEntryAuthFailed(
                 f"Gmail token refresh failed unexpectedly ({type(err).__name__})"
             ) from err
