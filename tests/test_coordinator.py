@@ -12,6 +12,7 @@ import aiohttp
 import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shop2parcel.api.email_parser import ParseResult, ShipmentData
 from custom_components.shop2parcel.api.exceptions import (
@@ -724,14 +725,27 @@ async def test_missing_access_token_raises_config_entry_auth_failed(hass, mock_c
             await coord._async_update_data()
 
 
-async def test_missing_refresh_token_raises_config_entry_auth_failed(hass, mock_config_entry):
-    """IN-02: oauth_session.token with no refresh_token → ConfigEntryAuthFailed before token refresh.
+async def test_missing_refresh_token_raises_config_entry_auth_failed(hass):
+    """IN-02: config entry token with no refresh_token → ConfigEntryAuthFailed before token refresh.
 
     Guards against the case where HA stored a token without refresh_token (e.g. original
     auth done without access_type=offline, or Google OAuth app in Testing mode).
     Fires before async_ensure_token_valid() so the error is immediate and actionable.
     """
-    mock_config_entry.add_to_hass(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "auth_implementation": DOMAIN,
+            "token": {
+                "access_token": "fake-access-token",
+                "expires_at": 9999999999.0,
+                # no refresh_token — triggers the early guard in _async_update_data
+            },
+            "api_key": "test-parcelapp-key",
+        },
+        unique_id="user@gmail.com",
+    )
+    entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
@@ -739,15 +753,10 @@ async def test_missing_refresh_token_raises_config_entry_auth_failed(hass, mock_
         ) as mock_oauth,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
-        # Token dict has access_token but no refresh_token — triggers the early guard
-        mock_oauth.OAuth2Session.return_value.token = {
-            "access_token": "fake-access-token",
-            "expires_at": 9999999999.0,
-        }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_config_entry)
+        coord = GmailCoordinator(hass, entry)
         await coord._async_load_store()
         with pytest.raises(ConfigEntryAuthFailed, match="refresh_token"):
             await coord._async_update_data()

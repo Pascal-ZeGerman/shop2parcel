@@ -142,7 +142,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 since_date=since_date,
             )
         except ImapAuthError as err:
-            raise ConfigEntryAuthFailed("IMAP auth error") from err
+            raise ConfigEntryAuthFailed(f"IMAP auth error: {err}") from err
         except ImapTransientError as err:
             raise UpdateFailed(f"IMAP transient error: {err}") from err
 
@@ -159,7 +159,13 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             session=async_get_clientsession(self.hass),
             api_key=entry.data[CONF_API_KEY],
         )
-        current_data: dict[str, ShipmentData] = dict(self.data or {})
+        # self.data is None only until the first _async_update_data() completes successfully
+        # (DataUpdateCoordinator initialises data=None and only writes it on success).
+        # On repeated failures self.data stays None, so we continue seeding from the
+        # persisted store — correct, because the live set has not changed yet.
+        current_data: dict[str, ShipmentData] = (
+            dict(self.data) if self.data is not None else dict(self._restored_shipments)
+        )
         now = int(time.time())
         quota_blocked = (
             self._quota_exhausted_until is not None and now < self._quota_exhausted_until
@@ -207,6 +213,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     "Email parser raised an unexpected error for IMAP UID %s: %s",
                     uid_str,
                     parse_err,
+                    exc_info=True,
                 )
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
@@ -268,61 +275,179 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 else:
                     _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_match")
                 continue
-            shipment = result.shipment
+            # Iterate all shipments from this email. Single-shipment emails have
+            # extra_shipments=[] so this loop runs once. Multi-package digests
+            # (e.g. USPS Informed Delivery) may have 2+ shipments; each gets its
+            # own storage key so coordinator.data creates a sensor per package.
+            for _si, shipment in enumerate([result.shipment, *result.extra_shipments]):
+                # First shipment uses uid_str for backward compat; extras get a
+                # composite key so they create distinct entities.
+                storage_key = uid_str if _si == 0 else f"{uid_str}::{shipment.tracking_number}"
 
-            # D-10: tracking-number dedup check (replaces UID skip gate).
-            normalized = normalize_tracking_number(shipment.tracking_number)
-            if not debug_mode:
-                if normalized in self._submitted_tracking_numbers:
-                    d.last_poll_emails_skipped_dedup += 1
+                # D-10: tracking-number dedup check (replaces UID skip gate).
+                normalized = normalize_tracking_number(shipment.tracking_number)
+                if not debug_mode:
+                    if normalized in self._submitted_tracking_numbers:
+                        d.last_poll_emails_skipped_dedup += 1
+                        self._emit_scan_event(
+                            message_id=f"imap:{uid_str}",
+                            meta=imap_meta,
+                            outcome="skipped_dedup",
+                            strategy=result.strategy_used or "unknown",
+                            tracking_number=shipment.tracking_number,
+                        )
+                        _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_dedup")
+                        continue
+
+                # Only increment match/found counters after dedup confirms this is a new tracking number.
+                d.emails_matched_total += 1
+                d.last_poll_emails_matched += 1
+                d.tracking_numbers_found_total += 1
+                d.last_poll_found.append(
+                    {
+                        "tracking_number": shipment.tracking_number,
+                        "carrier": shipment.carrier_name,
+                        "order_name": shipment.order_name,
+                        "message_id": uid_str,
+                        "candidates": result.candidate_tokens,
+                        **imap_meta,
+                    }
+                )
+
+                # DBG-04: suppress POST in debug mode; append dry_run_suppressed event and continue.
+                if debug_mode:
                     self._emit_scan_event(
                         message_id=f"imap:{uid_str}",
                         meta=imap_meta,
-                        outcome="skipped_dedup",
+                        outcome="dry_run_suppressed",
                         strategy=result.strategy_used or "unknown",
                         tracking_number=shipment.tracking_number,
                     )
-                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_dedup")
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        imap_meta.get("subject", ""),
+                        imap_meta.get("from", ""),
+                        result.candidate_tokens,
+                        "dry_run_suppressed",
+                    )
                     continue
 
-            # Only increment match/found counters after dedup confirms this is a new tracking number.
-            d.emails_matched_total += 1
-            d.last_poll_emails_matched += 1
-            d.tracking_numbers_found_total += 1
-            d.last_poll_found.append(
-                {
-                    "tracking_number": shipment.tracking_number,
-                    "carrier": shipment.carrier_name,
-                    "order_name": shipment.order_name,
-                    "message_id": uid_str,
-                    "candidates": result.candidate_tokens,
-                    **imap_meta,
-                }
-            )
+                if quota_blocked:
+                    self._emit_scan_event(
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                        outcome="skipped_quota",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    if debug_mode:
+                        _LOGGER.debug(
+                            "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                            imap_meta.get("subject", ""),
+                            imap_meta.get("from", ""),
+                            result.candidate_tokens,
+                            "skipped_quota",
+                        )
+                    else:
+                        _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_quota")
+                    continue
 
-            # DBG-04: suppress POST in debug mode; append dry_run_suppressed event and continue.
-            if debug_mode:
+                carrier_code = normalize_carrier(shipment.carrier_name)
+                try:
+                    await parcel_client.async_add_delivery(
+                        tracking_number=shipment.tracking_number,
+                        carrier_code=carrier_code,
+                        description=shipment.order_name or shipment.tracking_number,
+                    )
+                except ParcelAppAuthError as err:
+                    raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
+                except ParcelAppQuotaError as err:
+                    self._quota_exhausted_until = (
+                        err.reset_at if err.reset_at is not None else _next_midnight_utc()
+                    )
+                    self._pending_shipments = current_data
+                    await self._async_save_store()
+                    _LOGGER.warning(
+                        "parcelapp.net daily quota exhausted; forwarding paused until %s",
+                        self._quota_exhausted_until,
+                    )
+                    # C2/P11-CR-01: emit event for the email that triggered quota exhaustion.
+                    self._emit_scan_event(
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                        outcome="quota_exhausted_now",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    quota_blocked = True
+                    continue
+                except ParcelAppAlreadyAddedError:
+                    self._submitted_tracking_numbers[normalized] = None
+                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                        self._submitted_tracking_numbers.popitem(last=False)
+                    self._pending_shipments = current_data
+                    await self._async_save_store()
+                    self._emit_scan_event(
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                        outcome="already_added",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "already_added")
+                    continue
+                except ParcelAppInvalidTrackingError as err:
+                    _LOGGER.error(
+                        "Invalid tracking for IMAP UID %s (permanent 400 — suppressing retries): %s",
+                        uid_str,
+                        err,
+                    )
+                    # Record normalized tracking number to suppress infinite retries.
+                    self._submitted_tracking_numbers[normalized] = None
+                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                        self._submitted_tracking_numbers.popitem(last=False)
+                    self._pending_shipments = current_data
+                    await self._async_save_store()
+                    # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
+                    self._emit_scan_event(
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                        outcome="invalid_tracking",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                        extra={
+                            "error_type": type(err).__name__,
+                            "error_msg": str(err)[:100],
+                        },
+                    )
+                    continue
+                except ParcelAppTransientError as err:
+                    _LOGGER.warning("parcelapp.net transient error for UID %s: %s", uid_str, err)
+                    # C2/P11-CR-01: emit event for transient errors.
+                    self._emit_scan_event(
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                        outcome="transient_error",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                        extra={
+                            "error_type": type(err).__name__,
+                            "error_msg": str(err)[:100],
+                        },
+                    )
+                    continue
+
+                # Success — record tracking number dedup, save immediately (D-10/D-03).
+                self._submitted_tracking_numbers[normalized] = None
+                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                    self._submitted_tracking_numbers.popitem(last=False)
+                current_data[storage_key] = shipment
+                self._pending_shipments = current_data
+                await self._async_save_store()
                 self._emit_scan_event(
                     message_id=f"imap:{uid_str}",
                     meta=imap_meta,
-                    outcome="dry_run_suppressed",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                )
-                _LOGGER.debug(
-                    "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
-                    imap_meta.get("subject", ""),
-                    imap_meta.get("from", ""),
-                    result.candidate_tokens,
-                    "dry_run_suppressed",
-                )
-                continue
-
-            if quota_blocked:
-                self._emit_scan_event(
-                    message_id=f"imap:{uid_str}",
-                    meta=imap_meta,
-                    outcome="skipped_quota",
+                    outcome="posted",
                     strategy=result.strategy_used or "unknown",
                     tracking_number=shipment.tracking_number,
                 )
@@ -332,117 +457,10 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                         imap_meta.get("subject", ""),
                         imap_meta.get("from", ""),
                         result.candidate_tokens,
-                        "skipped_quota",
+                        "posted",
                     )
                 else:
-                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_quota")
-                continue
-
-            carrier_code = normalize_carrier(shipment.carrier_name)
-            try:
-                await parcel_client.async_add_delivery(
-                    tracking_number=shipment.tracking_number,
-                    carrier_code=carrier_code,
-                    description=shipment.order_name or shipment.tracking_number,
-                )
-            except ParcelAppAuthError as err:
-                raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
-            except ParcelAppQuotaError as err:
-                self._quota_exhausted_until = (
-                    err.reset_at if err.reset_at is not None else _next_midnight_utc()
-                )
-                await self._async_save_store()
-                _LOGGER.warning(
-                    "parcelapp.net daily quota exhausted; forwarding paused until %s",
-                    self._quota_exhausted_until,
-                )
-                # C2/P11-CR-01: emit event for the email that triggered quota exhaustion.
-                self._emit_scan_event(
-                    message_id=f"imap:{uid_str}",
-                    meta=imap_meta,
-                    outcome="quota_exhausted_now",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                )
-                quota_blocked = True
-                continue
-            except ParcelAppAlreadyAddedError:
-                self._submitted_tracking_numbers[normalized] = None
-                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                    self._submitted_tracking_numbers.popitem(last=False)
-                await self._async_save_store()
-                self._emit_scan_event(
-                    message_id=f"imap:{uid_str}",
-                    meta=imap_meta,
-                    outcome="already_added",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                )
-                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "already_added")
-                continue
-            except ParcelAppInvalidTrackingError as err:
-                _LOGGER.error(
-                    "Invalid tracking for IMAP UID %s (permanent 400 — suppressing retries): %s",
-                    uid_str,
-                    err,
-                )
-                # Record normalized tracking number to suppress infinite retries.
-                self._submitted_tracking_numbers[normalized] = None
-                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                    self._submitted_tracking_numbers.popitem(last=False)
-                await self._async_save_store()
-                # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
-                self._emit_scan_event(
-                    message_id=f"imap:{uid_str}",
-                    meta=imap_meta,
-                    outcome="invalid_tracking",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                    extra={
-                        "error_type": type(err).__name__,
-                        "error_msg": str(err)[:100],
-                    },
-                )
-                continue
-            except ParcelAppTransientError as err:
-                _LOGGER.warning("parcelapp.net transient error for UID %s: %s", uid_str, err)
-                # C2/P11-CR-01: emit event for transient errors.
-                self._emit_scan_event(
-                    message_id=f"imap:{uid_str}",
-                    meta=imap_meta,
-                    outcome="transient_error",
-                    strategy=result.strategy_used or "unknown",
-                    tracking_number=shipment.tracking_number,
-                    extra={
-                        "error_type": type(err).__name__,
-                        "error_msg": str(err)[:100],
-                    },
-                )
-                continue
-
-            # Success — record tracking number dedup, save immediately (D-10/D-03).
-            self._submitted_tracking_numbers[normalized] = None
-            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                self._submitted_tracking_numbers.popitem(last=False)
-            await self._async_save_store()
-            current_data[uid_str] = shipment
-            self._emit_scan_event(
-                message_id=f"imap:{uid_str}",
-                meta=imap_meta,
-                outcome="posted",
-                strategy=result.strategy_used or "unknown",
-                tracking_number=shipment.tracking_number,
-            )
-            if debug_mode:
-                _LOGGER.debug(
-                    "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
-                    imap_meta.get("subject", ""),
-                    imap_meta.get("from", ""),
-                    result.candidate_tokens,
-                    "posted",
-                )
-            else:
-                _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "posted")
+                    _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "posted")
 
         # Phase 7: capture per-poll timing.
         d.last_poll_time = poll_start
@@ -472,6 +490,24 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             and int(time.time()) >= self._quota_exhausted_until
         ):
             self._quota_exhausted_until = None
+            await self._async_save_store()
+
+        if not debug_mode:
+            # FIFO trim: current_data is a plain dict (not OrderedDict), so
+            # popitem(last=False) is not available. next(iter(...)) yields the
+            # insertion-order oldest key on CPython 3.7+ (guaranteed by PEP 468).
+            pre_trim_count = len(current_data)
+            while len(current_data) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                del current_data[next(iter(current_data))]
+            trimmed = pre_trim_count - len(current_data)
+            if trimmed:
+                _LOGGER.warning(
+                    "FIFO trim removed %d oldest shipment(s) — cap is %d. "
+                    "Oldest tracked parcels are no longer visible in HA.",
+                    trimmed,
+                    MAX_SUBMITTED_TRACKING_NUMBERS,
+                )
+            self._pending_shipments = current_data
             await self._async_save_store()
 
         return current_data

@@ -1,16 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.2
-milestone_name: Debug Switch
-status: planning
-last_updated: "2026-05-18T19:28:16.183Z"
-last_activity: 2026-05-18
+milestone: v1.0
+milestone_name: milestone
+status: completed
+stopped_at: context exhaustion at 77% (2026-06-02)
+last_updated: "2026-06-02T04:01:37.569Z"
+last_activity: "2026-05-23 -- Phase 14 reconciliation: confirmed 4/4 plans shipped on origin/main, WR-01..WR-04 all fixed in subsequent commits"
 progress:
-  total_phases: 0
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_phases: 3
+  completed_phases: 3
+  total_plans: 9
+  completed_plans: 9
+  percent: 100
 ---
 
 # Project State
@@ -20,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-17)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** Planning v1.2 — run `/gsd:new-milestone` to define next milestone
+**Current focus:** v1.2 milestone complete — all phases (13, 13.1, 14) done; ready to close milestone
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-05-18 — Milestone v1.2 started
+Phase: 14 — Debug/Dry-Run Mode (last phase of v1.2)
+Plan: 04 complete (all 4 plans done, executed 2026-05-20)
+Status: Milestone complete — v1.2 ready to close
+Last activity: 2026-05-23 -- Phase 14 reconciliation: confirmed 4/4 plans shipped on origin/main, WR-01..WR-04 all fixed in subsequent commits
 
 ## Performance Metrics
 
@@ -85,6 +86,9 @@ Recent decisions affecting current work:
 - ParcelAppClient session injection pattern — Phase 4 coordinator injects shared HA session, client never creates its own
 - v0.1.0 released (D-10 + D-11) — first HACS-installable tag, all 4 CI workflows green, GitHub Release at https://github.com/Pascal-ZeGerman/shop2parcel/releases/tag/v0.1.0
 - v1.1 scanning architecture: full-window scan always on (no message-ID/UID gate), dedup shifts to persisted tracking-number set in HA Store
+- Phase 13.1: STORAGE_VERSION bumped to 3; v2->v3 migration preserves submitted_tracking_numbers + quota_exhausted_until, seeds persisted_shipments as {}
+- Phase 13.1: _SHIPMENT_FIELD_TYPES module-level constant used for per-entry type validation in _async_load_store (T-13.1-04 ASVS V5)
+- Phase 13.1: _pending_shipments assigned before _async_save_store() so debounced lambda captures updated state
 
 ### Roadmap Evolution
 
@@ -94,10 +98,13 @@ Recent decisions affecting current work:
 - Phase 10 added (v1.1): Full-Window Scanning & Tracking Dedup — remove last_seen_message_id/last_imap_uid gates, add persisted tracking-number dedup
 - Phase 11 added (v1.1): Activity Log & Debug Logging — per-email scan event ring buffer + comprehensive DEBUG-level logging
 - Phase 12 added: Address tech debt
+- Phase 13.1 inserted after Phase 13: Sensor Restore on Restart — coordinator.data not persisted means all sensors unavailable after restart (HA log audit finding) (URGENT)
 
 ### Pending Todos
 
-None yet.
+| File | Title | Area |
+|------|-------|------|
+| [2026-06-02-add-forwarded-email-sender-configuration.md](./todos/pending/2026-06-02-add-forwarded-email-sender-configuration.md) | Add forwarded email sender configuration | api |
 
 ### Blockers/Concerns
 
@@ -117,6 +124,8 @@ None — Phase 1 gates cleared. parcelapp.net API documented. Gmail OAuth2 is st
 | 260505-wl8 | Fix all critical and important issues from PR4 review (C1 order regex, C2 broad-scan gate, C3 ValueError crash, I1 html.escape, I2 carrier path, I3 debug logging, I4 carrier regex) | 2026-05-06 | 3fc8a47 | [260505-wl8-fix-all-critical-and-important-issues-fr](./quick/260505-wl8-fix-all-critical-and-important-issues-fr/) |
 | 260506-dhd | Fix DEFAULT_GMAIL_QUERY label:inbox (archived emails excluded) and add rescan_window_days option (Gmail-only, 7-365d) with min(stored_ts, now-window) semantics for non-destructive lookback widening | 2026-05-06 | ac6d01a | [260506-dhd-fix-gmail-query-label-inbox-and-add-resc](./quick/260506-dhd-fix-gmail-query-label-inbox-and-add-resc/) |
 | 260513-p01 | Write missing summary stubs for 01-01-PLAN.md and 06-03-PLAN.md to close the v1.0 archive artifact gap | 2026-05-13 | n/a (docs only) | [260513-p01-write-missing-summary-stubs-for-01-01-pl](./quick/260513-p01-write-missing-summary-stubs-for-01-01-pl/) |
+| 260523-g8u | Reconcile ROADMAP and STATE for Phase 14 (4/4 complete 2026-05-20); audit WR-01..WR-04 — all already shipped on origin/main | 2026-05-23 | n/a (docs only) | [260523-g8u-reconcile-roadmap-and-state-for-phase-14](./quick/260523-g8u-reconcile-roadmap-and-state-for-phase-14/) |
+| 260601-x94 | Fix wrong USPS Informed Delivery sender address in DEFAULT_GMAIL_QUERY | 2026-06-02 | cfb3567 | [260601-x94-fix-wrong-usps-informed-delivery-sender-](./quick/260601-x94-fix-wrong-usps-informed-delivery-sender-/) |
 
 ## Deferred Items
 
@@ -150,6 +159,6 @@ Items acknowledged and deferred at v1.1 milestone close on 2026-05-17:
 
 ## Session Continuity
 
-Last session: 2026-05-17
-Stopped at: v1.1 milestone archived — ready to plan v1.2
-Next action: /gsd:new-milestone
+Last session: 2026-06-02T04:01:37.553Z
+Stopped at: context exhaustion at 77% (2026-06-02)
+Next action: Merge Phase 13.1 branch → /gsd:complete-milestone

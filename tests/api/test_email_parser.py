@@ -250,6 +250,49 @@ def test_usps_template_extracts_tracking(usps_html: str) -> None:
     assert result.skip_reason is None
 
 
+def test_usps_single_package_has_empty_extra_shipments(usps_html: str) -> None:
+    """PARSE-05a: Single-package USPS email produces empty extra_shipments (regression guard)."""
+    parser = EmailParser()
+    result = parser.parse(usps_html, "usps_msg1", 1746000000)
+    assert result.extra_shipments == []
+
+
+def test_usps_digest_extracts_all_tracking_numbers() -> None:
+    """PARSE-05b: USPS Informed Delivery digest with 3 packages yields shipment + 2 extra_shipments."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest.html").read_text(
+        encoding="utf-8"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "digest_msg1", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "9200190106460364169829"
+    assert result.shipment.carrier_name == "USPS"
+    assert result.strategy_used == STRATEGY_USPS
+    assert len(result.extra_shipments) == 2
+    assert result.extra_shipments[0].tracking_number == "9261290100830125000029"
+    assert result.extra_shipments[1].tracking_number == "9400111899223450094040"
+    for s in result.extra_shipments:
+        assert s.carrier_name == "USPS"
+        assert s.message_id == "digest_msg1"
+        assert s.order_name == ""
+
+
+def test_usps_digest_deduplicates_repeated_tracking_number() -> None:
+    """PARSE-05c: Same TN appearing twice in the body (once in text, once in link text) counts once."""
+    html = (
+        "<html><body>"
+        "<p>usps.com</p>"
+        "<p>9200190106460364169829</p>"
+        "<p>9200190106460364169829</p>"  # duplicate
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "dup_msg", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "9200190106460364169829"
+    assert result.extra_shipments == []
+
+
 def test_fedex_template_extracts_tracking(fedex_html: str) -> None:
     """PARSE-06: FedEx template extracts 20-digit SmartPost tracking, sets carrier_name='FedEx' and strategy_used=STRATEGY_FEDEX."""
     parser = EmailParser()
@@ -259,6 +302,17 @@ def test_fedex_template_extracts_tracking(fedex_html: str) -> None:
     assert result.shipment.carrier_name == "FedEx"
     assert result.strategy_used == STRATEGY_FEDEX
     assert result.skip_reason is None
+
+
+def test_fedex_template_extracts_tracking_id_label() -> None:
+    """PARSE-06b: FedEx template extracts 12-digit tracking using 'Tracking ID' label (FedEx Delivery Manager format)."""
+    html = "<html><body><p>fedex.com</p><p>Tracking ID\n521182326882</p></body></html>"
+    parser = EmailParser()
+    result = parser.parse(html, "fedex_msg2", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "521182326882"
+    assert result.shipment.carrier_name == "FedEx"
+    assert result.strategy_used == STRATEGY_FEDEX
 
 
 def test_ups_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> None:

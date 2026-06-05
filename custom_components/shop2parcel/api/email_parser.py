@@ -66,6 +66,10 @@ class ParseResult:
     strategy_used: str | None  # "html_template" | "regex_fallback" | "broad_regex" | None
     keyword_hits: dict[str, bool]  # keys always: tracking_regex, order_regex, carrier_regex
     candidate_tokens: list[str] = field(default_factory=list)
+    # Additional shipments from multi-package digest emails (e.g. USPS Informed Delivery).
+    # Empty for all single-shipment sources; populated only by _parse_usps when findall
+    # yields more than one valid tracking number.
+    extra_shipments: list[ShipmentData] = field(default_factory=list)
 
 
 # Known tracking number format patterns (EMAIL-04).
@@ -97,7 +101,7 @@ STRATEGY_BROAD_REGEX = "broad_regex"
 _UPS_TRACKING_RE = re.compile(r"\b(1Z[0-9A-Z]{16})\b")
 _USPS_TRACKING_RE = re.compile(r"\b(9[12345][0-9]{15,24})\b")
 _FEDEX_TRACKING_RE = re.compile(
-    r"(?:tracking\s+(?:number|#|no\.?)\s*:?\s*)([0-9]{12}|[0-9]{15}|[0-9]{20})\b",
+    r"(?:tracking\s+(?:number|#|no\.?|id\b)\s*:?\s*)([0-9]{12}|[0-9]{15}|[0-9]{20})\b",
     re.IGNORECASE,
 )
 
@@ -241,26 +245,33 @@ def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
 
 
 def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
-    """Extract tracking number from USPS shipping notification email.
+    """Extract tracking number(s) from a USPS email.
 
-    USPS uses 17-26 digit tracking numbers starting with 9[12345] (IMpb format);
-    the _USPS_TRACKING_RE pattern is the carrier-specific extractor and
-    _TRACKING_PATTERNS USPS entry was widened in Task 1 so _looks_like_tracking
-    accepts the full 26-digit form.
-    Href fallback handles emails where TN appears only in link query params.
+    Uses findall (not search) so that multi-package digest emails (e.g. USPS
+    Informed Delivery daily digest) produce one ShipmentData per tracking
+    number. The first valid match becomes ParseResult.shipment; any additional
+    matches go into ParseResult.extra_shipments. dict.fromkeys deduplicates
+    while preserving order (same TN appearing twice in the HTML counts once).
+    Href fallback runs only when the body text contains no valid tracking numbers.
     """
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text(separator=" ")
-    m = _USPS_TRACKING_RE.search(text)
-    if m and _looks_like_tracking(m.group(1)):
-        return ParseResult(
-            shipment=ShipmentData(
-                tracking_number=m.group(1),
+    raw = _USPS_TRACKING_RE.findall(text)
+    tracking_numbers = list(dict.fromkeys(m for m in raw if _looks_like_tracking(m)))
+    if tracking_numbers:
+        shipments = [
+            ShipmentData(
+                tracking_number=tn,
                 carrier_name="USPS",
                 order_name="",
                 message_id=message_id,
                 email_date=email_date,
-            ),
+            )
+            for tn in tracking_numbers
+        ]
+        return ParseResult(
+            shipment=shipments[0],
+            extra_shipments=shipments[1:],
             skip_reason=None,
             strategy_used=STRATEGY_USPS,
             keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
