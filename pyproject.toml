@@ -24,6 +24,9 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "live_ollama: marks tests that require a live Ollama server (skipped in CI; set OLLAMA_URL to run)",
+]
 
 [tool.coverage.run]
 source = ["custom_components"]
