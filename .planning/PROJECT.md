@@ -2,15 +2,29 @@
 
 ## What This Is
 
-Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) or any IMAP mailbox for Shopify shipping confirmation emails, extracts tracking data (tracking number, carrier, order number), and forwards it to parcelapp.net. Shipments appear as HA sensor entities automatically — no manual entry. Multiple accounts (Gmail and/or IMAP) can be configured per HA instance, each running its own polling coordinator. A configurable debug/dry-run mode allows full diagnostic output without submitting real data to parcelapp.net.
+Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) or any IMAP mailbox for Shopify-style shipping confirmation emails, extracts tracking data (tracking number, carrier, order number) via a two-stage pipeline — fast template parsers first, then a local Ollama LLM for emails the templates miss or need augmenting — and forwards it to parcelapp.net. Shipments appear as HA sensor entities automatically. Multiple accounts (Gmail and/or IMAP) can be configured per HA instance, each running its own polling coordinator. A configurable debug/dry-run mode allows full diagnostic output without submitting real data to parcelapp.net.
 
 ## Core Value
 
 Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
 
-## Current State: v1.2 Shipped
+## Current Milestone: v1.3 AI-based email analysis
 
-**Shipped:** 2026-06-05 — v1.2 Debug Switch complete.
+**Goal:** Add a second-stage local-LLM extractor (Ollama) so emails the template parsers miss still produce complete `ShipmentData` — with a bounded async queue smoothing slow-machine inference and loud, surfaced failures.
+
+**Target features:**
+
+- `OllamaExtractor` Stage-2 client — `aiohttp` POST to `/api/generate`, `stream:false`, JSON-schema-driven extraction. Configurable URL/model/timeout. Default model `qwen3.5:2b`; URL is required user input (no preset)
+- Always-on Stage 2 with LLM-authoritative merge — Stage 1 (template parsers) still runs first; Stage 2 runs on every sender-matched email and overwrites Stage-1 fields where both produced a value
+- Per-coordinator bounded `asyncio.Queue` + long-lived worker — coordinator enqueues raw emails; worker drains one-at-a-time, calls Ollama, then POSTs to parcelapp. In-memory only (HA-restart-lossy by design; full-window rescan re-discovers)
+- Config-flow expansion — Ollama URL (required), model name, timeout, queue maxlen, extraction-field list. The 3 parcelapp-required fields (`tracking_number`, `carrier`, `order_name`) are locked; user can add custom fields stored as sensor attributes (not POSTed)
+- Loud failure surface — `_LOGGER.error()` per Stage-2 fail, persistent HA notification after N consecutive failures, activity-log entry (`stage2_failed`), email NOT written to dedup store on failure
+- README setup section — Ollama install via Docker/Portainer, networking options, working curl reference, recommended starter model, reachability sanity-check command
+
+## Previous Milestones
+
+<details>
+<summary>v1.2 Debug Switch — shipped 2026-06-05</summary>
 
 - Dedup store persistence bug fixed: already-added 400s treated as idempotent success; no more restart loops
 - HA Store STORAGE_VERSION 3: persists `coordinator.data` (ShipmentData objects) across HA restarts — sensors reappear after first poll without manual intervention
@@ -19,7 +33,7 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - **Connection methods:** Gmail OAuth2 and IMAP (app-password / SSL / STARTTLS)
 - **Carriers supported:** Shopify standard, UPS, USPS, FedEx
 
-## Previous Milestones
+</details>
 
 <details>
 <summary>v1.1 Debug-Ready — shipped 2026-05-17</summary>
@@ -69,7 +83,16 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - ✓ HA Store STORAGE_VERSION 3: persists coordinator.data (ShipmentData objects) across restarts; v2→v3 migration with per-entry type validation — v1.2 (Phase 13.1)
 - ✓ Debug/dry-run mode: 365-day window override, dedup bypass, dry-run POST suppression, per-email INFO logging, persistent HA notification — v1.2 (Phase 14)
 
-### Active (future milestones)
+### Active (v1.3)
+
+- [ ] Add a second-stage Ollama-based extractor invoked on every sender-matched email
+- [ ] Add per-coordinator bounded async queue + worker to decouple poll cadence from LLM latency
+- [ ] Expand config flow with Ollama URL (required), model name, timeout, queue maxlen, and user-extensible field list (3 parcelapp fields locked)
+- [ ] Make Stage 2 LLM-authoritative: its values overwrite Stage-1 template-parser values on conflict
+- [ ] Surface Stage-2 failures loudly: ERROR log + persistent HA notification + `stage2_failed` activity-log entry + skip-dedup-on-failure
+- [ ] Document Ollama setup in README (Docker/Portainer, networking, model recommendation, reachability test)
+
+### Active (deferred to future milestones)
 
 - [ ] Delivery status tracking — shipment sensor state reflects current delivery status
 - [ ] Configurable cleanup grace period for delivered shipments (currently hardcoded 24h)
@@ -85,6 +108,9 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - Multi-store Shopify support — single store per integration instance
 - European carrier templates (Amazon DE, DHL, DPD, Zalando, OTTO) — US-focused product
 - Debug mode as auto-trigger on HA debug logging — orthogonal concerns; would silently suppress real parcelapp POSTs when user enables HA debug logging
+- Hosted/cloud LLM providers (OpenAI, Anthropic, Gemini) for Stage 2 — local-only by design; user-owned model, no third-party email-content exposure
+- HA-Store-persisted Stage-2 queue — restart-survival adds storage migration burden; full-window rescan already re-discovers unprocessed emails next poll
+- Hardcoded `localhost:11434` default for Ollama URL — Pi-on-Pi co-located Docker is one of several layouts; URL must be user-supplied to avoid silently-misconfigured installs
 
 ## Context
 
@@ -137,4 +163,4 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 5. Update Context with current state
 
 ---
-*Last updated: 2026-06-05 after v1.2 milestone*
+*Last updated: 2026-06-05 after starting v1.3 AI-based email analysis milestone*
