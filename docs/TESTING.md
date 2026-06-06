@@ -298,14 +298,14 @@ defined in `pyproject.toml`:
 source = ["custom_components"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 85
 show_missing = true
 ```
 
 `fail_under` makes the test run exit non-zero if total coverage drops below the
 floor — the CI `pytest` job runs with `--cov=custom_components` so a regression
-fails the build. Raise the floor as coverage improves to ratchet against
-regressions.
+fails the build. The current measured total is ~87.5%; the floor is set a couple
+points below that. Raise it as coverage improves to ratchet against regressions.
 
 To generate a local coverage report (requires the `pytest-cov` dev dependency):
 

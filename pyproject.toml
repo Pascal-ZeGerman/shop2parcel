@@ -30,9 +30,10 @@ pythonpath = ["."]
 source = ["custom_components"]
 
 [tool.coverage.report]
-# Enforced floor — CI fails if total coverage drops below this. Conservative
-# starting value; raise it as coverage improves to ratchet against regressions.
-fail_under = 80
+# Enforced floor — CI fails if total coverage drops below this. Set a couple
+# points below the measured total (87.5% as of the test-coverage pass) so normal
+# fluctuation doesn't break CI; ratchet it up as coverage improves.
+fail_under = 85
 show_missing = true
 
 [tool.ruff]
