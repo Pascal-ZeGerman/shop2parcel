@@ -327,3 +327,357 @@ def test_select_non_ok_raises_imap_transient_error():
                 'SUBJECT "shipped"',
                 "8-May-2026",
             )
+
+
+# ---------------------------------------------------------------------------
+# FETCH loop — successful SEARCH + FETCH returning messages
+# ---------------------------------------------------------------------------
+
+
+def _fetch_tuple(raw_bytes: bytes) -> list:
+    """Build an imaplib FETCH response: [(header_bytes, raw_bytes), b')']."""
+    return [(b"1 (BODY[] {%d}" % len(raw_bytes), raw_bytes), b")"]
+
+
+def test_fetch_returns_messages_with_uid_and_raw():
+    """Successful SEARCH + FETCH yields list of {uid:int, raw:bytes} (covers the fetch loop)."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    raw_a = b"From: a@example.com\r\nSubject: shipped A\r\n\r\nbody A"
+    raw_b = b"From: b@example.com\r\nSubject: shipped B\r\n\r\nbody B"
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"101 102"])
+        if command == "FETCH":
+            return ("OK", _fetch_tuple(raw_a if args[0] == "101" else raw_b))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"2"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        results = client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    assert results == [
+        {"uid": 101, "raw": raw_a},
+        {"uid": 102, "raw": raw_b},
+    ]
+
+
+def test_fetch_skips_non_integer_uid():
+    """A non-integer UID in the SEARCH result is skipped (covers the ValueError branch)."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    raw = b"Subject: shipped\r\n\r\nbody"
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"101 notanumber 102"])
+        if command == "FETCH":
+            return ("OK", _fetch_tuple(raw))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"3"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        results = client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    # Only the two integer UIDs are fetched; "notanumber" is skipped.
+    assert [r["uid"] for r in results] == [101, 102]
+
+
+def test_fetch_skips_failed_fetch_response():
+    """A FETCH returning non-OK / non-tuple data is skipped (covers the FETCH-failure branch)."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"101"])
+        if command == "FETCH":
+            return ("NO", [b"FETCH failed"])  # non-OK → skip
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"1"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        results = client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    assert results == []
+
+
+def test_fetch_skips_non_bytes_body():
+    """A FETCH tuple whose body is not bytes is skipped (covers the non-bytes guard)."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"101"])
+        if command == "FETCH":
+            return ("OK", [(b"1 (BODY[] {3}", "not-bytes"), b")"])  # body is str, not bytes
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"1"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        results = client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Error classification + connection lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_imap4_abort_raises_transient_error():
+    """imaplib.IMAP4.abort is always transient (covers _classify_imap_error abort branch)."""
+    from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    # abort even with "invalid" in the message must classify as transient, not auth.
+    mock_conn.login.side_effect = imaplib.IMAP4.abort("command invalid in state AUTH")
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(ImapTransientError):
+            client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+
+def test_unclassified_error_classified_as_transient():
+    """A generic (non-imaplib) error is classified as transient (covers the fallback raise)."""
+    from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.side_effect = OSError("network blip")  # generic → transient
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(ImapTransientError):
+            client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+
+async def test_fetch_shipping_emails_propagates_auth_error_unwrapped():
+    """fetch_shipping_emails re-raises ImapAuthError without re-wrapping (covers async re-raise)."""
+    from custom_components.shop2parcel.api.exceptions import ImapAuthError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.side_effect = imaplib.IMAP4.error("LOGIN failed: bad password")
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(ImapAuthError):
+            await client.fetch_shipping_emails(
+                host="h",
+                port=993,
+                username="u",
+                password="p",
+                tls_mode="ssl",
+                search_criteria='SUBJECT "shipped"',
+                since_date="8-May-2026",
+            )
+
+
+async def test_fetch_shipping_emails_wraps_generic_error_as_transient():
+    """fetch_shipping_emails routes an unclassified error through _classify (covers async fallback)."""
+    from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    async def _boom_executor(func, *args):
+        raise OSError("DNS resolution failed")
+
+    client = ImapClient(_boom_executor)
+    with pytest.raises(ImapTransientError):
+        await client.fetch_shipping_emails(
+            host="h",
+            port=993,
+            username="u",
+            password="p",
+            tls_mode="ssl",
+            search_criteria='SUBJECT "shipped"',
+            since_date="8-May-2026",
+        )
+
+
+def test_logout_failure_is_swallowed():
+    """A logout() that raises must not propagate — the result is still returned."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])  # empty SEARCH
+    mock_conn.logout.side_effect = imaplib.IMAP4.error("logout boom")
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        results = client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    assert results == []
+    mock_conn.logout.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# extract_text_body_imap / extract_html_body_imap — body extraction
+# ---------------------------------------------------------------------------
+
+
+def test_extract_text_body_imap_multipart():
+    """extract_text_body_imap returns the text/plain part of a multipart message."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_text_body_imap,
+    )
+
+    raw = (
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/alternative; boundary=b1\r\n\r\n"
+        b"--b1\r\nContent-Type: text/plain\r\n\r\nHello plain world\r\n"
+        b"--b1\r\nContent-Type: text/html\r\n\r\n<p>Hello HTML</p>\r\n"
+        b"--b1--\r\n"
+    )
+    result = extract_text_body_imap(raw)
+    assert result is not None
+    assert "Hello plain world" in result
+
+
+def test_extract_text_body_imap_single_part():
+    """extract_text_body_imap returns the body of a non-multipart text/plain message."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_text_body_imap,
+    )
+
+    raw = b"Content-Type: text/plain\r\n\r\nSingle part plain body"
+    assert extract_text_body_imap(raw) == "Single part plain body"
+
+
+def test_extract_text_body_imap_bad_charset_falls_back_to_utf8():
+    """A text/plain part with an unknown charset falls back to utf-8 decoding (LookupError branch)."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_text_body_imap,
+    )
+
+    raw = b'Content-Type: text/plain; charset="definitely-not-a-charset"\r\n\r\nfallback body'
+    result = extract_text_body_imap(raw)
+    assert result is not None
+    assert "fallback body" in result
+
+
+def test_extract_text_body_imap_multipart_bad_charset_falls_back_to_utf8():
+    """A multipart text/plain part with an unknown charset falls back to utf-8 (LookupError branch)."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_text_body_imap,
+    )
+
+    raw = (
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/alternative; boundary=b1\r\n\r\n"
+        b'--b1\r\nContent-Type: text/plain; charset="definitely-not-a-charset"\r\n\r\n'
+        b"multipart fallback body\r\n"
+        b"--b1--\r\n"
+    )
+    result = extract_text_body_imap(raw)
+    assert result is not None
+    assert "multipart fallback body" in result
+
+
+def test_extract_text_body_imap_returns_none_when_no_text_part():
+    """extract_text_body_imap returns None when there is no text/plain content."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_text_body_imap,
+    )
+
+    raw = b"Content-Type: text/html\r\n\r\n<p>only html</p>"
+    assert extract_text_body_imap(raw) is None
+
+
+def test_extract_html_body_imap_single_part():
+    """extract_html_body_imap returns the body of a non-multipart text/html message."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_html_body_imap,
+    )
+
+    raw = b"Content-Type: text/html\r\n\r\n<html><body>Single HTML</body></html>"
+    result = extract_html_body_imap(raw)
+    assert result is not None
+    assert "Single HTML" in result
+
+
+def test_extract_html_body_imap_bad_charset_multipart_falls_back_to_utf8():
+    """A multipart text/html part with an unknown charset falls back to utf-8 (LookupError branch)."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_html_body_imap,
+    )
+
+    raw = (
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/alternative; boundary=b1\r\n\r\n"
+        b'--b1\r\nContent-Type: text/html; charset="definitely-not-a-charset"\r\n\r\n'
+        b"<html>bad charset html</html>\r\n"
+        b"--b1--\r\n"
+    )
+    result = extract_html_body_imap(raw)
+    assert result is not None
+    assert "bad charset html" in result
+
+
+def test_extract_html_body_imap_bad_charset_single_part_falls_back_to_utf8():
+    """A non-multipart text/html message with an unknown charset falls back to utf-8."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_html_body_imap,
+    )
+
+    raw = b'Content-Type: text/html; charset="definitely-not-a-charset"\r\n\r\n<html>x</html>'
+    result = extract_html_body_imap(raw)
+    assert result is not None
+    assert "<html>x</html>" in result
+
+
+def test_extract_html_body_imap_returns_none_when_no_html_part():
+    """extract_html_body_imap returns None when there is no text/html content."""
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        extract_html_body_imap,
+    )
+
+    raw = b"Content-Type: text/plain\r\n\r\njust plain text"
+    assert extract_html_body_imap(raw) is None
