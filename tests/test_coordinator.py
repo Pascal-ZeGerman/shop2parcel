@@ -3859,14 +3859,16 @@ async def test_save_store_swallows_scheduling_error(hass, mock_config_entry, cap
 # guard and actually reaches the async_get_deliveries() call + except handlers.
 
 
-async def _setup_coord_for_cleanup(hass, mock_config_entry, fake_client):
-    """Set up a GmailCoordinator with one shipment in data and a patched ParcelAppClient."""
+async def _setup_coord_with_one_shipment(hass, mock_config_entry):
+    """Set up a GmailCoordinator with one shipment in coordinator.data (for cleanup tests).
+
+    Does NOT patch ParcelAppClient — the caller must patch it around the
+    async_cleanup_delivered() call so the patch is still active when cleanup
+    builds its client (otherwise cleanup would use the real client).
+    """
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
-        patch(
-            "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
-        ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
@@ -3883,35 +3885,44 @@ async def _setup_coord_for_cleanup(hass, mock_config_entry, fake_client):
         coordinator.async_set_updated_data(
             {"msg_a": ShipmentData("TRACK_A", "UPS", "#1", "msg_a", 1)}
         )
-        return coordinator
+    return coordinator
 
 
 async def test_cleanup_auth_error_returns_without_raising(hass, mock_config_entry):
     """ParcelAppAuthError during cleanup is caught + logged + returns (data untouched)."""
+    coordinator = await _setup_coord_with_one_shipment(hass, mock_config_entry)
     fake_client = MagicMock()
     fake_client.async_get_deliveries = AsyncMock(side_effect=ParcelAppAuthError("bad key"))
-    coordinator = await _setup_coord_for_cleanup(hass, mock_config_entry, fake_client)
-    assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
+    with patch(
+        "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
+    ):
+        assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
     fake_client.async_get_deliveries.assert_awaited_once()
     assert "msg_a" in coordinator.data
 
 
 async def test_cleanup_transient_error_returns_without_raising(hass, mock_config_entry):
     """ParcelAppTransientError during cleanup is caught + logged + returns (data untouched)."""
+    coordinator = await _setup_coord_with_one_shipment(hass, mock_config_entry)
     fake_client = MagicMock()
     fake_client.async_get_deliveries = AsyncMock(side_effect=ParcelAppTransientError("5xx"))
-    coordinator = await _setup_coord_for_cleanup(hass, mock_config_entry, fake_client)
-    assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
+    with patch(
+        "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
+    ):
+        assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
     fake_client.async_get_deliveries.assert_awaited_once()
     assert "msg_a" in coordinator.data
 
 
 async def test_cleanup_unexpected_error_returns_without_raising(hass, mock_config_entry):
     """An unexpected error during cleanup is caught + logged + returns (data untouched)."""
+    coordinator = await _setup_coord_with_one_shipment(hass, mock_config_entry)
     fake_client = MagicMock()
     fake_client.async_get_deliveries = AsyncMock(side_effect=ValueError("unexpected"))
-    coordinator = await _setup_coord_for_cleanup(hass, mock_config_entry, fake_client)
-    assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
+    with patch(
+        "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
+    ):
+        assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
     fake_client.async_get_deliveries.assert_awaited_once()
     assert "msg_a" in coordinator.data
 
