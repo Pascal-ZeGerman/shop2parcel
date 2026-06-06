@@ -1,7 +1,7 @@
 <!-- generated-by: gsd-doc-writer -->
 # Testing
 
-Shop2Parcel uses [pytest](https://pytest.org) with `pytest-homeassistant-custom-component` to run 294 test functions across 18 test files. Tests cover the full integration stack: email parsing, HTTP clients, coordinator logic, entity registration, options flows, diagnostics, and debug mode.
+Shop2Parcel uses [pytest](https://pytest.org) with `pytest-homeassistant-custom-component` to run the test suite across 19 test files. Tests cover the full integration stack: email parsing, HTTP clients, coordinator logic, entity registration, options flows, diagnostics, OAuth2 application credentials, and debug mode.
 
 ---
 
@@ -91,6 +91,7 @@ tests/
 │   ├── test_gmail_client.py      # 19 tests — GmailClient + build_incremental_query
 │   ├── test_imap_client.py       # 11 tests — ImapClient, EXAMINE, error mapping
 │   └── test_parcelapp.py         # 20 tests — ParcelAppClient HTTP scenarios
+├── test_application_credentials.py  # OAuth2 authorization server + description placeholders
 ├── test_binary_sensor.py         #  2 tests — HasActiveShipmentsBinarySensor
 ├── test_config_flow.py           # 26 tests — OAuth2 + IMAP config flow steps
 ├── test_const.py                 #  9 tests — normalize_tracking_number
@@ -105,16 +106,17 @@ tests/
 └── test_store_migration.py       #  4 tests — v1→v2 Store migration
 ```
 
-**Total: 294 test functions across 18 files.**
+**Total: 19 test files.**
 
 ### Top-level test files
 
 | File | Tests | What it covers |
 |------|------:|----------------|
+| `test_application_credentials.py` | 3 | `async_get_authorization_server` returns Google's OAuth2 v2 authorize/token URLs; `async_get_description_placeholders` returns the expected keys and console/repo URLs |
 | `test_binary_sensor.py` | 2 | `HasActiveShipmentsBinarySensor` is `on` when data is non-empty, `off` when empty |
 | `test_config_flow.py` | 26 | OAuth2 flow handler, IMAP flow steps, reauth paths, error mapping for `ImapAuthError` / `ImapTransientError` / `ParcelAppAuthError` |
 | `test_const.py` | 9 | `normalize_tracking_number`: whitespace stripping, uppercasing, idempotence |
-| `test_coordinator.py` | 65 | Full coordinator cycle (Gmail and IMAP), dedup persistence, quota exhaustion, error handling (`ConfigEntryAuthFailed`, `UpdateFailed`), cleanup logic, scan event ring buffer, LRU eviction, `already_added` handling |
+| `test_coordinator.py` | — | Full coordinator cycle (Gmail and IMAP), dedup persistence, quota exhaustion, error handling (`ConfigEntryAuthFailed`, `UpdateFailed`), cleanup logic (incl. multi-shipment composite keys), scan event ring buffer, LRU eviction, live-shipment FIFO trim, multi-shipment digest forwarding, plain-text body escape/`<pre>` wrap, `already_added` handling |
 | `test_debug_mode.py` | 12 | Debug/dry-run mode: options toggle (DBG-01), 365-day window override (DBG-02), dedup bypass (DBG-03), no POST (DBG-04), `[Shop2Parcel DEBUG]` INFO logs (DBG-05), persistent notifications (DBG-06) — all for Gmail and IMAP variants |
 | `test_diagnostic_sensor.py` | 12 | All 6 diagnostic sensor entities registered at setup; state values and attributes after a poll cycle |
 | `test_diagnostics.py` | 13 | HA diagnostics platform: output shape, credential redaction (Gmail and IMAP), `recent_shipments` cap, JSON-safe `scan_events`, `activity_log` key |
@@ -288,14 +290,24 @@ Test files for integration-level tests are named `tests/test_{module_name}.py`. 
 
 ## Coverage
 
-No minimum coverage thresholds are configured. Coverage collection is defined in `pyproject.toml`:
+A minimum coverage floor is enforced. Coverage collection and the threshold are
+defined in `pyproject.toml`:
 
 ```toml
 [tool.coverage.run]
 source = ["custom_components"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
 ```
 
-To generate a local coverage report:
+`fail_under` makes the test run exit non-zero if total coverage drops below the
+floor — the CI `pytest` job runs with `--cov=custom_components` so a regression
+fails the build. Raise the floor as coverage improves to ratchet against
+regressions.
+
+To generate a local coverage report (requires the `pytest-cov` dev dependency):
 
 ```bash
 .venv/bin/pytest tests/ --cov=custom_components --cov-report=term-missing

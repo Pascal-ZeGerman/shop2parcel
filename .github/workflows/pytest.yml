@@ -22,7 +22,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install ".[dev]"
       - name: Run pytest
-        run: python -m pytest tests/ -v --tb=short
+        # --cov-fail-under is configured via [tool.coverage.report] fail_under in pyproject.toml;
+        # the run fails if total coverage drops below that floor.
+        run: python -m pytest tests/ -v --tb=short --cov=custom_components --cov-report=term-missing
 
   lint:
     name: ruff + mypy
