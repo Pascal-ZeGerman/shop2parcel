@@ -25,9 +25,7 @@ from .exceptions import OllamaSchemaError
 # Zero-width + BOM characters to strip from LLM output (PITFALLS.md I-9).
 # U+200B ZERO WIDTH SPACE, U+200C ZERO WIDTH NON-JOINER,
 # U+200D ZERO WIDTH JOINER, U+FEFF BOM / ZERO WIDTH NO-BREAK SPACE.
-_ZERO_WIDTH_CHARS: frozenset[str] = frozenset(
-    ("\u200b", "\u200c", "\u200d", "\ufeff")
-)
+_ZERO_WIDTH_CHARS: frozenset[str] = frozenset(("\u200b", "\u200c", "\u200d", "\ufeff"))
 
 
 def normalize_llm_payload(raw: str) -> str:
@@ -58,9 +56,7 @@ def normalize_llm_payload(raw: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end < start:
-        raise OllamaSchemaError(
-            f"No JSON object found in LLM response (len={len(raw)})"
-        )
+        raise OllamaSchemaError(f"No JSON object found in LLM response (len={len(raw)})")
     return text[start : end + 1]
 
 
