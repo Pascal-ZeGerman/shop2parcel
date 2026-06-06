@@ -104,9 +104,7 @@ class OllamaClient:
             "options": {"temperature": 0, "num_ctx": 4096},
             "keep_alive": "5m",
         }
-        _LOGGER.debug(
-            "Ollama generate: model=%s prompt_len=%d", self._model, len(prompt)
-        )
+        _LOGGER.debug("Ollama generate: model=%s prompt_len=%d", self._model, len(prompt))
 
         try:
             async with self._session.post(
@@ -128,9 +126,7 @@ class OllamaClient:
                         resp.status,
                         "OllamaTransientError",
                     )
-                    raise OllamaTransientError(
-                        f"Ollama server error: HTTP {resp.status}"
-                    )
+                    raise OllamaTransientError(f"Ollama server error: HTTP {resp.status}")
                 if 400 <= resp.status < 500:
                     # Catch-all for unexpected 4xx — mirrors parcelapp.py
                     # "unexpected client error" branch.
@@ -152,9 +148,7 @@ class OllamaClient:
                         resp.status,
                         type(err).__name__,
                     )
-                    raise OllamaSchemaError(
-                        f"Ollama response is not valid JSON: {err}"
-                    ) from err
+                    raise OllamaSchemaError(f"Ollama response is not valid JSON: {err}") from err
 
                 # --- Extract the 'response' field ---
                 raw_text = envelope.get("response")
@@ -164,9 +158,7 @@ class OllamaClient:
                         resp.status,
                         "OllamaSchemaError",
                     )
-                    raise OllamaSchemaError(
-                        "Ollama envelope missing 'response' field"
-                    )
+                    raise OllamaSchemaError("Ollama envelope missing 'response' field")
                 if not isinstance(raw_text, str):
                     _LOGGER.debug(
                         "Ollama failure: status=%s err_class=%s",

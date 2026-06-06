@@ -65,9 +65,7 @@ async def test_async_generate_happy_path(client):
     """200 with clean JSON in 'response' field → returns parsed dict (SPEC Req 1)."""
     envelope = {
         "model": "qwen3.5:2b",
-        "response": (
-            '{"tracking_number":"1Z999AA1","carrier_name":"ups","order_name":"#1001"}'
-        ),
+        "response": ('{"tracking_number":"1Z999AA1","carrier_name":"ups","order_name":"#1001"}'),
         "done": True,
     }
     with aioresponses() as mock:
