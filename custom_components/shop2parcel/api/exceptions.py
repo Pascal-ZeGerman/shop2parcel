@@ -58,3 +58,23 @@ class ImapAuthError(Exception):
 
 class ImapTransientError(Exception):
     """IMAP connection failure, timeout, socket error — coordinator raises UpdateFailed."""
+
+
+class OllamaTransientError(Exception):
+    """Network failure or Ollama 5xx — coordinator/extractor logs and retries next poll.
+
+    Phase 15 OLLM-04: raised by OllamaClient on connection errors, timeouts, and
+    HTTP >= 500 responses from the local Ollama /api/generate endpoint.
+    """
+
+
+class OllamaSchemaError(Exception):
+    """Ollama response cannot be parsed as JSON object after normalize + fence-strip fallback.
+
+    Phase 15 OLLM-05/OLLM-06: raised by normalize_llm_payload when no `{` or `}` is
+    present in the LLM output (D-06), and by OllamaClient.async_generate when the
+    second-pass (fence-strip) json.loads also fails (D-04).
+
+    Security (D-07/D-08/D-09): error message must NEVER include the raw response —
+    only its length is a safe diagnostic.
+    """
