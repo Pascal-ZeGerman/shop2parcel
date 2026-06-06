@@ -347,6 +347,78 @@ async def test_add_delivery_400_with_non_string_error_message_raises_with_defaul
 
 
 # ---------------------------------------------------------------------------
+# add_delivery — malformed error bodies and unexpected status codes
+# ---------------------------------------------------------------------------
+
+
+async def test_add_delivery_429_non_json_body_reset_at_none(client):
+    """429 with a non-JSON body → reset_at stays None (covers the JSON-parse guard)."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=429, body="rate limited", content_type="text/plain")
+        with pytest.raises(ParcelAppQuotaError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert exc_info.value.reset_at is None
+
+
+async def test_add_delivery_400_non_dict_json_raises_invalid_tracking(client):
+    """400 with a non-dict JSON body (a list) → 'unexpected JSON shape' branch."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=400, payload=["unexpected", "shape"])
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert "unexpected JSON shape" in str(exc_info.value)
+
+
+async def test_add_delivery_400_non_json_body_raises_invalid_tracking(client):
+    """400 with a non-JSON body → 'non-JSON body' branch."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=400, body="not json", content_type="text/plain")
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert "non-JSON body" in str(exc_info.value)
+
+
+async def test_add_delivery_unexpected_4xx_raises_transient(client):
+    """An unexpected 4xx (e.g. 418) on add-delivery → ParcelAppTransientError."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=418)
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+
+
+# ---------------------------------------------------------------------------
+# get_deliveries — rate limit, unexpected 4xx, and network error
+# ---------------------------------------------------------------------------
+
+
+async def test_get_deliveries_rate_limit_429_raises_transient(client):
+    """429 on view-deliveries → ParcelAppTransientError (rate-limit branch)."""
+    with aioresponses() as mock:
+        mock.get(VIEW_DELIVERIES_URL + "?filter_mode=recent", status=429)
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_get_deliveries()
+
+
+async def test_get_deliveries_unexpected_4xx_raises_transient(client):
+    """An unexpected 4xx (e.g. 418) on view-deliveries → ParcelAppTransientError."""
+    with aioresponses() as mock:
+        mock.get(VIEW_DELIVERIES_URL + "?filter_mode=recent", status=418)
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_get_deliveries()
+
+
+async def test_get_deliveries_network_error_raises_transient(client):
+    """A connection error on view-deliveries → ParcelAppTransientError."""
+    with aioresponses() as mock:
+        mock.get(
+            VIEW_DELIVERIES_URL + "?filter_mode=recent",
+            exception=aiohttp.ClientConnectionError("boom"),
+        )
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_get_deliveries()
+
+
+# ---------------------------------------------------------------------------
 # Static / no-HA-import check
 # ---------------------------------------------------------------------------
 
