@@ -1,16 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.3
-milestone_name: AI-based email analysis
-status: planning
-last_updated: "2026-06-06T00:28:26.265Z"
-last_activity: 2026-06-06
+milestone_name: AI-based Email Analysis
+status: executing
+stopped_at: Phase 15 complete (all 4 plans shipped; ready for /gsd:verify-work)
+last_updated: "2026-06-06T13:25:29Z"
+last_activity: 2026-06-06 -- Phase 15 Plan 04 complete (live_ollama marker + smoke test; Phase 15 done)
 progress:
-  total_phases: 0
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_phases: 8
+  completed_phases: 1
+  total_plans: 4
+  completed_plans: 4
+  percent: 100
 ---
 
 # Project State
@@ -20,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-05)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** Planning next milestone
+**Current focus:** Phase 15 — ollamaclient-foundation
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-06-06 — Milestone v1.3 started
+Phase: 15 (ollamaclient-foundation) — COMPLETE
+Plan: 4 of 4 (15-01, 15-02, 15-03, 15-04 all complete)
+Status: Phase 15 done; ready for /gsd:verify-work
+Last activity: 2026-06-06 -- Phase 15 Plan 04 complete (live_ollama marker + smoke test; 384 passed + 1 skipped)
 
 ## Performance Metrics
 
@@ -62,6 +63,8 @@ Last activity: 2026-06-06 — Milestone v1.3 started
 | Phase 02-api-clients P02 | 4 | 2 tasks | 5 files |
 | Phase 02-api-clients P03 | 9 | 1 tasks | 2 files |
 | Phase 05-sensor-entities P01 | 10 | 3 tasks | 4 files |
+| Phase 15-ollamaclient-foundation P03 | 7 | 3 tasks | 2 files |
+| Phase 15-ollamaclient-foundation P04 | 4 | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -88,6 +91,13 @@ Recent decisions affecting current work:
 - Phase 13.1: STORAGE_VERSION bumped to 3; v2->v3 migration preserves submitted_tracking_numbers + quota_exhausted_until, seeds persisted_shipments as {}
 - Phase 13.1: _SHIPMENT_FIELD_TYPES module-level constant used for per-entry type validation in _async_load_store (T-13.1-04 ASVS V5)
 - Phase 13.1: _pending_shipments assigned before _async_save_store() so debounced lambda captures updated state
+- v1.3 Phase 15: OllamaClient mirrors `parcelapp.py` shape — session injection, no HA imports, custom exception taxonomy (`OllamaTransientError`, `OllamaSchemaError`)
+- v1.3 Phase 15-03: OllamaClient 2-pass parse pipeline shipped (Pass 1 = normalize + json.loads; Pass 2 = fence-strip + normalize + json.loads on Pass 1 JSONDecodeError only). Missing-`{` from normalize is a hard fail (no Pass 2 retry). NFKC preserves Cyrillic A — Phase 20 carrier-regex pre-POST validation will catch any homoglyph slips on real tracking numbers.
+- v1.3 architecture lock: in-memory queue only (HA-restart-lossy by design); full-window rescan re-discovers un-dedup'd emails — no STORAGE_VERSION bump
+- v1.3 architecture lock: single long-lived worker per coordinator; multi-worker rejected (Ollama serializes per-model + ParcelApp 20/day quota)
+- v1.3 architecture lock: drop-newest backpressure on QueueFull (drop-oldest rejected — wastes head-of-queue work, breaks FIFO activity-log ordering)
+- v1.3 quota-burn mitigation set is INSEPARABLE: per-field merge guards + carrier-regex pre-POST validation + `temperature:0` + `MAX_STAGE2_POSTS_PER_POLL` cap + scoped skip-dedup. All five land in Phase 20.
+- v1.3 Phase 15-04: `live_ollama` pytest marker registered in `pyproject.toml`; single opt-in smoke test `tests/api/test_ollama_client_live.py` gated by `OLLAMA_URL` env var (D-10/D-11/D-12/D-13). CI silently skips. Phase 15 complete: 384 tests passing, 1 skipped (the live smoke).
 
 ### Roadmap Evolution
 
@@ -98,6 +108,7 @@ Recent decisions affecting current work:
 - Phase 11 added (v1.1): Activity Log & Debug Logging — per-email scan event ring buffer + comprehensive DEBUG-level logging
 - Phase 12 added: Address tech debt
 - Phase 13.1 inserted after Phase 13: Sensor Restore on Restart — coordinator.data not persisted means all sensors unavailable after restart (HA log audit finding) (URGENT)
+- v1.3 Phases 15–22 added: OllamaClient foundation → extractor → config-flow → queue → worker → merge+quota guards → failure surface+diagnostics → README+e2e. Phases 16, 19, 20 flagged NEEDS RESEARCH.
 
 ### Pending Todos
 
@@ -107,7 +118,7 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-None — Phase 1 gates cleared. parcelapp.net API documented. Gmail OAuth2 is standard (no discovery needed).
+None — v1.3 roadmap drafted, 37/37 requirements mapped, three NEEDS RESEARCH phases flagged. Ready to run `/gsd:plan-phase 15`.
 
 ### Quick Tasks Completed
 
@@ -171,10 +182,11 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-Last session: 2026-06-05T20:38:11.246Z
-Stopped at: context exhaustion at 75% (2026-06-05)
-Next action: v1.2 archived; start /gsd:new-milestone for v1.3
+Last session: 2026-06-06T13:25:29Z
+Stopped at: Phase 15 complete (15-04 shipped: live_ollama marker + opt-in smoke test; 384 passed + 1 skipped)
+Next action: Run `/gsd:verify-work` on Phase 15, then plan Phase 16 via `/gsd:plan-phase --research-phase 16` (flagged NEEDS RESEARCH).
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Run `/gsd:verify-work` to verify Phase 15 deliverables
+- For Phases 16, 19, 20 (NEEDS RESEARCH), use `/gsd:plan-phase --research-phase N` so a research pass runs before plan drafting
