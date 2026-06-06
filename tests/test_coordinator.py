@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -38,6 +38,8 @@ from custom_components.shop2parcel.const import (
 from custom_components.shop2parcel.coordinator import (
     PollStats,
     Shop2ParcelCoordinator,
+    _extract_email_meta,
+    _extract_imap_email_meta,
     _next_midnight_utc,
 )
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
@@ -3804,3 +3806,131 @@ async def test_imap_plain_text_body_is_escaped_and_wrapped(hass, mock_imap_confi
     assert "&amp;" in captured["html"], "ampersand must be HTML-escaped"
     assert "<1Z999>" not in captured["html"], "raw angle brackets must NOT survive into the HTML"
     assert "100" in data, "shipment parsed from the wrapped text body must be forwarded"
+
+
+# -------- _async_load_store error handling -------------------------------
+
+
+async def test_load_store_oserror_starts_with_empty_state(hass, mock_config_entry, caplog):
+    """An OSError loading the store is logged and leaves empty dedup/restore state."""
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(side_effect=OSError("disk failure"))
+        coord = GmailCoordinator(hass, mock_config_entry)
+        with caplog.at_level(logging.ERROR):
+            await coord._async_load_store()
+
+    assert coord._submitted_tracking_numbers == OrderedDict()
+    assert coord._restored_shipments == {}
+    assert coord._store_loaded is True
+
+
+async def test_load_store_unexpected_error_raises_config_entry_not_ready(hass, mock_config_entry):
+    """A non-OSError loading the store raises ConfigEntryNotReady so HA retries setup."""
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(side_effect=RuntimeError("corrupt"))
+        coord = GmailCoordinator(hass, mock_config_entry)
+        with pytest.raises(ConfigEntryNotReady):
+            await coord._async_load_store()
+
+
+# -------- _async_save_store scheduling failure ---------------------------
+
+
+async def test_save_store_swallows_scheduling_error(hass, mock_config_entry, caplog):
+    """If async_delay_save raises, _async_save_store logs and does NOT propagate."""
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock(
+            side_effect=RuntimeError("scheduling failed")
+        )
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        with caplog.at_level(logging.ERROR):
+            await coord._async_save_store()  # must not raise
+
+    assert "Failed to schedule" in caplog.text
+
+
+# -------- async_cleanup_delivered error handling (data present) ----------
+# These set non-empty coordinator.data so cleanup proceeds past the early-return
+# guard and actually reaches the async_get_deliveries() call + except handlers.
+
+
+async def _setup_coord_for_cleanup(hass, mock_config_entry, fake_client):
+    """Set up a GmailCoordinator with one shipment in data and a patched ParcelAppClient."""
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+        coordinator.async_set_updated_data(
+            {"msg_a": ShipmentData("TRACK_A", "UPS", "#1", "msg_a", 1)}
+        )
+        return coordinator
+
+
+async def test_cleanup_auth_error_returns_without_raising(hass, mock_config_entry):
+    """ParcelAppAuthError during cleanup is caught + logged + returns (data untouched)."""
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(side_effect=ParcelAppAuthError("bad key"))
+    coordinator = await _setup_coord_for_cleanup(hass, mock_config_entry, fake_client)
+    assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
+    fake_client.async_get_deliveries.assert_awaited_once()
+    assert "msg_a" in coordinator.data
+
+
+async def test_cleanup_transient_error_returns_without_raising(hass, mock_config_entry):
+    """ParcelAppTransientError during cleanup is caught + logged + returns (data untouched)."""
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(side_effect=ParcelAppTransientError("5xx"))
+    coordinator = await _setup_coord_for_cleanup(hass, mock_config_entry, fake_client)
+    assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
+    fake_client.async_get_deliveries.assert_awaited_once()
+    assert "msg_a" in coordinator.data
+
+
+async def test_cleanup_unexpected_error_returns_without_raising(hass, mock_config_entry):
+    """An unexpected error during cleanup is caught + logged + returns (data untouched)."""
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(side_effect=ValueError("unexpected"))
+    coordinator = await _setup_coord_for_cleanup(hass, mock_config_entry, fake_client)
+    assert await coordinator.async_cleanup_delivered(datetime.now(timezone.utc)) is None
+    fake_client.async_get_deliveries.assert_awaited_once()
+    assert "msg_a" in coordinator.data
+
+
+# -------- email-meta extraction exception guards (module-level helpers) ---
+
+
+def test_extract_email_meta_returns_defaults_on_attribute_error():
+    """_extract_email_meta returns safe defaults when payload access raises (W10/P11-WR-05)."""
+    # payload is a list → .get(...) raises AttributeError → handler returns defaults.
+    result = _extract_email_meta({"payload": []})
+    assert result == {"subject": "", "from": "", "date": "", "snippet": ""}
+
+
+def test_extract_imap_email_meta_returns_defaults_on_parse_error():
+    """_extract_imap_email_meta returns safe defaults when message_from_bytes raises."""
+    with patch(
+        "custom_components.shop2parcel.coordinator._email_stdlib.message_from_bytes",
+        side_effect=LookupError("unknown codec"),
+    ):
+        result = _extract_imap_email_meta(b"raw bytes")
+    assert result == {"subject": "", "from": "", "date": "", "snippet": ""}
