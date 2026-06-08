@@ -100,6 +100,12 @@ class OllamaClient:
             "model": self._model,
             "prompt": prompt,
             "stream": False,
+            "think": False,  # Disable thinking-model reasoning so the structured
+            # output lands in `response`, not `thinking`. No-op for non-thinking
+            # models (e.g. qwen2.5, llama3.1). Required for qwen3.5 / deepseek-r1
+            # / other reasoning models, which otherwise emit the formatted JSON
+            # in `thinking` and leave `response` empty — observed in UAT against
+            # qwen3.5:2b. See Ollama /api/generate `think` parameter.
             "format": schema,
             "options": {"temperature": 0, "num_ctx": 4096},
             "keep_alive": "5m",

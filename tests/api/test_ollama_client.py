@@ -98,6 +98,9 @@ async def test_request_body_shape(client):
         assert len(requests) == 1
         body = requests[0].kwargs["json"]
     assert body["stream"] is False
+    assert body["think"] is False  # Reasoning-model guard: structured output
+    # must land in `response`, not `thinking`. UAT against qwen3.5:2b showed
+    # the empty-response gap when thinking is enabled.
     assert body["format"] == schema
     assert body["options"] == {"temperature": 0, "num_ctx": 4096}
     assert body["keep_alive"] == "5m"
