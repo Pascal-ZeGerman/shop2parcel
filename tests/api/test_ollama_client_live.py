@@ -18,9 +18,11 @@ explicitly deferred to Phase 22 (D-13).
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 import aiohttp
 import pytest
+import pytest_socket
 
 from custom_components.shop2parcel.api.ollama_client import OllamaClient
 
@@ -36,8 +38,30 @@ async def session():
         yield s
 
 
+@pytest.fixture
+def _allow_ollama_socket(socket_enabled):
+    """Fully unblock sockets for the live smoke test.
+
+    The HA harness (`pytest_homeassistant_custom_component.plugins`) installs
+    `socket_allow_hosts(["127.0.0.1"])` BEFORE `disable_socket`, which mutates
+    the real `socket.socket.connect` to a host-filtered guard. The standard
+    `socket_enabled` fixture only restores `socket.socket` itself, not its
+    `connect` method, so even with `socket_enabled` requests to non-127.0.0.1
+    hosts raise `SocketConnectBlockedError`. We need both:
+
+      1. `socket_enabled` (autouse via fixture arg) → restores `socket.socket`
+      2. `socket_allow_hosts([OLLAMA_URL host])` → replaces the connect guard
+         with one that permits our target host.
+    """
+    if OLLAMA_URL:
+        host = urlparse(OLLAMA_URL).hostname
+        if host:
+            pytest_socket.socket_allow_hosts([host], allow_unix_socket=True)
+    yield
+
+
 @pytest.mark.skipif(not OLLAMA_URL, reason="OLLAMA_URL env var not set")
-async def test_live_generate_returns_dict(session):
+async def test_live_generate_returns_dict(_allow_ollama_socket, session):
     """Live round-trip: real Ollama returns a dict containing key 'ok' (D-11)."""
     client = OllamaClient(
         session=session,
