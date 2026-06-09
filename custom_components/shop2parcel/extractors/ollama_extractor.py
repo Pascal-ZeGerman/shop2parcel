@@ -53,7 +53,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # D-07: snake_case, 1-32 chars, must start with a letter. Compiled once at
 # module scope (mirrors api/email_parser.py _TRACKING_PATTERNS convention).
-_FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# Anchors are NOT included in the pattern — ``re.Pattern.fullmatch`` already
+# anchors at both ends, so ``^...$`` would be redundant (IN-03).
+_FIELD_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 
 def _auto_description(name: str) -> str:
