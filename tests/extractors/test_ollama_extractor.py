@@ -657,8 +657,15 @@ async def test_split_and_coerce_raises_on_non_dict_response(
 
     msg = str(exc_info.value)
     assert type(non_dict_response).__name__ in msg
-    # Value never appears in the message — privacy guarantee.
-    assert repr(non_dict_response) not in msg
+    # Privacy guarantee: only the type name appears in the message, never the
+    # value. For non-None payloads with a distinctive repr (list/str/int) the
+    # repr substring must NOT appear; for None the repr is "None" which is a
+    # structural substring of "NoneType" — verify the message ends with the
+    # type name in that case (no trailing value tail) instead.
+    if non_dict_response is None:
+        assert msg.endswith("NoneType")
+    else:
+        assert repr(non_dict_response) not in msg
 
 
 # ---------------------------------------------------------------------------

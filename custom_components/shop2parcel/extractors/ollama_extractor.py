@@ -368,7 +368,18 @@ class OllamaExtractor:
             V7 + I-Information Disclosure).
           * Route to ``locked`` if ``name in LOCKED_OLLAMA_FIELDS``,
             otherwise to ``custom``.
+
+        Pre-check (WR-01): ``raw`` is type-annotated as a dict by the
+        Phase-15 client, but ``json.loads`` will accept any valid JSON
+        document — array, scalar, or ``null``. Guard with ``isinstance``
+        before the ``.get`` call to keep the D-09 exception taxonomy
+        stable (``OllamaTransientError`` / ``OllamaSchemaError`` only —
+        never ``AttributeError``). The message contains the Python type
+        name but NEVER the value (Security V7).
         """
+        if not isinstance(raw, dict):
+            raise OllamaSchemaError(f"Ollama response is not a JSON object: {type(raw).__name__}")
+
         locked: dict[str, str | None] = {}
         custom: dict[str, str | None] = {}
 
