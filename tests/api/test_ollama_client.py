@@ -274,3 +274,64 @@ def test_no_ha_imports():
     )
     contents = client_path.read_text(encoding="utf-8")
     assert "homeassistant" not in contents
+
+
+# ---------------------------------------------------------------------------
+# async_generate_with_metadata — Phase 16 (Pitfall 5 / A1 Option 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_generate_with_metadata_returns_passes_used_1(client):
+    """Pass-1 happy path: clean JSON → returns (result, {'passes_used': 1})."""
+    envelope = {
+        "model": "qwen3.5:2b",
+        "response": '{"tracking_number":"1Z999AA1","carrier_name":"ups","order_name":"#1001"}',
+        "done": True,
+    }
+    with aioresponses() as mock:
+        mock.post(GENERATE_URL, payload=envelope, status=200)
+        result, meta = await client.async_generate_with_metadata(
+            "extract shipment", {"type": "object"}
+        )
+    assert result == {
+        "tracking_number": "1Z999AA1",
+        "carrier_name": "ups",
+        "order_name": "#1001",
+    }
+    assert meta == {"passes_used": 1}
+
+
+async def test_async_generate_with_metadata_returns_passes_used_2(client):
+    """Pass-2 fence-strip success: returns (result, {'passes_used': 2})."""
+    fenced = '```json\n{"tracking_number":"1Z999AA1"}\n```'
+    envelope = {"response": fenced, "done": True}
+    with aioresponses() as mock:
+        mock.post(GENERATE_URL, payload=envelope, status=200)
+        result, meta = await client.async_generate_with_metadata(
+            "prompt", {"type": "object"}
+        )
+    assert result == {"tracking_number": "1Z999AA1"}
+    assert meta == {"passes_used": 2}
+
+
+async def test_async_generate_backward_compat(client):
+    """async_generate still returns a bare dict (backward-compatible wrapper).
+
+    Mirrors test_async_generate_happy_path but proves the existing one-callsite
+    API is unchanged for any caller that doesn't need the metadata variant.
+    """
+    envelope = {
+        "model": "qwen3.5:2b",
+        "response": '{"tracking_number":"1Z999AA1","carrier_name":"ups","order_name":"#1001"}',
+        "done": True,
+    }
+    with aioresponses() as mock:
+        mock.post(GENERATE_URL, payload=envelope, status=200)
+        result = await client.async_generate("extract shipment", {"type": "object"})
+    # Bare dict — no tuple unpacking required.
+    assert isinstance(result, dict)
+    assert result == {
+        "tracking_number": "1Z999AA1",
+        "carrier_name": "ups",
+        "order_name": "#1001",
+    }
