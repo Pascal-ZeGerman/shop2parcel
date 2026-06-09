@@ -75,6 +75,25 @@ class OllamaClient:
     async def async_generate(self, prompt: str, schema: dict) -> dict:
         """POST to /api/generate and return the parsed structured-output dict.
 
+        Backward-compatible wrapper around :meth:`async_generate_with_metadata`
+        (Phase 16 / Pitfall 5 / Assumption A1 Option 3). Discards the metadata
+        dict so existing Phase-15 callers see the unchanged ``dict`` return.
+
+        The 2-pass parse pipeline, status-code mapping, and exception taxonomy
+        all live in :meth:`async_generate_with_metadata` — this wrapper exists
+        solely to preserve the original public API.
+        """
+        result, _meta = await self.async_generate_with_metadata(prompt, schema)
+        return result
+
+    async def async_generate_with_metadata(self, prompt: str, schema: dict) -> tuple[dict, dict]:
+        """POST to /api/generate and return ``(result, {"passes_used": int})``.
+
+        Phase-16 metadata variant (Pitfall 5 / Assumption A1 Option 3). Surfaces
+        the existing internal ``passes_used`` counter to enable Phase-21's D-C1
+        diagnostic sensor (rolling counts of clean-first-pass vs. fence-strip
+        retries) without breaking the Phase-15 ``async_generate -> dict`` API.
+
         The 2-pass parse pipeline (D-04/D-05/D-06):
           Pass 1: normalize_llm_payload(raw_text) → json.loads.
                   - On OllamaSchemaError (no '{' in raw_text) → re-raise
@@ -88,6 +107,11 @@ class OllamaClient:
           >= 500        → OllamaTransientError
           400-499 other → OllamaTransientError (catch-all)
           TimeoutError, aiohttp.ClientConnectionError → OllamaTransientError
+
+        Returns:
+            A tuple ``(result, {"passes_used": 1 | 2})`` where ``passes_used``
+            is 1 when the clean first-pass parse succeeded and 2 when the
+            fence-strip retry succeeded.
 
         Raises:
             OllamaSchemaError: HTTP 401/403/404, envelope JSON decode failure,
@@ -189,7 +213,7 @@ class OllamaClient:
                         len(raw_text),
                         passes_used,
                     )
-                    return result
+                    return result, {"passes_used": passes_used}
                 except OllamaSchemaError:
                     # D-06 / Pitfall 2: missing-'{' is a hard fail. Do NOT
                     # advance to Pass 2 — the fence-strip cannot synthesize
@@ -212,7 +236,7 @@ class OllamaClient:
                         len(raw_text),
                         passes_used,
                     )
-                    return result
+                    return result, {"passes_used": passes_used}
                 except (OllamaSchemaError, json.JSONDecodeError) as err:
                     _LOGGER.debug(
                         "Ollama failure: status=%s err_class=%s",

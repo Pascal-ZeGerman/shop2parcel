@@ -274,3 +274,92 @@ def test_no_ha_imports():
     )
     contents = client_path.read_text(encoding="utf-8")
     assert "homeassistant" not in contents
+
+
+# ---------------------------------------------------------------------------
+# async_generate_with_metadata — Phase 16 (Pitfall 5 / A1 Option 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_generate_with_metadata_returns_passes_used_1(client):
+    """Pass-1 happy path: clean JSON → returns (result, {'passes_used': 1})."""
+    envelope = {
+        "model": "qwen3.5:2b",
+        "response": '{"tracking_number":"1Z999AA1","carrier_name":"ups","order_name":"#1001"}',
+        "done": True,
+    }
+    with aioresponses() as mock:
+        mock.post(GENERATE_URL, payload=envelope, status=200)
+        result, meta = await client.async_generate_with_metadata(
+            "extract shipment", {"type": "object"}
+        )
+    assert result == {
+        "tracking_number": "1Z999AA1",
+        "carrier_name": "ups",
+        "order_name": "#1001",
+    }
+    assert meta == {"passes_used": 1}
+
+
+async def test_async_generate_with_metadata_returns_passes_used_2(client, monkeypatch):
+    """Pass-2 fence-strip success: returns (result, {'passes_used': 2}).
+
+    Engineering note: ``normalize_llm_payload`` already does ``{...}`` substring
+    extraction, so realistic markdown-fenced LLM output parses successfully on
+    Pass 1 in production (see ``test_markdown_fence_retry_success`` — that test
+    only asserts the *result*, not the pass count, and it parses in Pass 1).
+    Pass 2 is a defense-in-depth code path that is reachable only when Pass 1's
+    ``json.loads`` fails *after* normalize succeeded. To prove the metadata
+    contract for that path without depending on a fragile constructed input,
+    monkeypatch ``json.loads`` to fail exactly once — exercising the Pass 1 →
+    Pass 2 transition and verifying ``passes_used == 2`` lands in the tuple.
+    """
+    import json as _json
+
+    from custom_components.shop2parcel.api import ollama_client as _ollama_client_mod
+
+    real_loads = _json.loads
+    call_count = {"n": 0}
+
+    def fail_once_then_succeed(s, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Force Pass 1 to fall through to Pass 2.
+            raise _json.JSONDecodeError("simulated Pass-1 failure", s, 0)
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(_ollama_client_mod.json, "loads", fail_once_then_succeed)
+
+    envelope = {
+        "response": '{"tracking_number":"1Z999AA1"}',
+        "done": True,
+    }
+    with aioresponses() as mock:
+        mock.post(GENERATE_URL, payload=envelope, status=200)
+        result, meta = await client.async_generate_with_metadata("prompt", {"type": "object"})
+    assert result == {"tracking_number": "1Z999AA1"}
+    assert meta == {"passes_used": 2}
+    assert call_count["n"] == 2  # Pass 1 (failed) + Pass 2 (succeeded)
+
+
+async def test_async_generate_backward_compat(client):
+    """async_generate still returns a bare dict (backward-compatible wrapper).
+
+    Mirrors test_async_generate_happy_path but proves the existing one-callsite
+    API is unchanged for any caller that doesn't need the metadata variant.
+    """
+    envelope = {
+        "model": "qwen3.5:2b",
+        "response": '{"tracking_number":"1Z999AA1","carrier_name":"ups","order_name":"#1001"}',
+        "done": True,
+    }
+    with aioresponses() as mock:
+        mock.post(GENERATE_URL, payload=envelope, status=200)
+        result = await client.async_generate("extract shipment", {"type": "object"})
+    # Bare dict — no tuple unpacking required.
+    assert isinstance(result, dict)
+    assert result == {
+        "tracking_number": "1Z999AA1",
+        "carrier_name": "ups",
+        "order_name": "#1001",
+    }
