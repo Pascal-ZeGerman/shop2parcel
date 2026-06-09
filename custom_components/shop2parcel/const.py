@@ -89,3 +89,17 @@ def normalize_tracking_number(tracking_number: str) -> str:
     upper() handles casing inconsistencies in email content.
     """
     return tracking_number.strip().upper()
+
+
+# Phase 16: Stage-2 LLM extraction (locked field set — owned by extractor,
+# surfaced by Phase 17 options flow). The tuple is consumed by:
+#   * extractors/ollama_extractor.py.build_schema (required keys)
+#   * extractors/ollama_extractor.py._validate_fields (collision check, Plan 03)
+#   * Phase 20 merge_llm_authoritative (locked-vs-custom routing)
+# Order is observable downstream — JSON Schema ``required`` array semantics
+# depend on declared order for some validators (D-06).
+LOCKED_OLLAMA_FIELDS: tuple[str, str, str] = (
+    "tracking_number",
+    "carrier_name",
+    "order_name",
+)
