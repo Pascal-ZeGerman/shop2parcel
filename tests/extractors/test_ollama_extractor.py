@@ -389,6 +389,44 @@ def test_invalid_field_name_dropped(mock_client, caplog):
     assert "9starts_with_digit" not in field_names
 
 
+def test_invalid_field_name_warning_escapes_control_chars(mock_client, caplog):
+    """Field-name WARNING uses %r so newlines / ANSI escapes are repr-escaped (WR-03).
+
+    The dropped-field WARNING interpolates ``name``, which is arbitrary user
+    input — a hostile name like ``"foo\\nINFO:other:Forwarded"`` could
+    masquerade as a separate log line, log-forging the integrator's logs.
+    Asserts the name is rendered via ``repr()`` (so the raw newline appears
+    escaped as ``\\n`` rather than producing a literal newline in the log),
+    and that the cap bounds pathological-length input.
+    """
+    hostile_name = "foo\nINFO:custom_components.shop2parcel:Forwarded"
+    overlong_name = "x" * 200
+    with caplog.at_level(logging.WARNING):
+        OllamaExtractor(
+            client=mock_client,
+            field_list=[(hostile_name, "desc"), (overlong_name, "desc")],
+        )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+
+    hostile_msg = warnings[0].getMessage()
+    # %r escapes the literal newline as \n so the log line stays single-line.
+    assert "\\n" in hostile_msg
+    assert "\n" not in hostile_msg.split(" has invalid name")[0]
+    # The injected log-line target string is still present (we don't redact
+    # it), but it's quoted as a single Python string repr — it cannot
+    # masquerade as a separate INFO record on the log scanner.
+    assert "'foo\\nINFO" in hostile_msg
+
+    # 64-char cap on pathological-length names.
+    overlong_msg = warnings[1].getMessage()
+    # The repr shows quotes, so 64 chars of 'x' + the two quote chars + escape
+    # context — assert the raw 200-char run does NOT appear unbounded.
+    assert "x" * 200 not in overlong_msg
+    assert "x" * 64 in overlong_msg
+
+
 def test_custom_field_collision_dropped(mock_client, caplog):
     """A custom field colliding with a locked field is dropped with WARNING (D-07)."""
     with caplog.at_level(logging.WARNING):

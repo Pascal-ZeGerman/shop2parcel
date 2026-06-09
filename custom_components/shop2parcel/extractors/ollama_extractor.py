@@ -287,19 +287,27 @@ class OllamaExtractor:
         seen: set[str] = set(LOCKED_OLLAMA_FIELDS)
 
         for name, description in raw:
+            # WR-03: name is arbitrary user input — when _FIELD_NAME_RE rejects
+            # it (next branch), the value can contain newlines / ANSI escapes /
+            # log-injection payloads. Use ``%r`` to repr-escape control chars
+            # and cap at 64 chars to bound the log line. Same posture on the
+            # collision branch for symmetry — locked names match the regex so
+            # the cap is a no-op there, but defensive uniformity is cheaper to
+            # read than per-branch policy.
+            safe_name = name[:64] if isinstance(name, str) else name
             if not _FIELD_NAME_RE.fullmatch(name):
                 _LOGGER.warning(
-                    "Custom Stage-2 field '%s' has invalid name "
+                    "Custom Stage-2 field %r has invalid name "
                     "(must match ^[a-z][a-z0-9_]{0,31}$); dropped.",
-                    name,
+                    safe_name,
                 )
                 continue
             if name in seen:
                 _LOGGER.warning(
-                    "Custom Stage-2 field '%s' collides with locked field "
+                    "Custom Stage-2 field %r collides with locked field "
                     "or duplicate; dropped. Locked field descriptions are "
                     "non-configurable in v1.3.",
-                    name,
+                    safe_name,
                 )
                 continue
             out.append((name, description))
