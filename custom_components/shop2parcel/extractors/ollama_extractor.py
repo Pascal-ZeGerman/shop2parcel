@@ -315,7 +315,7 @@ class OllamaExtractor:
 
         return out
 
-    async def async_extract(self, html: str, stage1: object) -> Stage2Result:
+    async def async_extract(self, html: str, _stage1: object) -> Stage2Result:
         """Run the full Stage-2 extraction pipeline.
 
         Pipeline:
@@ -327,9 +327,11 @@ class OllamaExtractor:
           5. Return ``Stage2Result(locked, custom, passes_used,
              latency_ms)``.
 
-        ``stage1`` is accepted in the signature only to honor the
+        ``_stage1`` is accepted in the signature only to honor the
         Phase-19 worker contract; its values are NEVER embedded in the
         prompt / prose / links / log lines (D-01 independent extraction).
+        The leading underscore signals "intentionally unused" — lint will
+        flag any future read site (IN-01).
 
         Latency is measured via ``time.perf_counter()`` (monotonic
         high-resolution; matches HA convention) and is captured BEFORE
