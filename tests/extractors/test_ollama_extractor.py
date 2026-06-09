@@ -624,6 +624,43 @@ async def test_schema_error_on_invalid_locked_field_type(
     assert "12345" not in msg
 
 
+@pytest.mark.parametrize(
+    "non_dict_response",
+    [
+        pytest.param(["tracking_number", "carrier_name"], id="list"),
+        pytest.param("just a string", id="str"),
+        pytest.param(42, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+async def test_split_and_coerce_raises_on_non_dict_response(
+    mock_client, sample_stage1, shopify_mini_html, non_dict_response
+):
+    """Defense-in-depth: non-dict raw response raises OllamaSchemaError (WR-01).
+
+    The client's ``async_generate_with_metadata`` is type-annotated to return a
+    dict, but a misbehaving model could yield a JSON array, scalar, or null.
+    Without an ``isinstance(raw, dict)`` guard, ``raw.get(name)`` would raise a
+    raw ``AttributeError`` that escapes the documented D-09 exception taxonomy.
+
+    Privacy invariant (D-09 / Security V7): the exception message MUST contain
+    the Python type name (``list``, ``str``, ``int``, ``NoneType``) but NEVER
+    the value itself.
+    """
+    mock_client.async_generate_with_metadata.return_value = (
+        non_dict_response,
+        {"passes_used": 1},
+    )
+    extractor = OllamaExtractor(client=mock_client, field_list=[])
+    with pytest.raises(OllamaSchemaError) as exc_info:
+        await extractor.async_extract(shopify_mini_html, sample_stage1)
+
+    msg = str(exc_info.value)
+    assert type(non_dict_response).__name__ in msg
+    # Value never appears in the message — privacy guarantee.
+    assert repr(non_dict_response) not in msg
+
+
 # ---------------------------------------------------------------------------
 # OllamaExtractor — D-10 logging privacy
 # ---------------------------------------------------------------------------
