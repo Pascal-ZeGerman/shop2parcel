@@ -220,14 +220,19 @@ def test_build_prompt_rules_present():
 
 
 def test_build_prompt_links_block_contains_hrefs():
-    """When links are present, they appear inside the LINKS block."""
+    """When links are present, they appear inside the LINKS block.
+
+    ``<<<LINKS>>>`` / ``<<<END_LINKS>>>`` tokens occur twice in the prompt
+    (once in the Rules-block instructional-defense line, once as the
+    actual delimited block). Use ``rindex`` to anchor on the real block.
+    """
     prompt = build_prompt(
         prose="x",
         links=["https://a.example/track", "https://b.example/track"],
         field_list=[("tracking_number", None)],
     )
-    links_start = prompt.index("<<<LINKS>>>")
-    links_end = prompt.index("<<<END_LINKS>>>")
+    links_start = prompt.rindex("<<<LINKS>>>")
+    links_end = prompt.rindex("<<<END_LINKS>>>")
     block = prompt[links_start:links_end]
     assert "https://a.example/track" in block
     assert "https://b.example/track" in block
