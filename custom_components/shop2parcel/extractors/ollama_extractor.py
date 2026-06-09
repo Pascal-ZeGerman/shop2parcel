@@ -56,6 +56,18 @@ _LOGGER = logging.getLogger(__name__)
 _FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 
+def _auto_description(name: str) -> str:
+    """D-03 auto-generated description fallback.
+
+    Shared by ``build_schema`` and ``build_prompt`` so the two helpers stay
+    grounded on the same string (WR-02). Trigger sites use ``is not None``
+    (not truthy) so the user can ship an intentionally empty description
+    from the Phase-17 options-flow textarea without silently flipping to
+    this fallback (WR-02).
+    """
+    return f"The {name} value extracted from the email, or null if not present."
+
+
 def build_schema(
     field_list: Sequence[tuple[str, str | None]],
 ) -> dict[str, object]:
@@ -86,9 +98,8 @@ def build_schema(
     """
     properties: dict[str, dict[str, object]] = {}
 
-    for name, description in field_list:
-        if description is None:
-            description = f"The {name} value extracted from the email, or null if not present."
+    for name, raw_description in field_list:
+        description = raw_description if raw_description is not None else _auto_description(name)
         properties[name] = {
             "type": ["string", "null"],
             "description": description,
@@ -181,7 +192,7 @@ def build_prompt(
         A single-string prompt ready for ``OllamaClient.async_generate``.
     """
     field_lines = "\n".join(
-        f"- {name}: {desc if desc else f'The {name} value, or null if not present.'}"
+        f"- {name}: {desc if desc is not None else _auto_description(name)}"
         for name, desc in field_list
     )
 

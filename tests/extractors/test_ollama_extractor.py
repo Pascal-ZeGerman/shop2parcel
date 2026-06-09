@@ -95,6 +95,48 @@ def test_build_schema_auto_description_for_none():
     )
 
 
+def test_build_schema_preserves_empty_string_description():
+    """Empty-string description from caller is preserved verbatim (WR-02).
+
+    The auto-description fallback triggers ONLY on ``None`` — not on any
+    falsy value. A user who ships an intentionally empty description from
+    the Phase-17 options-flow textarea must see ``""`` land in the schema,
+    not silently flip to the auto-generated phrase. Keeps the schema and
+    prompt grounded on the same description string.
+    """
+    schema = build_schema([("est_delivery", "")])
+    assert schema["properties"]["est_delivery"]["description"] == ""
+
+
+def test_build_prompt_preserves_empty_string_description():
+    """Empty-string description renders empty in the prompt field line (WR-02).
+
+    Symmetry with ``test_build_schema_preserves_empty_string_description``.
+    The auto-description fallback in ``build_prompt`` must trigger on
+    ``None`` only, not on truthy/falsy — otherwise schema and prompt
+    diverge on grounding for empty-string descriptions.
+    """
+    prompt = build_prompt(prose="x", links=[], field_list=[("est_delivery", "")])
+    assert "- est_delivery: \n" in prompt
+    # And the auto-generated fallback phrase must NOT appear for this field.
+    assert "est_delivery value extracted from the email" not in prompt
+
+
+def test_build_prompt_uses_auto_description_for_none():
+    """When description is None, prompt uses the shared D-03 fallback (WR-02 + WR-04).
+
+    Asserts the prompt's field-line fallback matches ``build_schema``'s
+    fallback verbatim (shared ``_auto_description`` helper). Previously the
+    prompt used ``"The {name} value, or null if not present."`` while the
+    schema used ``"The {name} value extracted from the email, or null if
+    not present."`` — two slightly different groundings for the same field.
+    """
+    prompt = build_prompt(prose="x", links=[], field_list=[("est_delivery", None)])
+    assert (
+        "- est_delivery: The est_delivery value extracted from the email, or null if not present.\n"
+    ) in prompt
+
+
 def test_build_schema_property_types_are_string_or_null():
     """Every property's type is ['string', 'null'] (D-06 + FEATURES TS-C3)."""
     schema = build_schema(
