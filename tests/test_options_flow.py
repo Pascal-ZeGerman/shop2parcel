@@ -399,15 +399,15 @@ async def test_settings_uses_shared_session(hass, mock_config_entry):
     assert result["type"] == "create_entry"
 
 
-async def test_custom_fields_stub_returns_abort(hass, mock_config_entry):
-    """Plan 03 stub: async_step_custom_fields returns abort with reason='not_implemented'."""
+async def test_custom_fields_returns_menu(hass, mock_config_entry):
+    """Plan 04: async_step_custom_fields now returns a menu (stub replaced by real CRUD)."""
     handler, fake_entry = _make_handler_with_options(options={})
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
     ):
         result = await handler.async_step_custom_fields(user_input=None)
-    assert result["type"] == "abort"
-    assert result["reason"] == "not_implemented"
+    assert result["type"] == "menu"
+    assert result["step_id"] == "custom_fields_menu"
 
 
 # ---------------------------------------------------------------------------
@@ -950,9 +950,7 @@ async def test_remove_custom_field_happy_path(hass, mock_config_entry):
     ):
         result = await handler.async_step_remove_custom_field(user_input=user_input)
     assert result["type"] == "create_entry"
-    assert result["data"][CONF_CUSTOM_FIELDS] == [
-        {"name": "shipping_method", "description": None}
-    ]
+    assert result["data"][CONF_CUSTOM_FIELDS] == [{"name": "shipping_method", "description": None}]
 
 
 async def test_add_custom_field_stateless_across_calls(hass, mock_config_entry):
