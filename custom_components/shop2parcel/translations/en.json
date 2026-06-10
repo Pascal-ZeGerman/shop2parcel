@@ -74,32 +74,55 @@
     "abort": {
       "already_configured": "Shop2Parcel is already configured for this Gmail account.",
       "already_configured_imap": "An account with this username and host is already configured.",
-      "reauth_successful": "Re-authorization was successful.",
+      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
       "wrong_account": "Wrong account: please authenticate with the original Gmail account.",
-      "oauth_error": "Could not authenticate with Google.",
-      "oauth_failed": "Unexpected error authenticating with Google.",
-      "oauth_timeout": "Timeout authenticating with Google.",
-      "oauth_unauthorized": "Google OAuth2 credentials are invalid.",
-      "missing_configuration": "Google OAuth2 credentials are not configured. Add them in Settings > Credentials."
+      "oauth_error": "[%key:common::config_flow::abort::oauth2_error%]",
+      "oauth_failed": "[%key:common::config_flow::abort::oauth2_failed%]",
+      "oauth_timeout": "[%key:common::config_flow::abort::oauth2_timeout%]",
+      "oauth_unauthorized": "[%key:common::config_flow::abort::oauth2_unauthorized%]",
+      "missing_configuration": "[%key:common::config_flow::abort::oauth2_missing_configuration%]"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Shop2Parcel Options",
+        "menu_options": {
+          "settings": "Settings",
+          "custom_fields": "Manage custom extraction fields"
+        }
+      },
+      "settings": {
+        "title": "Shop2Parcel Settings",
+        "description": "Configure polling and Ollama AI extraction. Always-extracted fields: {locked_fields}.",
         "data": {
           "poll_interval": "Poll Interval (minutes)",
           "gmail_query": "Gmail Search Query",
           "imap_search": "IMAP Search Criteria",
-          "rescan_window_days": "Rescan Window (days)"
+          "rescan_window_days": "Rescan Window (days)",
+          "debug_mode": "Debug / Dry-run Mode",
+          "ollama_url": "Ollama Server URL",
+          "ollama_model": "Ollama Model",
+          "ollama_timeout": "Ollama Timeout (seconds)",
+          "queue_maxlen": "Extraction Queue Size"
         },
         "data_description": {
           "poll_interval": "How often to check for new shipping emails (5–1440 minutes).",
           "gmail_query": "Gmail search query to find shipping emails.",
           "imap_search": "IMAP SEARCH criteria (e.g. SUBJECT \"shipped\").",
-          "rescan_window_days": "Always look back at least this many days for shipping emails (7-365). Increase this to rescan recent history without resetting the integration. Already-forwarded shipments are not re-sent."
+          "rescan_window_days": "Always look back at least this many days for shipping emails (7-365). Increase this to rescan recent history without resetting the integration. Already-forwarded shipments are not re-sent.",
+          "ollama_url": "Ollama server base URL (e.g. http://192.168.0.190:11434). Leave empty to disable AI extraction.",
+          "ollama_model": "Ollama model tag (e.g. qwen3.5:2b). Must be pulled on the Ollama server.",
+          "ollama_timeout": "Request timeout in seconds (10–300).",
+          "queue_maxlen": "Maximum number of emails queued for AI extraction (1–256)."
         }
       }
+    },
+    "error": {
+      "ollama_cannot_connect": "Cannot connect to the Ollama server. Check the URL and port, and ensure Ollama is running.",
+      "ollama_model_not_found": "Model '{missing_model}' not found on the Ollama server. Run: ollama pull {missing_model}"
+    },
+    "abort": {
+      "not_implemented": "This feature is not yet implemented. It will be available in a future Shop2Parcel update."
     }
   },
   "issues": {
