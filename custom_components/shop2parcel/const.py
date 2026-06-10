@@ -103,3 +103,16 @@ LOCKED_OLLAMA_FIELDS: tuple[str, str, str] = (
     "carrier_name",
     "order_name",
 )
+
+# Phase 17: Ollama Stage-2 options (stored in entry.options, not entry.data)
+CONF_OLLAMA_URL = "ollama_url"  # str (empty = Stage 2 disabled)
+CONF_OLLAMA_MODEL = "ollama_model"  # str
+DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
+CONF_OLLAMA_TIMEOUT = "ollama_timeout"  # int, seconds
+DEFAULT_OLLAMA_TIMEOUT = 60
+CONF_QUEUE_MAXLEN = "queue_maxlen"  # int, Phase 18 reads this
+DEFAULT_QUEUE_MAXLEN = 32
+CONF_CUSTOM_FIELDS = "custom_fields"  # list[dict]: {"name": str, "description": str | None}
+CONF_STAGE2_ENABLED = "stage2_enabled"  # bool, derived (never set by user directly)
+CONF_FIELD_NAME = "field_name"  # str, used in add/remove options steps
+CONF_FIELD_DESCRIPTION = "field_description"  # str | None

@@ -36,6 +36,7 @@ from .ollama_normalize import normalize_llm_payload
 _LOGGER = logging.getLogger(__name__)
 
 GENERATE_PATH = "/api/generate"
+TAGS_PATH = "/api/tags"
 
 # Module-level compiled fence-strip regex (R-03). Used only in Pass 2
 # of the parse pipeline (Pitfall 1) — Pass 1 normalizes the raw text
@@ -71,6 +72,42 @@ class OllamaClient:
         self._base_url = base_url.rstrip("/")  # R-04: strip trailing slash
         self._model = model
         self._timeout = timeout
+
+    @staticmethod
+    async def async_get_tags(
+        session: aiohttp.ClientSession,
+        base_url: str,
+        timeout: float,
+    ) -> list[str]:
+        """GET /api/tags and return list of available model tag names.
+
+        Never creates a new ClientSession — session is injected by caller.
+
+        Args:
+            session   — injected aiohttp.ClientSession (shared HA session).
+            base_url  — Ollama server base URL (trailing slash stripped internally).
+            timeout   — Per-request total timeout in seconds.
+
+        Returns:
+            List of model tag name strings (e.g. ["qwen3.5:2b", "llama3.1:8b"]).
+            Entries without a string ``name`` field are filtered out.
+
+        Raises:
+            OllamaTransientError: On TimeoutError, aiohttp.ClientConnectionError,
+                or any non-200 HTTP status.
+        """
+        url = f"{base_url.rstrip('/')}{TAGS_PATH}"
+        try:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status != 200:
+                    raise OllamaTransientError(f"Ollama /api/tags returned HTTP {resp.status}")
+                data = await resp.json(content_type=None)
+                return [m["name"] for m in data.get("models", []) if isinstance(m.get("name"), str)]
+        except (TimeoutError, aiohttp.ClientConnectionError) as err:
+            raise OllamaTransientError(f"Ollama /api/tags network error: {err}") from err
 
     async def async_generate(self, prompt: str, schema: dict) -> dict:
         """POST to /api/generate and return the parsed structured-output dict.

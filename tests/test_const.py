@@ -80,3 +80,58 @@ def test_locked_ollama_fields_entries_are_strings():
     """Schema builder treats them as JSON property keys — must be str."""
     for name in LOCKED_OLLAMA_FIELDS:
         assert isinstance(name, str)
+
+
+# -------- Phase 17: Ollama Stage-2 options constants (OLLM-01..03, QUE-01) --
+
+
+def test_phase17_constants():
+    """All eleven Phase 17 constants are importable with correct values."""
+    from custom_components.shop2parcel.const import (
+        CONF_CUSTOM_FIELDS,
+        CONF_FIELD_DESCRIPTION,
+        CONF_FIELD_NAME,
+        CONF_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT,
+        CONF_OLLAMA_URL,
+        CONF_QUEUE_MAXLEN,
+        CONF_STAGE2_ENABLED,
+        DEFAULT_OLLAMA_MODEL,
+        DEFAULT_OLLAMA_TIMEOUT,
+        DEFAULT_QUEUE_MAXLEN,
+    )
+
+    # String key values
+    assert CONF_OLLAMA_URL == "ollama_url"
+    assert CONF_OLLAMA_MODEL == "ollama_model"
+    assert CONF_OLLAMA_TIMEOUT == "ollama_timeout"
+    assert CONF_QUEUE_MAXLEN == "queue_maxlen"
+    assert CONF_CUSTOM_FIELDS == "custom_fields"
+    assert CONF_STAGE2_ENABLED == "stage2_enabled"
+    assert CONF_FIELD_NAME == "field_name"
+    assert CONF_FIELD_DESCRIPTION == "field_description"
+
+    # Default values
+    assert DEFAULT_OLLAMA_MODEL == "qwen3.5:2b"
+    assert DEFAULT_OLLAMA_TIMEOUT == 60
+    assert DEFAULT_QUEUE_MAXLEN == 32
+
+
+def test_phase17_no_default_stage2_enabled():
+    """D-05: CONF_STAGE2_ENABLED is a derived bool — no DEFAULT_STAGE2_ENABLED constant."""
+    import custom_components.shop2parcel.const as const_mod
+
+    assert not hasattr(const_mod, "DEFAULT_STAGE2_ENABLED")
+
+
+def test_phase17_existing_constants_unaffected():
+    """Regression: existing constants (DOMAIN, CONF_POLL_INTERVAL, LOCKED_OLLAMA_FIELDS) intact."""
+    from custom_components.shop2parcel.const import (
+        CONF_POLL_INTERVAL,
+        DOMAIN,
+        LOCKED_OLLAMA_FIELDS,
+    )
+
+    assert DOMAIN == "shop2parcel"
+    assert CONF_POLL_INTERVAL == "poll_interval"
+    assert LOCKED_OLLAMA_FIELDS == ("tracking_number", "carrier_name", "order_name")
