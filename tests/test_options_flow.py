@@ -1,4 +1,4 @@
-"""Tests for Shop2Parcel options flow — covers EMAIL-05, CFG-01/02/03, OLLM-01/02/03."""
+"""Tests for Shop2Parcel options flow — covers EMAIL-05, CFG-01/02/03, OLLM-01/02/03, FLD-01/02."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import voluptuous as vol
 
 from custom_components.shop2parcel.api.exceptions import OllamaTransientError
 from custom_components.shop2parcel.const import (
+    CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
+    CONF_FIELD_DESCRIPTION,
+    CONF_FIELD_NAME,
     CONF_GMAIL_QUERY,
     CONF_IMAP_SEARCH,
     CONF_OLLAMA_MODEL,
@@ -710,3 +713,290 @@ async def test_options_flow_persists_rescan_window(hass, mock_config_entry):
     assert result["data"][CONF_RESCAN_WINDOW_DAYS] == 90, (
         "rescan_window_days=90 must be persisted in entry.options"
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan 04: FLD-01 / FLD-02 — custom fields CRUD (Tests 1–16)
+# ---------------------------------------------------------------------------
+
+
+async def test_custom_fields_menu_empty(hass, mock_config_entry):
+    """Test 1 (RED): empty options → menu with only add_custom_field + current_fields='none'."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_custom_fields(user_input=None)
+    assert result["type"] == "menu"
+    assert result["step_id"] == "custom_fields_menu"
+    assert result["menu_options"] == ["add_custom_field"]
+    assert result["description_placeholders"]["current_fields"] == "none"
+
+
+async def test_custom_fields_menu_with_existing(hass, mock_config_entry):
+    """Test 2: one existing field → menu includes remove_custom_field + correct placeholder."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_CUSTOM_FIELDS: [{"name": "estimated_delivery", "description": "ISO 8601"}]}
+    )
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_custom_fields(user_input=None)
+    assert result["type"] == "menu"
+    assert result["menu_options"] == ["add_custom_field", "remove_custom_field"]
+    assert result["description_placeholders"]["current_fields"] == "estimated_delivery"
+
+
+async def test_add_custom_field_shows_form(hass, mock_config_entry):
+    """Test 3: async_step_add_custom_field(None) returns form at step_id='add_custom_field'."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "add_custom_field"
+    schema_keys = [str(k) for k in result["data_schema"].schema]
+    assert CONF_FIELD_NAME in schema_keys
+    assert CONF_FIELD_DESCRIPTION in schema_keys
+
+
+async def test_add_custom_field_happy_path(hass, mock_config_entry):
+    """Test 4 (FLD-02 happy path): valid name + description → create_entry with field stored."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "estimated_delivery", CONF_FIELD_DESCRIPTION: "ISO 8601 date"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_CUSTOM_FIELDS] == [
+        {"name": "estimated_delivery", "description": "ISO 8601 date"}
+    ]
+
+
+async def test_add_custom_field_appends_to_existing(hass, mock_config_entry):
+    """Test 5 (FLD-02 append): adding to existing list preserves prior entry + appends new."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_CUSTOM_FIELDS: [{"name": "estimated_delivery", "description": None}]}
+    )
+    user_input = {CONF_FIELD_NAME: "shipping_method"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_CUSTOM_FIELDS] == [
+        {"name": "estimated_delivery", "description": None},
+        {"name": "shipping_method", "description": None},
+    ]
+
+
+async def test_add_custom_field_empty_description_normalized_to_none(hass, mock_config_entry):
+    """Test 6 (FLD-02 empty description → None): '' is stored as None, not empty string."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "shipping_method", CONF_FIELD_DESCRIPTION: ""}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "create_entry"
+    stored = result["data"][CONF_CUSTOM_FIELDS][0]
+    assert stored == {"name": "shipping_method", "description": None}
+    assert stored["description"] is None, "Empty description must be stored as None, not ''"
+
+
+async def test_add_custom_field_absent_description_normalized_to_none(hass, mock_config_entry):
+    """Test 7 (FLD-02 missing description key → None): omitting key stores description=None."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "shipping_method"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "create_entry"
+    stored = result["data"][CONF_CUSTOM_FIELDS][0]
+    assert stored["description"] is None
+
+
+async def test_add_custom_field_locked_tracking_number(hass, mock_config_entry):
+    """Test 8 (FLD-01): 'tracking_number' rejected with field-scoped locked_field_collision."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "tracking_number"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"][CONF_FIELD_NAME] == "locked_field_collision"
+    # Entry must NOT have been updated
+    assert CONF_CUSTOM_FIELDS not in fake_entry.options
+
+
+async def test_add_custom_field_locked_carrier_name(hass, mock_config_entry):
+    """Test 8b (FLD-01): 'carrier_name' rejected with locked_field_collision."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "carrier_name"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"][CONF_FIELD_NAME] == "locked_field_collision"
+
+
+async def test_add_custom_field_locked_order_name(hass, mock_config_entry):
+    """Test 8c (FLD-01): 'order_name' rejected with locked_field_collision."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "order_name"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"][CONF_FIELD_NAME] == "locked_field_collision"
+
+
+async def test_add_custom_field_invalid_uppercase(hass, mock_config_entry):
+    """Test 9 (FLD-02 invalid — uppercase): 'Foo' rejected with invalid_field_name."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "Foo"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"][CONF_FIELD_NAME] == "invalid_field_name"
+
+
+async def test_add_custom_field_invalid_space(hass, mock_config_entry):
+    """Test 10 (FLD-02 invalid — space): 'foo bar' rejected with invalid_field_name."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "foo bar"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"][CONF_FIELD_NAME] == "invalid_field_name"
+
+
+async def test_add_custom_field_invalid_leading_digit(hass, mock_config_entry):
+    """Test 11 (FLD-02 invalid — leading digit): '1foo' rejected with invalid_field_name."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "1foo"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"][CONF_FIELD_NAME] == "invalid_field_name"
+
+
+async def test_add_custom_field_invalid_too_long(hass, mock_config_entry):
+    """Test 12 (FLD-02 invalid — too long): 33-char name rejected with invalid_field_name."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    # 33 chars: starts with letter, rest lowercase — too long for _FIELD_NAME_RE {0,31} = max 32
+    long_name = "a" + "b" * 32  # 33 chars total
+    user_input = {CONF_FIELD_NAME: long_name}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"][CONF_FIELD_NAME] == "invalid_field_name"
+
+
+async def test_remove_custom_field_shows_selector(hass, mock_config_entry):
+    """Test 13: remove step shows vol.In selector with existing field names."""
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_CUSTOM_FIELDS: [
+                {"name": "estimated_delivery", "description": None},
+                {"name": "shipping_method", "description": None},
+            ]
+        }
+    )
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_remove_custom_field(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "remove_custom_field"
+    # The schema's CONF_FIELD_NAME validator must be vol.In containing both names
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    assert CONF_FIELD_NAME in schema_dict
+    # vol.In validator: both names must be acceptable, others must not
+    schema({CONF_FIELD_NAME: "estimated_delivery"})
+    schema({CONF_FIELD_NAME: "shipping_method"})
+    with pytest.raises(vol.Invalid):
+        schema({CONF_FIELD_NAME: "nonexistent_field"})
+
+
+async def test_remove_custom_field_happy_path(hass, mock_config_entry):
+    """Test 14 (FLD-02 remove): removing 'estimated_delivery' leaves only 'shipping_method'."""
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_CUSTOM_FIELDS: [
+                {"name": "estimated_delivery", "description": None},
+                {"name": "shipping_method", "description": None},
+            ]
+        }
+    )
+    user_input = {CONF_FIELD_NAME: "estimated_delivery"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_remove_custom_field(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_CUSTOM_FIELDS] == [
+        {"name": "shipping_method", "description": None}
+    ]
+
+
+async def test_add_custom_field_stateless_across_calls(hass, mock_config_entry):
+    """Test 15 (Pitfall 2): two consecutive add calls each read options fresh — no shared state."""
+    # First call: start from one field
+    handler1, fake_entry1 = _make_handler_with_options(
+        options={CONF_CUSTOM_FIELDS: [{"name": "estimated_delivery", "description": None}]}
+    )
+    user_input1 = {CONF_FIELD_NAME: "shipping_method"}
+    with patch.object(
+        type(handler1), "config_entry", new_callable=PropertyMock, return_value=fake_entry1
+    ):
+        result1 = await handler1.async_step_add_custom_field(user_input=user_input1)
+    assert result1["type"] == "create_entry"
+    fields1 = result1["data"][CONF_CUSTOM_FIELDS]
+    assert len(fields1) == 2
+    assert {"name": "estimated_delivery", "description": None} in fields1
+    assert {"name": "shipping_method", "description": None} in fields1
+
+    # Second call: independent handler from same starting options — result must also have 2 fields
+    handler2, fake_entry2 = _make_handler_with_options(
+        options={CONF_CUSTOM_FIELDS: [{"name": "estimated_delivery", "description": None}]}
+    )
+    user_input2 = {CONF_FIELD_NAME: "carrier_code"}
+    with patch.object(
+        type(handler2), "config_entry", new_callable=PropertyMock, return_value=fake_entry2
+    ):
+        result2 = await handler2.async_step_add_custom_field(user_input=user_input2)
+    assert result2["type"] == "create_entry"
+    fields2 = result2["data"][CONF_CUSTOM_FIELDS]
+    assert len(fields2) == 2
+    assert {"name": "estimated_delivery", "description": None} in fields2
+    assert {"name": "carrier_code", "description": None} in fields2
+
+
+async def test_add_custom_field_locked_collision_is_field_scoped(hass, mock_config_entry):
+    """Test 16 (FLD-01): locked-name collision sets errors[CONF_FIELD_NAME], NOT errors['base']."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {CONF_FIELD_NAME: "tracking_number"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_custom_field(user_input=user_input)
+    assert result["type"] == "form"
+    assert CONF_FIELD_NAME in result["errors"], "Error must be field-scoped to CONF_FIELD_NAME"
+    assert "base" not in result["errors"], "Error must NOT be on 'base' (must be field-scoped)"
+    assert result["errors"][CONF_FIELD_NAME] == "locked_field_collision"
