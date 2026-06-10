@@ -52,7 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # which requires google/googleapiclient stubs to be in sys.modules. Deferring to
     # function scope ensures the test harness (conftest.py) has registered the mocks
     # before this import runs. At production runtime there is no difference.
-    from .const import CONF_CONNECTION_TYPE, CONNECTION_TYPE_IMAP  # noqa: PLC0415
+    from .const import CONF_CONNECTION_TYPE, CONF_OLLAMA_URL, CONNECTION_TYPE_IMAP  # noqa: PLC0415
     from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
     from .gmail_coordinator import GmailCoordinator  # noqa: PLC0415
     from .imap_coordinator import ImapCoordinator  # noqa: PLC0415
@@ -64,6 +64,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         coordinator = GmailCoordinator(hass, entry)
     await coordinator._async_load_store()
+    # Phase 17 D-05: derive stage2_enabled before first poll.
+    # bool() coerces any non-empty URL string to True without exposing the URL value.
+    # Empty string fallback prevents AttributeError on v1.2 entries with no ollama_url key.
+    coordinator._diagnostics.stage2_enabled = bool(entry.options.get(CONF_OLLAMA_URL, ""))
     await coordinator.async_config_entry_first_refresh()
 
     # Phase 5 D-08: schedule once-daily delivered-shipment cleanup.
