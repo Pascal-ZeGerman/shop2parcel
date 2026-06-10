@@ -67,11 +67,14 @@ def test_strings_error_keys(strings):
     assert "{missing_model}" in errors["ollama_model_not_found"]
 
 
-def test_strings_abort_not_implemented(strings):
-    """Test 5: options.abort.not_implemented exists and is non-empty."""
-    abort = strings["options"]["abort"]
-    assert "not_implemented" in abort
-    assert len(abort["not_implemented"]) > 0
+def test_strings_abort_not_implemented_removed(strings):
+    """Test 5 (updated by Plan 04): options.abort.not_implemented is no longer present."""
+    # Plan 03 added this key for the stub; Plan 04 replaces the stub with real CRUD,
+    # so the abort key is no longer reachable and must be removed.
+    abort = strings["options"].get("abort", {})
+    assert "not_implemented" not in abort, (
+        "options.abort.not_implemented must be removed — the stub was replaced by real CRUD"
+    )
 
 
 def test_strings_en_json_identical():
@@ -92,3 +95,85 @@ def test_strings_init_only_menu_options(strings):
     assert set(init_step.keys()) == {"menu_options"}, (
         f"options.step.init must have ONLY 'menu_options', got: {sorted(init_step.keys())}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan 04 translation tests: FLD-01/FLD-02 custom-fields step blocks + error keys
+# ---------------------------------------------------------------------------
+
+
+def test_custom_fields_menu_keys(strings):
+    """Plan 04 Test 1 (RED): custom_fields_menu.menu_options has add + remove keys."""
+    menu_opts = strings["options"]["step"]["custom_fields_menu"]["menu_options"]
+    assert "add_custom_field" in menu_opts
+    assert menu_opts["add_custom_field"] == "Add custom field"
+    assert "remove_custom_field" in menu_opts
+    assert menu_opts["remove_custom_field"] == "Remove custom field"
+
+
+def test_custom_fields_menu_description_placeholder(strings):
+    """Plan 04 Test 2: custom_fields_menu.description contains {current_fields} placeholder."""
+    desc = strings["options"]["step"]["custom_fields_menu"]["description"]
+    assert "{current_fields}" in desc, (
+        f"custom_fields_menu.description must contain '{{current_fields}}', got: {desc!r}"
+    )
+
+
+def test_add_custom_field_data_keys(strings):
+    """Plan 04 Test 3: add_custom_field.data has field_name and field_description with descriptions."""
+    step = strings["options"]["step"]["add_custom_field"]
+    assert "field_name" in step["data"]
+    assert len(step["data"]["field_name"]) > 0
+    assert "field_description" in step["data"]
+    assert len(step["data"]["field_description"]) > 0
+    assert "field_name" in step["data_description"]
+    assert len(step["data_description"]["field_name"]) > 0
+    assert "field_description" in step["data_description"]
+    assert len(step["data_description"]["field_description"]) > 0
+
+
+def test_remove_custom_field_data_key(strings):
+    """Plan 04 Test 4: remove_custom_field.data.field_name is present and non-empty."""
+    step = strings["options"]["step"]["remove_custom_field"]
+    assert "field_name" in step["data"]
+    assert len(step["data"]["field_name"]) > 0
+
+
+def test_new_error_keys_present(strings):
+    """Plan 04 Test 5: options.error has invalid_field_name + locked_field_collision (4 total)."""
+    errors = strings["options"]["error"]
+    assert "invalid_field_name" in errors
+    assert len(errors["invalid_field_name"]) > 0
+    assert "locked_field_collision" in errors
+    assert len(errors["locked_field_collision"]) > 0
+    # Combined with Plan 03 keys — 4 total
+    assert len(errors) == 4, f"Expected 4 error keys total, got {sorted(errors.keys())}"
+
+
+def test_not_implemented_abort_absent(strings):
+    """Plan 04 Test 6: options.abort.not_implemented is absent (stub removed)."""
+    abort = strings["options"].get("abort", {})
+    assert "not_implemented" not in abort
+
+
+def test_en_json_identical_to_strings():
+    """Plan 04 Test 7 (sync rule): translations/en.json is byte-identical to strings.json."""
+    result = subprocess.run(
+        ["cmp", "-s", str(_STRINGS), str(_EN)],
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        "strings.json and translations/en.json are NOT identical after Plan 04 edit"
+    )
+
+
+def test_plan03_keys_preserved(strings):
+    """Plan 04 Test 8 (regression): Plan 03 keys still present after Plan 04 edit."""
+    opts = strings["options"]["step"]["init"]["menu_options"]
+    assert "settings" in opts
+    assert "custom_fields" in opts
+    settings = strings["options"]["step"]["settings"]
+    assert settings["title"] == "Shop2Parcel Settings"
+    errors = strings["options"]["error"]
+    assert "ollama_cannot_connect" in errors
+    assert "ollama_model_not_found" in errors
