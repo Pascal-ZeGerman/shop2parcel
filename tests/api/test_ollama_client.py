@@ -31,6 +31,7 @@ from custom_components.shop2parcel.api.ollama_client import (
 
 BASE_URL = "http://localhost:11434"
 GENERATE_URL = f"{BASE_URL}{GENERATE_PATH}"
+TAGS_URL = f"{BASE_URL}/api/tags"
 
 
 # ---------------------------------------------------------------------------
@@ -363,3 +364,58 @@ async def test_async_generate_backward_compat(client):
         "carrier_name": "ups",
         "order_name": "#1001",
     }
+
+
+# ---------------------------------------------------------------------------
+# async_get_tags — Phase 17 (D-04, CFG-01)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_get_tags_happy_path(session):
+    """200 with models list → returns list[str] of tag names (happy path)."""
+    payload = {"models": [{"name": "qwen3.5:2b"}, {"name": "llama3.1:8b"}]}
+    with aioresponses() as mock:
+        mock.get(TAGS_URL, payload=payload, status=200)
+        result = await OllamaClient.async_get_tags(session, BASE_URL, 30.0)
+    assert result == ["qwen3.5:2b", "llama3.1:8b"]
+
+
+async def test_async_get_tags_connection_error(session):
+    """aiohttp.ClientConnectionError → OllamaTransientError with 'network error'."""
+    with aioresponses() as mock:
+        mock.get(TAGS_URL, exception=aiohttp.ClientConnectionError("refused"))
+        with pytest.raises(OllamaTransientError, match="network error"):
+            await OllamaClient.async_get_tags(session, BASE_URL, 30.0)
+
+
+async def test_async_get_tags_non_200_status(session):
+    """non-200 status (500) → OllamaTransientError with 'HTTP 500'."""
+    with aioresponses() as mock:
+        mock.get(TAGS_URL, status=500, payload={})
+        with pytest.raises(OllamaTransientError, match="HTTP 500"):
+            await OllamaClient.async_get_tags(session, BASE_URL, 30.0)
+
+
+async def test_async_get_tags_trailing_slash_trimmed(session):
+    """Trailing slash in base_url is stripped before composing the request URL."""
+    payload = {"models": [{"name": "qwen3.5:2b"}]}
+    with aioresponses() as mock:
+        # TAGS_URL uses the clean BASE_URL — the trailing-slash variant must hit the same URL
+        mock.get(TAGS_URL, payload=payload, status=200)
+        result = await OllamaClient.async_get_tags(session, BASE_URL + "/", 30.0)
+    assert result == ["qwen3.5:2b"]
+
+
+async def test_async_get_tags_malformed_name_entry_skipped(session):
+    """Entries without a string 'name' are filtered out; only string names returned."""
+    payload = {
+        "models": [
+            {"name": "qwen3.5:2b"},
+            {"model": "llama3.1:8b"},  # missing 'name' key
+            {"name": 42},  # non-string 'name'
+        ]
+    }
+    with aioresponses() as mock:
+        mock.get(TAGS_URL, payload=payload, status=200)
+        result = await OllamaClient.async_get_tags(session, BASE_URL, 30.0)
+    assert result == ["qwen3.5:2b"]
