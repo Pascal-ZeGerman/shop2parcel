@@ -76,12 +76,16 @@ async def test_dbg01_gmail_toggle(hass):
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
     ):
-        result_true = await handler.async_step_init(
+        result_true = await handler.async_step_settings(
             user_input={
                 CONF_POLL_INTERVAL: 30,
                 CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_DEBUG_MODE: True,
+                "ollama_url": "",
+                "ollama_model": "qwen3.5:2b",
+                "ollama_timeout": 60,
+                "queue_maxlen": 32,
             }
         )
     assert result_true["type"] == "create_entry"
@@ -96,12 +100,16 @@ async def test_dbg01_gmail_toggle(hass):
     with patch.object(
         type(handler2), "config_entry", new_callable=PropertyMock, return_value=fake_entry2
     ):
-        result_false = await handler2.async_step_init(
+        result_false = await handler2.async_step_settings(
             user_input={
                 CONF_POLL_INTERVAL: 30,
                 CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_DEBUG_MODE: False,
+                "ollama_url": "",
+                "ollama_model": "qwen3.5:2b",
+                "ollama_timeout": 60,
+                "queue_maxlen": 32,
             }
         )
     assert result_false["type"] == "create_entry"
@@ -118,11 +126,15 @@ async def test_dbg01_imap_toggle(hass):
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
     ):
-        result = await handler.async_step_init(
+        result = await handler.async_step_settings(
             user_input={
                 CONF_POLL_INTERVAL: 30,
                 CONF_IMAP_SEARCH: "SUBJECT shipped",
                 CONF_DEBUG_MODE: True,
+                "ollama_url": "",
+                "ollama_model": "qwen3.5:2b",
+                "ollama_timeout": 60,
+                "queue_maxlen": 32,
             }
         )
     assert result["type"] == "create_entry"
