@@ -118,11 +118,14 @@ async def test_settings_empty_ollama_url_skips_tags_call(hass, mock_config_entry
         CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
         CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
     }
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ), patch(
-        "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
-    ) as mock_tags:
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+        ) as mock_tags,
+    ):
         result = await handler.async_step_settings(user_input=user_input)
     assert mock_tags.call_count == 0, "async_get_tags must NOT be called when url is empty"
     assert result["type"] == "create_entry"
@@ -142,14 +145,18 @@ async def test_settings_unreachable_ollama_url(hass, mock_config_entry):
         CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
         CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
     }
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ), patch(
-        "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
-        side_effect=OllamaTransientError("connection refused"),
-    ), patch(
-        "custom_components.shop2parcel.options_flow.async_get_clientsession",
-        return_value=MagicMock(),
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            side_effect=OllamaTransientError("connection refused"),
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
     ):
         result = await handler.async_step_settings(user_input=user_input)
     assert result["type"] == "form"
@@ -169,14 +176,18 @@ async def test_settings_model_not_found(hass, mock_config_entry):
         CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
         CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
     }
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ), patch(
-        "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
-        return_value=["llama3.1:8b"],
-    ), patch(
-        "custom_components.shop2parcel.options_flow.async_get_clientsession",
-        return_value=MagicMock(),
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["llama3.1:8b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
     ):
         result = await handler.async_step_settings(user_input=user_input)
     assert result["type"] == "form"
@@ -197,14 +208,18 @@ async def test_settings_happy_path(hass, mock_config_entry):
         CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
         CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
     }
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ), patch(
-        "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
-        return_value=["qwen3.5:2b"],
-    ), patch(
-        "custom_components.shop2parcel.options_flow.async_get_clientsession",
-        return_value=MagicMock(),
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["qwen3.5:2b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
     ):
         result = await handler.async_step_settings(user_input=user_input)
     assert result["type"] == "create_entry"
@@ -361,17 +376,20 @@ async def test_settings_uses_shared_session(hass, mock_config_entry):
         CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
         CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
     }
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ), patch.object(
-        type(handler), "hass", new_callable=PropertyMock, return_value=hass
-    ), patch(
-        "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
-        return_value=["qwen3.5:2b"],
-    ) as _mock_tags, patch(
-        "custom_components.shop2parcel.options_flow.async_get_clientsession",
-        return_value=MagicMock(),
-    ) as mock_session:
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["qwen3.5:2b"],
+        ) as _mock_tags,
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ) as mock_session,
+    ):
         result = await handler.async_step_settings(user_input=user_input)
     assert mock_session.call_count == 1, "async_get_clientsession must be called once"
     assert mock_session.call_args[0][0] is hass
