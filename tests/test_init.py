@@ -216,3 +216,161 @@ async def test_unload_entry_cancels_cleanup_task(hass, mock_config_entry):
         cancel_cb.assert_not_called()  # Setup does NOT call cancel
         await hass.config_entries.async_unload(mock_config_entry.entry_id)
     cancel_cb.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 D-05: stage2_enabled diagnostic flag
+# ---------------------------------------------------------------------------
+
+
+def test_stage2_enabled_pollstats_default():
+    """D-05 / Test 5: PollStats().stage2_enabled defaults to False.
+
+    This is a pure dataclass default — no coordinator setup needed.
+    """
+    from custom_components.shop2parcel.coordinator import PollStats
+
+    stats = PollStats()
+    assert stats.stage2_enabled is False
+
+
+async def test_stage2_enabled_false_when_options_empty(hass, mock_config_entry):
+    """D-05 / Test 1: empty entry.options (no ollama_url key) → stage2_enabled is False after setup.
+
+    Covers the v1.2 backward-compat case: entries created before Phase 17 have
+    no ollama_url in their options dict.  The integration must load without raising
+    and expose stage2_enabled=False via coordinator.diagnostics.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        result = await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    assert result is True
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+    assert coordinator.diagnostics.stage2_enabled is False
+
+
+async def test_stage2_enabled_true_when_ollama_url_set(hass):
+    """D-05 / Test 2: entry.options == {"ollama_url": "http://10.0.0.5:11434"} → stage2_enabled True.
+
+    Covers the v1.3 case where the user has configured an Ollama server URL.
+    """
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "auth_implementation": DOMAIN,
+            "token": {
+                "access_token": "fake-access-token",
+                "refresh_token": "fake-refresh-token",
+                "expires_at": 9999999999.0,
+                "token_type": "Bearer",
+                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+            },
+            "api_key": "test-parcelapp-key",
+        },
+        options={"ollama_url": "http://10.0.0.5:11434"},
+        unique_id="ollama_user@gmail.com",
+    )
+    entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        result = await hass.config_entries.async_setup(entry.entry_id)
+    assert result is True
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    assert coordinator.diagnostics.stage2_enabled is True
+
+
+async def test_stage2_enabled_false_when_ollama_url_empty_string(hass):
+    """D-05 / Test 3: entry.options == {"ollama_url": ""} (explicit empty) → stage2_enabled False.
+
+    An explicit empty string must behave identically to the missing-key case.
+    """
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "auth_implementation": DOMAIN,
+            "token": {
+                "access_token": "fake-access-token",
+                "refresh_token": "fake-refresh-token",
+                "expires_at": 9999999999.0,
+                "token_type": "Bearer",
+                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+            },
+            "api_key": "test-parcelapp-key",
+        },
+        options={"ollama_url": ""},
+        unique_id="emptyurl_user@gmail.com",
+    )
+    entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        result = await hass.config_entries.async_setup(entry.entry_id)
+    assert result is True
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    assert coordinator.diagnostics.stage2_enabled is False
+
+
+async def test_stage2_v12_entry_no_ollama_url_loads_without_exception(hass, mock_config_entry):
+    """D-05 / Test 4 (no-regression): v1.2-shaped entry with no ollama_url loads without raising.
+
+    This is the CFG-04 backward-compat requirement: an entry created before Phase 17
+    must continue to boot Stage-1-only without any crash or exception.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        # Must not raise
+        result = await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    assert result is True

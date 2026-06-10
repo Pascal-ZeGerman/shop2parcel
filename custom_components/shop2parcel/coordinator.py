@@ -182,6 +182,8 @@ class PollStats:
     # ^ Cumulative count since HA restart. Intentionally NOT bounded by scan_events.maxlen.
     # After >50 events: scan_events_total > len(scan_events). This is correct —
     # scan_events_total is "all events ever" while scan_events is "most recent 50".
+    stage2_enabled: bool = False
+    # Phase 17 D-05: derived at async_setup_entry time; False until Ollama URL is set.
 
 
 class Shop2ParcelStore(Store):

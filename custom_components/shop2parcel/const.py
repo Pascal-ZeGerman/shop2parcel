@@ -104,15 +104,20 @@ LOCKED_OLLAMA_FIELDS: tuple[str, str, str] = (
     "order_name",
 )
 
-# Phase 17: Ollama Stage-2 options (stored in entry.options, not entry.data)
-CONF_OLLAMA_URL = "ollama_url"  # str (empty = Stage 2 disabled)
-CONF_OLLAMA_MODEL = "ollama_model"  # str
+# Phase 17: Ollama Stage-2 configuration constants.
+# CONF_OLLAMA_URL: user-supplied Ollama server base URL (required for Stage 2;
+#   empty/absent → Stage-1-only path; no default — hardcoding localhost is unsafe
+#   because Pi-on-Pi co-located Docker is only one of several network topologies).
+CONF_OLLAMA_URL = "ollama_url"
+CONF_OLLAMA_MODEL = "ollama_model"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
-CONF_OLLAMA_TIMEOUT = "ollama_timeout"  # int, seconds
-DEFAULT_OLLAMA_TIMEOUT = 60
-CONF_QUEUE_MAXLEN = "queue_maxlen"  # int, Phase 18 reads this
+CONF_OLLAMA_TIMEOUT = "ollama_timeout"
+DEFAULT_OLLAMA_TIMEOUT = 60  # seconds
+CONF_QUEUE_MAXLEN = "queue_maxlen"
 DEFAULT_QUEUE_MAXLEN = 32
 CONF_CUSTOM_FIELDS = "custom_fields"  # list[dict]: {"name": str, "description": str | None}
-CONF_STAGE2_ENABLED = "stage2_enabled"  # bool, derived (never set by user directly)
+# CONF_STAGE2_ENABLED: derived boolean; set in async_setup_entry from CONF_OLLAMA_URL presence.
+# Never exposed as a user-editable form field (D-05, T-17-02-03).
+CONF_STAGE2_ENABLED = "stage2_enabled"
 CONF_FIELD_NAME = "field_name"  # str, used in add/remove options steps
 CONF_FIELD_DESCRIPTION = "field_description"  # str | None

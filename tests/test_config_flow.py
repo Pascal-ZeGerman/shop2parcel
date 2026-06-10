@@ -73,8 +73,11 @@ class _FakeAbstractOAuth2FlowHandler:
             "errors": errors or {},
         }
 
-    def async_create_entry(self, *, title, data):
-        return {"type": "create_entry", "title": title, "data": data}
+    def async_create_entry(self, *, title, data, options=None):
+        result = {"type": "create_entry", "title": title, "data": data}
+        if options is not None:
+            result["options"] = options
+        return result
 
     def async_update_reload_and_abort(self, entry, *, data=None, data_updates=None):
         return {"type": "abort", "reason": "reauth_successful"}
@@ -621,3 +624,63 @@ async def test_async_step_imap_transient_error_shows_cannot_connect():
 
     assert result["type"] == "form"
     assert result["errors"]["base"] == "imap_cannot_connect"
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 CFG-04: async_step_finish seeds options={stage2_enabled: False}
+# ---------------------------------------------------------------------------
+
+
+async def test_finish_seeds_stage2_enabled_false():
+    """CFG-04 / Test 1: async_step_finish success path → options == {"stage2_enabled": False}.
+
+    New entries created via the config flow must seed stage2_enabled=False in
+    options so the backward-compat detection in async_setup_entry is consistent
+    even before the user opens the options flow.
+    """
+    handler = _make_handler()
+    handler._data = dict(FAKE_TOKEN_DATA)
+    handler._title = "Shop2Parcel (user@gmail.com)"
+
+    mock_client = AsyncMock()
+    mock_client.async_get_deliveries = AsyncMock(return_value=[])
+
+    mock_session = MagicMock()
+    _mock_ha_aiohttp_client.async_get_clientsession = MagicMock(return_value=mock_session)
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ParcelAppClient",
+        return_value=mock_client,
+    ):
+        result = await handler.async_step_finish(
+            user_input={"api_key": "valid-key-999", "name": "My Shop2Parcel"}
+        )
+
+    assert result["type"] == "create_entry"
+    assert result["options"] == {"stage2_enabled": False}
+
+
+async def test_finish_seeds_stage2_enabled_auth_error_unchanged():
+    """CFG-04 / Test 2: auth error path does NOT create an entry; options kwarg not surfaced.
+
+    The new options= kwarg must not affect error-path behavior — form is re-shown
+    with errors["base"] == "invalid_api_key" and no entry is created.
+    """
+    handler = _make_handler()
+
+    mock_client = AsyncMock()
+    mock_client.async_get_deliveries = AsyncMock(side_effect=ParcelAppAuthError("bad key"))
+
+    mock_session = MagicMock()
+    _mock_ha_aiohttp_client.async_get_clientsession = MagicMock(return_value=mock_session)
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ParcelAppClient",
+        return_value=mock_client,
+    ):
+        result = await handler.async_step_finish(user_input={"api_key": "bad-key", "name": "Test"})
+
+    # Form re-shown, no entry created, no options key
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "invalid_api_key"
+    assert "options" not in result
