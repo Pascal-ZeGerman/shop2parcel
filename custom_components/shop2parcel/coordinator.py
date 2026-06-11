@@ -11,10 +11,12 @@ Locked decisions (CONTEXT.md):
 - D-04: Store schema {"submitted_tracking_numbers": [...], "quota_exhausted_until": int | None, "persisted_shipments": {msg_id: ShipmentData-as-dict}}.
 - D-05: Quota exhausted -> polls continue, POST step skipped.
 - D-06: quota_exhausted_until = err.reset_at OR next_midnight_utc().
+- Phase 18: Stage2Job frozen dataclass + async_start_stage2/async_stop_stage2/_enqueue_stage2 base methods (QUE-01, QUE-03, QUE-06).
 """
 
 from __future__ import annotations
 
+import asyncio
 import email as _email_stdlib
 import logging
 import re
@@ -42,7 +44,9 @@ from .const import (
     CONF_API_KEY,
     CONF_DEBUG_MODE,
     CONF_POLL_INTERVAL,
+    CONF_QUEUE_MAXLEN,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
 )
 
@@ -138,6 +142,21 @@ def _sanitise_parser_error(err: BaseException) -> str:
     sanitised = re.sub(r"<[^>]*>", "", str(err))
     sanitised = re.sub(r"\s+", " ", sanitised).strip()
     return sanitised[:100]
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2Job:
+    """Immutable payload for Stage-2 queue items.
+
+    storage_key: normalized tracking number (dedup key — mirrors _submitted_tracking_numbers).
+        Per D-02: this is the normalized tracking number, NOT the composite coordinator.data key.
+    shipment: Stage-1 ShipmentData for this email.
+    html_body: raw HTML body for Ollama prompt construction (Phase 19 worker reads this).
+    """
+
+    storage_key: str
+    shipment: ShipmentData
+    html_body: str
 
 
 @dataclass(slots=True)
@@ -330,6 +349,41 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             event.update(extra)
         d.scan_events.append(event)
         d.scan_events_total += 1
+
+    async def async_start_stage2(self) -> None:
+        """Construct the Stage-2 queue. Called from async_setup_entry when stage2_enabled=True.
+
+        QUE-01: reads CONF_QUEUE_MAXLEN from config entry options, clamps to [1, 256],
+        constructs self._stage2_queue and self._stage2_enqueued_keys.
+        """
+        raise NotImplementedError("RED — implement in Task 1")
+
+    async def async_stop_stage2(self) -> None:
+        """Drain and discard the Stage-2 queue. Registered via entry.async_on_unload.
+
+        QUE-01 lifecycle: drains queue via get_nowait loop, replaces with empty queue,
+        clears _stage2_enqueued_keys so reloads do not carry stale in-flight keys.
+        """
+        raise NotImplementedError("RED — implement in Task 1")
+
+    def _enqueue_stage2(
+        self,
+        normalized_tn: str,
+        storage_key: str,
+        shipment: ShipmentData,
+        html_body: str,
+        *,
+        message_id: str,
+        meta: dict,
+    ) -> None:
+        """Enqueue a Stage-2 job with in-flight dedup and drop-newest backpressure.
+
+        QUE-06: skips silently if normalized_tn already in _stage2_enqueued_keys.
+        QUE-03: on QueueFull, logs warning + emits stage2_dropped_backpressure event,
+                does NOT write to _submitted_tracking_numbers.
+        Uses put_nowait (never await put) per QUE-07.
+        """
+        raise NotImplementedError("RED — implement in Task 1")
 
     async def _async_load_store(self) -> None:
         """Hydrate dedup, quota, and persisted shipments state from Store.
