@@ -373,7 +373,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._stage2_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        self._stage2_queue = asyncio.Queue()  # empty replacement — avoids AttributeError on next access
+        self._stage2_queue = (
+            asyncio.Queue()
+        )  # empty replacement — avoids AttributeError on next access
         self._stage2_enqueued_keys.clear()
         _LOGGER.debug("Stage-2 queue stopped and cleared")
 
