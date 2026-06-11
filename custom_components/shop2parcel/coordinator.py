@@ -356,7 +356,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         QUE-01: reads CONF_QUEUE_MAXLEN from config entry options, clamps to [1, 256],
         constructs self._stage2_queue and self._stage2_enqueued_keys.
         """
-        raise NotImplementedError("RED — implement in Task 1")
+        raw = self.config_entry.options.get(CONF_QUEUE_MAXLEN, DEFAULT_QUEUE_MAXLEN)
+        maxlen = max(1, min(256, int(raw)))
+        self._stage2_queue: asyncio.Queue[Stage2Job] = asyncio.Queue(maxsize=maxlen)
+        self._stage2_enqueued_keys: set[str] = set()
+        _LOGGER.debug("Stage-2 queue constructed with maxsize=%d", maxlen)
 
     async def async_stop_stage2(self) -> None:
         """Drain and discard the Stage-2 queue. Registered via entry.async_on_unload.
@@ -364,7 +368,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         QUE-01 lifecycle: drains queue via get_nowait loop, replaces with empty queue,
         clears _stage2_enqueued_keys so reloads do not carry stale in-flight keys.
         """
-        raise NotImplementedError("RED — implement in Task 1")
+        while not self._stage2_queue.empty():
+            try:
+                self._stage2_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self._stage2_queue = asyncio.Queue()  # empty replacement — avoids AttributeError on next access
+        self._stage2_enqueued_keys.clear()
+        _LOGGER.debug("Stage-2 queue stopped and cleared")
 
     def _enqueue_stage2(
         self,
@@ -382,8 +393,30 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         QUE-03: on QueueFull, logs warning + emits stage2_dropped_backpressure event,
                 does NOT write to _submitted_tracking_numbers.
         Uses put_nowait (never await put) per QUE-07.
+
+        The add to _stage2_enqueued_keys happens ONLY after successful put_nowait
+        (Anti-Patterns §3) — if put_nowait raises QueueFull, the key is NOT added.
         """
-        raise NotImplementedError("RED — implement in Task 1")
+        if normalized_tn in self._stage2_enqueued_keys:
+            return  # silent skip — already in flight (QUE-06)
+        job = Stage2Job(storage_key=storage_key, shipment=shipment, html_body=html_body)
+        try:
+            self._stage2_queue.put_nowait(job)
+        except asyncio.QueueFull:
+            _LOGGER.warning(
+                "Stage-2 queue full (%d/%d); dropping %s — will retry next poll",
+                self._stage2_queue.qsize(),
+                self._stage2_queue.maxsize,
+                normalized_tn,
+            )
+            self._emit_scan_event(
+                message_id=message_id,
+                meta=meta,
+                outcome="stage2_dropped_backpressure",
+                tracking_number=normalized_tn,
+            )
+            return  # NO dedup write (QUE-03), NO add to enqueued_keys
+        self._stage2_enqueued_keys.add(normalized_tn)  # add AFTER successful put (Anti-Patterns §3)
 
     async def _async_load_store(self) -> None:
         """Hydrate dedup, quota, and persisted shipments state from Store.
