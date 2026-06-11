@@ -217,7 +217,12 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                         errors["base"] = "ollama_model_not_found"
                         description_placeholders["missing_model"] = model
             if not errors:
-                return self.async_create_entry(title="", data=user_input)
+                # Strip whitespace from URL before persisting (WR-01).
+                user_input[CONF_OLLAMA_URL] = user_input.get(CONF_OLLAMA_URL, "").strip()
+                # Merge with existing options so CONF_CUSTOM_FIELDS is preserved (CR-01).
+                new_options = dict(self.config_entry.options)
+                new_options.update(user_input)
+                return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
             step_id="settings",
@@ -242,7 +247,7 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             "current_fields": ", ".join(f["name"] for f in existing) or "none",
         }
         return self.async_show_menu(
-            step_id="custom_fields_menu",
+            step_id="custom_fields",
             menu_options=menu_options,
             description_placeholders=description_placeholders,
         )
@@ -298,6 +303,15 @@ class OptionsFlowHandler(OptionsFlowWithReload):
 
         if user_input is not None:
             name = user_input.get(CONF_FIELD_NAME)
+            # Server-side guard: reject unknown names that bypass the vol.In UI check (WR-02).
+            if name not in existing_names:
+                return self.async_show_form(
+                    step_id="remove_custom_field",
+                    data_schema=vol.Schema(
+                        {vol.Required(CONF_FIELD_NAME): vol.In(existing_names)}
+                    ),
+                    errors={"base": "invalid_field_name"},
+                )
             new_options = dict(self.config_entry.options)
             new_options[CONF_CUSTOM_FIELDS] = [f for f in existing if f["name"] != name]
             return self.async_create_entry(title="", data=new_options)

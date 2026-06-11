@@ -116,7 +116,7 @@
           "queue_maxlen": "Maximum number of emails queued for AI extraction (1–256)."
         }
       },
-      "custom_fields_menu": {
+      "custom_fields": {
         "description": "Current custom fields: {current_fields}.",
         "menu_options": {
           "add_custom_field": "Add custom field",
