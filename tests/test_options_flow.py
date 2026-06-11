@@ -407,7 +407,7 @@ async def test_custom_fields_returns_menu(hass, mock_config_entry):
     ):
         result = await handler.async_step_custom_fields(user_input=None)
     assert result["type"] == "menu"
-    assert result["step_id"] == "custom_fields_menu"
+    assert result["step_id"] == "custom_fields"
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +728,7 @@ async def test_custom_fields_menu_empty(hass, mock_config_entry):
     ):
         result = await handler.async_step_custom_fields(user_input=None)
     assert result["type"] == "menu"
-    assert result["step_id"] == "custom_fields_menu"
+    assert result["step_id"] == "custom_fields"
     assert result["menu_options"] == ["add_custom_field"]
     assert result["description_placeholders"]["current_fields"] == "none"
 

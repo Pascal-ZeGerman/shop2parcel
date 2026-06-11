@@ -104,7 +104,7 @@ def test_strings_init_only_menu_options(strings):
 
 def test_custom_fields_menu_keys(strings):
     """Plan 04 Test 1 (RED): custom_fields_menu.menu_options has add + remove keys."""
-    menu_opts = strings["options"]["step"]["custom_fields_menu"]["menu_options"]
+    menu_opts = strings["options"]["step"]["custom_fields"]["menu_options"]
     assert "add_custom_field" in menu_opts
     assert menu_opts["add_custom_field"] == "Add custom field"
     assert "remove_custom_field" in menu_opts
@@ -113,7 +113,7 @@ def test_custom_fields_menu_keys(strings):
 
 def test_custom_fields_menu_description_placeholder(strings):
     """Plan 04 Test 2: custom_fields_menu.description contains {current_fields} placeholder."""
-    desc = strings["options"]["step"]["custom_fields_menu"]["description"]
+    desc = strings["options"]["step"]["custom_fields"]["description"]
     assert "{current_fields}" in desc, (
         f"custom_fields_menu.description must contain '{{current_fields}}', got: {desc!r}"
     )
