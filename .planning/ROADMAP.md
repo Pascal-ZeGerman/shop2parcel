@@ -15,8 +15,8 @@
 ## Phases
 
 - [x] **Phase 15: OllamaClient Foundation** — Standalone aiohttp transport to `/api/generate` with defensive JSON parsing
-- [ ] **Phase 16: OllamaExtractor + Schema Composition** — Pure extractor that builds prompts + JSON-Schema from the configured field list
-- [ ] **Phase 17: Config-Flow Expansion** — New Ollama options, `/api/tags` validate-on-save, locked-field disclosure, v1.2 backward-compat fallback
+- [x] **Phase 16: OllamaExtractor + Schema Composition** — Pure extractor that builds prompts + JSON-Schema from the configured field list (completed 2026-06-09)
+- [x] **Phase 17: Config-Flow Expansion** — New Ollama options, `/api/tags` validate-on-save, locked-field disclosure, v1.2 backward-compat fallback (completed 2026-06-10)
 - [ ] **Phase 18: Queue Plumbing (transitional)** — Bounded `asyncio.Queue` + drop-newest backpressure + in-flight key dedup, wired into poll loop alongside legacy path
 - [ ] **Phase 19: Worker Spawn + Poll Loop Flip** — Long-lived background worker via `entry.async_create_background_task`, 5 s cancel-with-suppress shutdown, poll loop becomes Ollama-free
 - [ ] **Phase 20: Merge + Quota Guards (CRITICAL)** — LLM-authoritative merge with per-field guards, carrier-regex pre-POST validation, `MAX_STAGE2_POSTS_PER_POLL` cap, skip-dedup-on-failure
@@ -64,8 +64,21 @@ Plans:
   3. The user can configure Ollama URL (required, no default), model (default `qwen3.5:2b`), and per-request timeout (default 60 s) via options; the extractor reads those values at construction time and applies them to every call.
   4. Empty / null Stage-2 values for locked fields are preserved as `None` (not empty string) so the downstream merge can distinguish "model declined to extract" from "model returned blank".
 
-**Plans**: TBD
-**Research**: NEEDS RESEARCH — prompt template wording, JSON-Schema shape, and I-9 (UTF-8 lookalikes + markdown fences) mitigations should be canonicalized in a research pass before plan drafting.
+**Plans**: 3 plans
+Plans:
+**Wave 1**
+
+- [x] 16-01-PLAN.md — Stage2Result frozen dataclass + extractors/ subpackage scaffolding + tests/extractors/ conftest
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 16-02-PLAN.md — LOCKED_OLLAMA_FIELDS const, OllamaClient.async_generate_with_metadata, and the three module-level helpers (build_schema, preprocess_html, build_prompt) + helper tests
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 16-03-PLAN.md — OllamaExtractor class (__init__ + _validate_fields + async_extract + _split_and_coerce) + class-level test coverage of every D-NN decision and OLLM-01/02/03 + FLD-04
+
+**Research**: Done — see .planning/phases/16-ollamaextractor-schema-composition/16-RESEARCH.md (prompt template, JSON-Schema shape, BS4 preprocessing, qwen3.5:2b tag verification all canonicalized).
 
 ### Phase 17: Config-Flow Expansion
 
@@ -79,7 +92,20 @@ Plans:
   3. The 3 locked extraction fields (`tracking_number`, `carrier_name`, `order_name`) are displayed read-only in the form with descriptive text explaining they cannot be removed; the user can still add custom fields freely.
   4. A v1.2 entry upgraded to v1.3 without an Ollama URL configured continues to operate Stage-1-only (`stage2_enabled: false`) — the integration does not crash, does not block setup, and exposes a diagnostic attribute the user can observe to detect the unconfigured state.
 
-**Plans**: TBD
+**Plans**: 4 plans
+Plans:
+**Wave 1** *(parallel)*
+
+- [x] 17-01-PLAN.md — Phase 17 constants block in const.py + OllamaClient.async_get_tags @staticmethod (CFG-01 transport; OLLM-01/02/03 constants)
+- [x] 17-02-PLAN.md — PollStats.stage2_enabled + __init__ derivation + config_flow.py options seed (CFG-04 backward-compat)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 17-03-PLAN.md — options_flow.py rewrite: menu-first init + async_step_settings with Ollama fields and /api/tags validation (OLLM-01/02/03, CFG-01/02/03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 17-04-PLAN.md — Custom-fields CRUD (menu + add + remove) with locked-field collision + invalid-name validation (FLD-01, FLD-02)
 
 ### Phase 18: Queue Plumbing (transitional)
 
@@ -161,9 +187,9 @@ Plans:
 | 1–9 (collapsed) | v1.0 | 29/29 | Complete | 2026-05-04 |
 | 10–12 (collapsed) | v1.1 | 9/9 | Complete | 2026-05-17 |
 | 13, 13.1, 14 (collapsed) | v1.2 | 9/9 | Complete | 2026-06-05 |
-| 15. OllamaClient Foundation | v1.3 | 1/4 | In Progress|  |
-| 16. OllamaExtractor + Schema Composition | v1.3 | 0/0 | Not started | — |
-| 17. Config-Flow Expansion | v1.3 | 0/0 | Not started | — |
+| 15. OllamaClient Foundation | v1.3 | 4/4 | Complete    | 2026-06-06 |
+| 16. OllamaExtractor + Schema Composition | v1.3 | 3/3 | Complete    | 2026-06-09 |
+| 17. Config-Flow Expansion | v1.3 | 4/4 | Complete    | 2026-06-11 |
 | 18. Queue Plumbing (transitional) | v1.3 | 0/0 | Not started | — |
 | 19. Worker Spawn + Poll Loop Flip | v1.3 | 0/0 | Not started | — |
 | 20. Merge + Quota Guards (CRITICAL) | v1.3 | 0/0 | Not started | — |
