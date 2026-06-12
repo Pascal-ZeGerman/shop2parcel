@@ -51,6 +51,7 @@ from .const import (
 )
 from .coordinator import (
     Shop2ParcelCoordinator,
+    Stage2Job,
     _extract_imap_email_meta,
     _next_midnight_utc,
     _sanitise_parser_error,
@@ -313,6 +314,19 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                         **imap_meta,
                     }
                 )
+
+                # Phase 18 D-03: route Stage-2-enabled entries to the queue; the entire inline
+                # POST section (debug_mode, quota_blocked, parcel POST) is bypassed.
+                if self._diagnostics.stage2_enabled:
+                    self._enqueue_stage2(
+                        normalized,
+                        storage_key,
+                        shipment,
+                        html,
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                    )
+                    continue
 
                 # DBG-04: suppress POST in debug mode; append dry_run_suppressed event and continue.
                 if debug_mode:
