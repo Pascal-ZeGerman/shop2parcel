@@ -515,6 +515,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 try:
                     await self._async_process_stage2_job(job)
                 except asyncio.CancelledError:
+                    self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
                     raise  # propagate — shuts down the worker
                 except Exception:  # noqa: BLE001
                     # Phase 21 owns notifications. Phase 19: log debug, discard in-flight key.
