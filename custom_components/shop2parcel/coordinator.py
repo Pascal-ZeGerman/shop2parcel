@@ -21,6 +21,7 @@ import email as _email_stdlib
 import logging
 import re
 from collections import OrderedDict, deque
+from contextlib import suppress  # noqa: F401
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
@@ -34,21 +35,36 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .api.carrier_codes import normalize_carrier  # noqa: F401
 from .api.email_parser import ShipmentData
 from .api.exceptions import (
+    OllamaSchemaError,  # noqa: F401
+    OllamaTransientError,  # noqa: F401
+    ParcelAppAlreadyAddedError,  # noqa: F401
     ParcelAppAuthError,
+    ParcelAppInvalidTrackingError,  # noqa: F401
+    ParcelAppQuotaError,  # noqa: F401
     ParcelAppTransientError,
 )
+from .api.ollama_client import OllamaClient  # noqa: F401
 from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_API_KEY,
+    CONF_CUSTOM_FIELDS,  # noqa: F401
     CONF_DEBUG_MODE,
+    CONF_OLLAMA_MODEL,  # noqa: F401
+    CONF_OLLAMA_TIMEOUT,  # noqa: F401
+    CONF_OLLAMA_URL,  # noqa: F401
     CONF_POLL_INTERVAL,
     CONF_QUEUE_MAXLEN,
+    DEFAULT_OLLAMA_MODEL,  # noqa: F401
+    DEFAULT_OLLAMA_TIMEOUT,  # noqa: F401
     DEFAULT_POLL_INTERVAL,
     DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
+    MAX_SUBMITTED_TRACKING_NUMBERS,  # noqa: F401
 )
+from .extractors.ollama_extractor import OllamaExtractor  # noqa: F401
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -310,6 +326,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # async_start_stage2 (e.g. Phase 19 worker or a reload race).
         self._stage2_queue: asyncio.Queue[Stage2Job] | None = None
         self._stage2_enqueued_keys: set[str] = set()
+        # Phase 19: worker task and extractor sentinels — None until async_start_stage2.
+        self._stage2_worker_task: asyncio.Task | None = None
+        self._extractor: OllamaExtractor | None = None
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
