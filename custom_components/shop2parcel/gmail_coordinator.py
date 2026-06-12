@@ -47,6 +47,7 @@ from .const import (
 )
 from .coordinator import (
     Shop2ParcelCoordinator,
+    Stage2Job,  # noqa: F401 — type import; subclass calls _enqueue_stage2 which constructs Stage2Job
     _extract_email_meta,
     _next_midnight_utc,
     _sanitise_parser_error,
@@ -370,6 +371,19 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         **email_meta,
                     }
                 )
+
+                # Phase 18 D-03: route Stage-2-enabled entries to the queue; the entire inline
+                # POST section (debug_mode, quota_blocked, parcel POST) is bypassed.
+                if self._diagnostics.stage2_enabled:
+                    self._enqueue_stage2(
+                        normalized,
+                        storage_key,
+                        shipment,
+                        html,
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                    )
+                    continue
 
                 # DBG-04: in debug mode, suppress POST and record dry_run_suppressed event.
                 if debug_mode:

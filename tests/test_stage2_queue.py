@@ -1,9 +1,10 @@
-"""Phase 18: Stage-2 queue plumbing tests — QUE-01, QUE-03, QUE-06."""
+"""Phase 18: Stage-2 queue plumbing tests — QUE-01, QUE-03, QUE-06, QUE-07."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import pathlib
 from dataclasses import FrozenInstanceError
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,7 +18,7 @@ from custom_components.shop2parcel.const import (
     DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
 )
-from custom_components.shop2parcel.coordinator import Stage2Job
+from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator, Stage2Job
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
 
 
@@ -343,3 +344,220 @@ async def test_drop_newest_backpressure(hass, mock_stage2_config_entry, caplog):
         assert dropped_tn not in coord._submitted_tracking_numbers
         # (d) Dropped TN must NOT be in _stage2_enqueued_keys.
         assert dropped_tn not in coord._stage2_enqueued_keys
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Stage-2 branch bypasses POST (QUE-01 R4, Phase 18 D-03)
+# ---------------------------------------------------------------------------
+
+
+async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
+    """R4: With stage2_enabled=True, _async_update_data enqueues and makes ZERO parcel POSTs.
+
+    Validates QUE-01 acceptance criterion R4: the Stage-2 branch routes emails to
+    _enqueue_stage2 and completely bypasses the inline parcel POST section.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        # stage2_enabled is derived from entry.options in __init__.py, but here
+        # we are testing the coordinator directly so set it explicitly.
+        coord._diagnostics.stage2_enabled = True
+        await coord.async_start_stage2()
+
+        await coord._async_update_data()
+
+        # (a) No parcel POST must be made.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
+        # (b) Queue must contain exactly 1 item.
+        assert coord._stage2_queue.qsize() == 1
+        # (c) The item is a Stage2Job with the expected tracking number.
+        job: Stage2Job = coord._stage2_queue.get_nowait()
+        assert job.shipment.tracking_number == "1Z999AA10123456784"
+        # (d) Normalized TN is in _stage2_enqueued_keys.
+        assert "1Z999AA10123456784" in coord._stage2_enqueued_keys
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Poll loop is Ollama-free with a full queue (QUE-07)
+# ---------------------------------------------------------------------------
+
+
+async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_entry, caplog):
+    """QUE-07: Pre-filled queue triggers drop-newest and _async_update_data returns synchronously.
+
+    Validates: put_nowait is used (not await put), no Ollama imports exist in coordinator
+    subclass files, and the drop-newest backpressure event is emitted rather than hanging.
+    """
+    # Set maxsize=1 to trigger QueueFull on the first enqueue after pre-fill.
+    mock_stage2_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_stage2_config_entry,
+        options={CONF_OLLAMA_URL: "http://localhost:11434", CONF_QUEUE_MAXLEN: 1},
+    )
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        coord._diagnostics.stage2_enabled = True
+        await coord.async_start_stage2()
+
+        # Pre-fill queue to maxsize=1 with a filler job (different TN to avoid dedup skip).
+        filler_shipment = _make_shipment("filler_msg")
+        coord._stage2_queue.put_nowait(
+            Stage2Job(storage_key="filler", shipment=filler_shipment, html_body="")
+        )
+        assert coord._stage2_queue.full()
+
+        # Run the poll loop — _async_update_data must return synchronously (no hang).
+        with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
+            await coord._async_update_data()
+
+        # (a) No parcel POST calls (the Stage-2 branch intercepted the email).
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
+
+        # (b) The scan_events log must contain a stage2_dropped_backpressure outcome
+        #     (proves put_nowait was used — await put would hang, not raise QueueFull).
+        outcomes = [ev["outcome"] for ev in coord.diagnostics.scan_events]
+        assert "stage2_dropped_backpressure" in outcomes, (
+            f"Expected 'stage2_dropped_backpressure' in scan event outcomes, got: {outcomes}"
+        )
+
+        # (c) QUE-07: Verify no Ollama-related symbols are imported in the coordinator
+        #     subclass files (Stage-2 worker is outside Phase 18 scope).
+        base_dir = pathlib.Path(__file__).parent.parent / "custom_components" / "shop2parcel"
+        for fname in ("gmail_coordinator.py", "imap_coordinator.py"):
+            source = (base_dir / fname).read_text()
+            assert "OllamaExtractor" not in source, (
+                f"{fname} must not import OllamaExtractor (Phase 18 scope boundary)"
+            )
+            assert "OllamaClient" not in source, (
+                f"{fname} must not import OllamaClient (Phase 18 scope boundary)"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test 9: stage2_enabled=False entries do not construct queue (QUE-07 boundary)
+# ---------------------------------------------------------------------------
+
+
+async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry):
+    """With stage2_enabled=False, async_start_stage2 is never called and _stage2_queue is absent.
+
+    Validates the CONSTRAINTS boundary: queue must NOT be constructed for non-Stage-2 entries.
+    Also verifies that the legacy inline POST path still works for stage2_enabled=False entries.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(
+            Shop2ParcelCoordinator,
+            "async_start_stage2",
+            new_callable=AsyncMock,
+        ) as mock_start_stage2,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        # async_setup drives the __init__.py wiring (stage2_enabled=False since no ollama_url).
+        result = await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        assert result is True
+
+        coord = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+
+        # (a) async_start_stage2 must NOT have been called.
+        mock_start_stage2.assert_not_called()
+        # (b) _stage2_queue must not exist on the coordinator.
+        assert not hasattr(coord, "_stage2_queue"), (
+            "_stage2_queue must not be set on a stage2_enabled=False coordinator"
+        )
+
+        # (c) The legacy inline POST path still works: exercise one poll with a matched email.
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg2"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg2"))
+        await coord._async_update_data()
+        mock_parcel_cls.return_value.async_add_delivery.assert_called_once()
