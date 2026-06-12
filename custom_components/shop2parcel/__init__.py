@@ -68,6 +68,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # bool() coerces any non-empty URL string to True without exposing the URL value.
     # Empty string fallback prevents AttributeError on v1.2 entries with no ollama_url key.
     coordinator._diagnostics.stage2_enabled = bool(entry.options.get(CONF_OLLAMA_URL, ""))
+    # Phase 18: when Stage-2 is enabled, construct the bounded queue + in-flight
+    # dedup set so the first poll's enqueues already have somewhere to land.
+    # Register async_stop_stage2 via async_on_unload so HA tears down the queue
+    # on every unload path (clean unload, exception, HA shutdown). Wrap the async
+    # callable in a sync lambda + hass.async_create_task to be robust across HA
+    # versions whose async_on_unload semantics differ for async vs sync callables
+    # (RESEARCH.md Pitfall 3).
+    if coordinator._diagnostics.stage2_enabled:
+        await coordinator.async_start_stage2()
+        entry.async_on_unload(
+            lambda: hass.async_create_task(coordinator.async_stop_stage2())
+        )
     await coordinator.async_config_entry_first_refresh()
 
     # Phase 5 D-08: schedule once-daily delivered-shipment cleanup.
