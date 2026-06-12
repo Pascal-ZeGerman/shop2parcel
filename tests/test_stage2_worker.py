@@ -448,9 +448,8 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
         ),
         patch("custom_components.shop2parcel.coordinator.OllamaClient"),
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
-        patch.object(
-            Shop2ParcelCoordinator, "_async_process_stage2_job", new_callable=AsyncMock
-        ) as mock_process_job,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -458,6 +457,7 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
         # Wire extractor instance with a callable async_extract.
         mock_extractor_instance = mock_extractor_cls.return_value
         mock_extractor_instance.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -470,8 +470,10 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
         await asyncio.sleep(0)
         await hass.async_block_till_done()
 
-        # The worker called _async_process_stage2_job once (MRG-01 routing proof).
-        mock_process_job.assert_called_once_with(job)
+        # MRG-01: extractor must have been called with the job's html_body and shipment.
+        mock_extractor_instance.async_extract.assert_awaited_once_with(
+            job.html_body, job.shipment
+        )
 
 
 async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry):
