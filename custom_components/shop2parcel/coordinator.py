@@ -20,6 +20,7 @@ import asyncio
 import email as _email_stdlib
 import logging
 import re
+import time as _time
 from collections import OrderedDict, deque
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
@@ -29,7 +30,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
@@ -551,8 +552,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Auth failures degrade silently to key-discard + next-poll retry; reauth is triggered
         by the next _async_update_data poll cycle instead.
         """
-        from homeassistant.exceptions import ConfigEntryAuthFailed  # noqa: PLC0415
-
         normalized_tn = job.storage_key
         shipment = job.shipment
 
@@ -577,8 +576,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         )
 
         # Quota guard: skip POST and discard key if quota is exhausted.
-        import time as _time  # noqa: PLC0415
-
         now = int(_time.time())
         if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
             _LOGGER.debug("Stage-2 worker: quota exhausted — skipping POST for %s", normalized_tn)
