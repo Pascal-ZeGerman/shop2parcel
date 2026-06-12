@@ -546,9 +546,10 @@ async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry)
 
         # (a) async_start_stage2 must NOT have been called.
         mock_start_stage2.assert_not_called()
-        # (b) _stage2_queue must not exist on the coordinator.
-        assert not hasattr(coord, "_stage2_queue"), (
-            "_stage2_queue must not be set on a stage2_enabled=False coordinator"
+        # (b) _stage2_queue sentinel must remain None (never started) on a
+        # stage2_enabled=False coordinator (CR-01 fix: __init__ sets None sentinel).
+        assert coord._stage2_queue is None, (
+            "_stage2_queue must be None on a stage2_enabled=False coordinator"
         )
 
         # (c) The legacy inline POST path still works: exercise one poll with a matched email.

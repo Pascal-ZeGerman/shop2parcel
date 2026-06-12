@@ -306,6 +306,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._pending_shipments: dict[str, ShipmentData] = {}
         self._restored_shipments: dict[str, ShipmentData] = {}
         self._store_loaded: bool = False
+        # Phase 18 CR-01: sentinel so async_stop_stage2 is safe to call before
+        # async_start_stage2 (e.g. Phase 19 worker or a reload race).
+        self._stage2_queue: asyncio.Queue[Stage2Job] | None = None
+        self._stage2_enqueued_keys: set[str] = set()
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
@@ -358,8 +362,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         raw = self.config_entry.options.get(CONF_QUEUE_MAXLEN, DEFAULT_QUEUE_MAXLEN)
         maxlen = max(1, min(256, int(raw)))
-        self._stage2_queue: asyncio.Queue[Stage2Job] = asyncio.Queue(maxsize=maxlen)
-        self._stage2_enqueued_keys: set[str] = set()
+        self._stage2_queue = asyncio.Queue(maxsize=maxlen)
+        self._stage2_enqueued_keys = set()
         _LOGGER.debug("Stage-2 queue constructed with maxsize=%d", maxlen)
 
     async def async_stop_stage2(self) -> None:
@@ -368,14 +372,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         QUE-01 lifecycle: drains queue via get_nowait loop, replaces with empty queue,
         clears _stage2_enqueued_keys so reloads do not carry stale in-flight keys.
         """
+        if self._stage2_queue is None:
+            return
+        prev_maxsize = self._stage2_queue.maxsize
         while not self._stage2_queue.empty():
             try:
                 self._stage2_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        self._stage2_queue = (
-            asyncio.Queue()
-        )  # empty replacement — avoids AttributeError on next access
+        # CR-02: preserve maxsize so backpressure invariant holds after a reload.
+        self._stage2_queue = asyncio.Queue(maxsize=prev_maxsize)
         self._stage2_enqueued_keys.clear()
         _LOGGER.debug("Stage-2 queue stopped and cleared")
 
