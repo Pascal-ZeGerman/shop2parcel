@@ -72,23 +72,6 @@ def mock_stage2_config_entry() -> MockConfigEntry:
     )
 
 
-def _patch_coord_deps_with_ollama():
-    """Return a context manager stack that suppresses all external I/O for Phase 19 tests."""
-    return (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore"),
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Task 1: Sentinel + extractor construction tests (D-02, D-03)
 # ---------------------------------------------------------------------------
