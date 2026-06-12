@@ -360,9 +360,7 @@ async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
-        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
@@ -388,9 +386,7 @@ async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
-            _make_shipment("msg1")
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
@@ -418,9 +414,7 @@ async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
 # ---------------------------------------------------------------------------
 
 
-async def test_poll_loop_ollama_free_with_full_queue(
-    hass, mock_stage2_config_entry, caplog
-):
+async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_entry, caplog):
     """QUE-07: Pre-filled queue triggers drop-newest and _async_update_data returns synchronously.
 
     Validates: put_nowait is used (not await put), no Ollama imports exist in coordinator
@@ -434,9 +428,7 @@ async def test_poll_loop_ollama_free_with_full_queue(
     )
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
-        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
@@ -462,9 +454,7 @@ async def test_poll_loop_ollama_free_with_full_queue(
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
-            _make_shipment("msg1")
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
@@ -520,9 +510,7 @@ async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry)
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
-        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch(
@@ -547,9 +535,7 @@ async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry)
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
-            return_value=([], "q after:0")
-        )
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         # async_setup drives the __init__.py wiring (stage2_enabled=False since no ollama_url).
@@ -572,8 +558,6 @@ async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry)
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
-            _make_shipment("msg2")
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg2"))
         await coord._async_update_data()
         mock_parcel_cls.return_value.async_add_delivery.assert_called_once()

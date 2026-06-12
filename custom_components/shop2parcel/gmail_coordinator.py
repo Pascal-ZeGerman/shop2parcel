@@ -47,7 +47,7 @@ from .const import (
 )
 from .coordinator import (
     Shop2ParcelCoordinator,
-    Stage2Job,
+    Stage2Job,  # noqa: F401 — type import; subclass calls _enqueue_stage2 which constructs Stage2Job
     _extract_email_meta,
     _next_midnight_utc,
     _sanitise_parser_error,
