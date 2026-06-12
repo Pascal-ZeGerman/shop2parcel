@@ -669,3 +669,6 @@ async def test_worker_does_not_swallow_cancelled_error_during_process_job(
         assert task is not None
         # Give the task a moment to be done.
         assert task.done() or task.cancelled()
+
+        # Key must be discarded so next poll can re-enqueue this tracking number.
+        assert "1Z999" not in coord._stage2_enqueued_keys
