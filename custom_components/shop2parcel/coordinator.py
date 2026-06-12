@@ -427,12 +427,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         and TimeoutError suppressed so on-unload never raises.
         """
         # Step 1 (Phase 19): cancel worker task — must precede queue drain (D-01).
-        # QUE-05: 5-second bounded wait via asyncio.wait_for. The wait_for timeout
-        # mechanism delivers CancelledError to the worker task after 5s if it hasn't
-        # finished. We do NOT call task.cancel() explicitly before wait_for because
-        # doing so would cause workers using asyncio.shield (which resist immediate
-        # CancelledError) to exit in 0ms rather than letting the timeout fire.
-        # The wait_for timeout approach ensures unresistant workers are bounded at 5s.
+        # QUE-05: 5-second bounded wait via asyncio.wait_for.
+        # wait_for cancels the task internally when the timeout fires (Python 3.11+).
+        # No explicit task.cancel() needed before wait_for — it would be redundant.
         # CancelledError and TimeoutError are suppressed so unload never raises (QUE-05).
         if self._stage2_worker_task is not None and not self._stage2_worker_task.done():
             with suppress(asyncio.CancelledError, asyncio.TimeoutError):
