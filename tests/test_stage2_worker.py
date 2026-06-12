@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shop2parcel.api.email_parser import ShipmentData
-from custom_components.shop2parcel.api.exceptions import OllamaTransientError
 from custom_components.shop2parcel.const import (
     CONF_CUSTOM_FIELDS,
     CONF_OLLAMA_MODEL,
