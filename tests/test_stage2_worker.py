@@ -913,3 +913,106 @@ async def test_two_field_conflict_emits_single_event(hass, mock_stage2_config_en
         extra_conflicts = conflict_events[0].get("conflicts", [])
         # Two field conflicts in ONE event.
         assert len(extra_conflicts) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 3: FAIL-03 — Ollama errors skip POST and dedup write
+# ---------------------------------------------------------------------------
+
+
+async def test_ollama_transient_no_post_no_dedup(hass, mock_stage2_config_entry):
+    """FAIL-03: OllamaTransientError → POST not called; tracking number absent from dedup store."""
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        # Extractor raises OllamaTransientError (network/timeout/5xx).
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            side_effect=OllamaTransientError("timeout")
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        shipment = _make_shipment()
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+        )
+        await coord._async_process_stage2_job(job)
+
+        # FAIL-03: POST must NOT be called.
+        assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
+        # FAIL-03: Tracking number must NOT be written to dedup store.
+        assert job.storage_key not in coord._submitted_tracking_numbers
+
+
+async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
+    """FAIL-03: OllamaSchemaError → POST not called; tracking number absent from dedup store."""
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        # Extractor raises OllamaSchemaError (auth/404/malformed).
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            side_effect=OllamaSchemaError("malformed")
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        shipment = _make_shipment()
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+        )
+        await coord._async_process_stage2_job(job)
+
+        # FAIL-03: POST must NOT be called.
+        assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
+        # FAIL-03: Tracking number must NOT be written to dedup store.
+        assert job.storage_key not in coord._submitted_tracking_numbers
