@@ -96,7 +96,13 @@ def _patch_coord_deps():
 def test_stage2job_is_frozen():
     """Stage2Job must be a frozen dataclass — assigning any field raises FrozenInstanceError."""
     shipment = _make_shipment()
-    job = Stage2Job(storage_key="1Z999AA10123456784", shipment=shipment, html_body="<html/>")
+    job = Stage2Job(
+        storage_key="1Z999AA10123456784",
+        shipment=shipment,
+        html_body="<html/>",
+        message_id="test-msg-id",
+        meta={"subject": "test", "from": "test@example.com"},
+    )
     with pytest.raises(FrozenInstanceError):
         job.storage_key = "x"  # type: ignore[misc]
 
@@ -216,7 +222,13 @@ async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
 
         # Manually put an item in the queue to confirm stop drains it.
         shipment = _make_shipment()
-        job = Stage2Job(storage_key="1Z999AA10123456784", shipment=shipment, html_body="<html/>")
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
         coord._stage2_queue.put_nowait(job)
         coord._stage2_enqueued_keys.add("1Z999AA10123456784")
         assert not coord._stage2_queue.empty()
@@ -465,7 +477,13 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
         # Pre-fill queue to maxsize=1 with a filler job (different TN to avoid dedup skip).
         filler_shipment = _make_shipment("filler_msg")
         coord._stage2_queue.put_nowait(
-            Stage2Job(storage_key="filler", shipment=filler_shipment, html_body="")
+            Stage2Job(
+                storage_key="filler",
+                shipment=filler_shipment,
+                html_body="",
+                message_id="filler-msg-id",
+                meta={"subject": "filler", "from": "filler@example.com"},
+            )
         )
         assert coord._stage2_queue.full()
 

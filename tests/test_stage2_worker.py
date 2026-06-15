@@ -445,7 +445,13 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
         await coord.async_start_stage2()
 
         shipment = _make_shipment()
-        job = Stage2Job(storage_key="1Z999AA10123456784", shipment=shipment, html_body="<html/>")
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
         coord._stage2_queue.put_nowait(job)
 
         await asyncio.sleep(0)
@@ -487,7 +493,13 @@ async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry)
         await coord.async_start_stage2()
 
         shipment = _make_shipment()
-        job = Stage2Job(storage_key="1Z999AA10123456784", shipment=shipment, html_body="<html/>")
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
         coord._stage2_queue.put_nowait(job)
 
         await asyncio.sleep(0)
@@ -527,7 +539,13 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
         pre = coord.data  # Capture reference before job is processed.
 
         shipment = _make_shipment()
-        job = Stage2Job(storage_key="msg1::1Z999", shipment=shipment, html_body="<html/>")
+        job = Stage2Job(
+            storage_key="msg1::1Z999",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
         coord._stage2_queue.put_nowait(job)
 
         await asyncio.sleep(0)
@@ -571,7 +589,13 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
 
         coord._stage2_enqueued_keys = {"1Z999"}
         shipment = _make_shipment()
-        job = Stage2Job(storage_key="1Z999", shipment=shipment, html_body="<html/>")
+        job = Stage2Job(
+            storage_key="1Z999",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
         coord._stage2_queue.put_nowait(job)
 
         await asyncio.sleep(0)
@@ -614,7 +638,13 @@ async def test_enqueued_key_discarded_on_ollama_failure_without_dedup(
 
         coord._stage2_enqueued_keys = {"1Z999"}
         shipment = _make_shipment()
-        job = Stage2Job(storage_key="1Z999", shipment=shipment, html_body="<html/>")
+        job = Stage2Job(
+            storage_key="1Z999",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
         coord._stage2_queue.put_nowait(job)
 
         await asyncio.sleep(0)
@@ -657,7 +687,13 @@ async def test_worker_does_not_swallow_cancelled_error_during_process_job(
         await coord.async_start_stage2()
 
         shipment = _make_shipment()
-        job = Stage2Job(storage_key="1Z999", shipment=shipment, html_body="<html/>")
+        job = Stage2Job(
+            storage_key="1Z999",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
         coord._stage2_queue.put_nowait(job)
 
         # Let worker receive the job and the CancelledError propagate.

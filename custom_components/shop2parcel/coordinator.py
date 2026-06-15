@@ -169,11 +169,16 @@ class Stage2Job:
         Per D-02: this is the normalized tracking number, NOT the composite coordinator.data key.
     shipment: Stage-1 ShipmentData for this email.
     html_body: raw HTML body for Ollama prompt construction (Phase 19 worker reads this).
+    message_id: Gmail message ID or IMAP UID — for _emit_scan_event attribution (D-06).
+    meta: Email metadata dict {'subject': str, 'from': str} — for _emit_scan_event
+        attribution (D-06). Populated from _extract_email_meta / _extract_imap_email_meta.
     """
 
     storage_key: str
     shipment: ShipmentData
     html_body: str
+    message_id: str
+    meta: dict
 
 
 @dataclass(slots=True)
@@ -473,7 +478,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         if normalized_tn in self._stage2_enqueued_keys:
             return  # silent skip — already in flight (QUE-06)
-        job = Stage2Job(storage_key=storage_key, shipment=shipment, html_body=html_body)
+        job = Stage2Job(
+            storage_key=storage_key,
+            shipment=shipment,
+            html_body=html_body,
+            message_id=message_id,
+            meta=meta,
+        )
         try:
             self._stage2_queue.put_nowait(job)
         except asyncio.QueueFull:
