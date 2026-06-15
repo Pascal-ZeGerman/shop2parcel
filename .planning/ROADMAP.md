@@ -17,8 +17,8 @@
 - [x] **Phase 15: OllamaClient Foundation** — Standalone aiohttp transport to `/api/generate` with defensive JSON parsing
 - [x] **Phase 16: OllamaExtractor + Schema Composition** — Pure extractor that builds prompts + JSON-Schema from the configured field list (completed 2026-06-09)
 - [x] **Phase 17: Config-Flow Expansion** — New Ollama options, `/api/tags` validate-on-save, locked-field disclosure, v1.2 backward-compat fallback (completed 2026-06-10)
-- [ ] **Phase 18: Queue Plumbing (transitional)** — Bounded `asyncio.Queue` + drop-newest backpressure + in-flight key dedup, wired into poll loop alongside legacy path
-- [ ] **Phase 19: Worker Spawn + Poll Loop Flip** — Long-lived background worker via `entry.async_create_background_task`, 5 s cancel-with-suppress shutdown, poll loop becomes Ollama-free
+- [x] **Phase 18: Queue Plumbing (transitional)** — Bounded `asyncio.Queue` + drop-newest backpressure + in-flight key dedup, wired into poll loop alongside legacy path (completed 2026-06-12)
+- [x] **Phase 19: Worker Spawn + Poll Loop Flip** — Long-lived background worker via `entry.async_create_background_task`, 5 s cancel-with-suppress shutdown, poll loop becomes Ollama-free (completed 2026-06-12)
 - [ ] **Phase 20: Merge + Quota Guards (CRITICAL)** — LLM-authoritative merge with per-field guards, carrier-regex pre-POST validation, `MAX_STAGE2_POSTS_PER_POLL` cap, skip-dedup-on-failure
 - [ ] **Phase 21: Failure Surface + Diagnostics** — `_LOGGER.error` + activity-log outcomes + persistent notification with cooldown + `Stage2Sensor` + custom-field sensor attributes
 - [ ] **Phase 22: README Setup + End-to-End Validation** — Docker/Portainer install, three-topology networking notes, model-pull caveat, reachability sanity-check, real-Ollama integration test
@@ -133,23 +133,45 @@ Plans:
   3. On entry unload (HA shutdown, options reload, or user-triggered reload), the worker is cancelled, awaited with a 5 s timeout, and any `CancelledError` is suppressed — after three consecutive reloads, `len(asyncio.all_tasks())` shows zero leaked Stage-2 workers.
   4. The worker emits coordinator state updates via `coordinator.async_set_updated_data(...)` only — it never mutates `_pending_shipments` directly, preserving the snapshot-at-call-time semantics that protect `_async_save_store` from `RuntimeError: dictionary changed size during iteration`.
 
-**Plans**: TBD
-**Research**: NEEDS RESEARCH — highest blast-radius phase (owns C-1 worker leak, C-4 event-loop block, C-6 timeout cascade, I-11 store corruption). Pitfall mitigations must be canonicalized before plan drafting.
+**Plans**: 2 plans
+Plans:
+**Wave 1**
+
+- [x] 19-01-PLAN.md — TDD RED suite for worker lifecycle + behavior in tests/test_stage2_worker.py (QUE-02/QUE-04/QUE-05/MRG-01, D-02/D-03/D-05/D-06, Pitfalls 1/5/6)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 19-02-PLAN.md — Implement coordinator changes (sentinels, OllamaClient/OllamaExtractor construction, _async_stage2_worker, _async_process_stage2_job, async_stop_stage2 cancel-with-suppress) to turn Plan 01 GREEN
+
+**Research**: Done — see .planning/phases/19-worker-spawn-poll-loop-flip/19-RESEARCH.md (worker leak, event-loop block, timeout cascade, store corruption all canonicalized; zero new packages).
 
 ### Phase 20: Merge + Quota Guards (CRITICAL)
 
-**Goal**: The five inseparable mitigations against the always-on-Stage-2 / LLM-authoritative-merge / skip-dedup-on-failure / non-deterministic-LLM quota-burn interaction land together — so a single hallucination cluster can never exhaust the parcelapp 20-POST/day quota.
+**Goal**: Replace Phase 19's discard-Stage2Result stub with real merge logic and four quota-protection guards so Stage-2 LLM values safely enrich POST payloads without burning parcelapp.net quota on hallucinations or flooding — `merge_llm_authoritative` enforces per-field MRG-03 conflict guards with `str.strip().upper()` normalization and MRG-04 loose tracking-number sanity (6–40 chars, alphanum/dash/space), `MAX_STAGE2_POSTS_PER_POLL=5` caps Stage-2 POSTs per poll with a single persistent notification, and FAIL-03 routes Ollama errors to skip-POST and skip-dedup so transient failures are retriable.
 **Depends on**: Phase 19 (worker is the call site for all five mitigations)
 **Requirements**: MRG-02, MRG-03, MRG-04, MRG-05, FAIL-03
 **Success Criteria** (what must be TRUE):
 
-  1. A pure `merge_llm_authoritative(stage1, stage2, locked, extra)` function returns a merged `ShipmentData` where LLM values overwrite Stage 1 ONLY when Stage 1 returned `None` for that field OR Stage 2 returned the same normalized value — any conflict on a locked field keeps Stage 1 and emits a `stage2_conflict` activity event.
-  2. Before the worker POSTs to parcelapp, every Stage-2-sourced `tracking_number` is validated against carrier-specific regex (UPS `^1Z`, USPS `^9[0-9]{21}`, FedEx `^\d{12,15}$`, plus a Shopify-generic fallback); any regex failure routes to a `stage2_schema_error` outcome, skips the POST, and skips the dedup write.
-  3. A `MAX_STAGE2_POSTS_PER_POLL` cap (settled in 5–10 range during planning) is enforced per poll cycle; on cap-hit a persistent HA notification fires, remaining queue items skip Stage-2 / POST for that poll, and the dropped emails are NOT written to dedup so the next poll re-attempts them.
-  4. The skip-dedup-on-failure rule is scoped to `_submitted_tracking_numbers` only — if Stage 1 produced a valid `ShipmentData` and the POST succeeded, the tracking number is written to dedup regardless of any Stage-2 outcome; the user can verify this by observing a Stage-2-conflict shipment that is NOT re-POSTed on the next poll.
+  1. A pure `merge_llm_authoritative(stage1, result)` function returns a merged `ShipmentData` and a conflicts list — LLM values overwrite Stage 1 ONLY when Stage 1 returned `None` for that field OR Stage 2 returned the same normalized value; any conflict on a locked field keeps Stage 1 and the caller emits exactly one `stage2_conflict` activity event per job (listing all conflicting fields in one payload).
+  2. Before Stage-2 promotes a `tracking_number` (the Stage-1-None path), the value passes a loose sanity check: non-empty, 6–40 chars, `^[A-Za-z0-9\- ]+$`; failing values are silently discarded (no event), preventing garbled LLM outputs from consuming parcelapp quota on HTTP 400.
+  3. A `MAX_STAGE2_POSTS_PER_POLL = 5` cap is enforced per poll cycle; on cap-hit, the first skipped job fires exactly one persistent HA notification (id `shop2parcel_stage2_cap_{entry_id}`), subsequent skips in the same poll are silent, and skipped emails are NOT written to dedup so the next poll re-attempts them.
+  4. `OllamaTransientError` and `OllamaSchemaError` during Stage-2 extraction route to no-POST and no-`_submitted_tracking_numbers`-write, scoped to Stage-2-only failures; Stage-1-only successful POSTs continue to write to dedup as before.
 
-**Plans**: TBD
-**Research**: NEEDS RESEARCH — owns the 5-mitigation quota-burn recipe. The carrier-regex set, the `MAX_STAGE2_POSTS_PER_POLL` default value, and the precise merge edge-case matrix must be canonicalized before plan drafting.
+**Plans**: 3 plans
+Plans:
+**Wave 1**
+
+- [x] 20-01-PLAN.md — TDD: pure `merge.py` module with `merge_llm_authoritative` (MRG-03 conflict guard + MRG-04 sanity regex) + 15-test suite (D-01/D-02/D-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 20-02-PLAN.md — Wire merge into `_async_process_stage2_job` + extend Stage2Job with `message_id` and `meta` (D-06/D-07) + emit `stage2_conflict` activity event + FAIL-03 skip-POST and skip-dedup on Ollama errors (MRG-02, MRG-03 wiring, FAIL-03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 20-03-PLAN.md — `MAX_STAGE2_POSTS_PER_POLL=5` constant + `stage2_cap_notification_id` helper + coordinator counters + `_reset_stage2_poll_counters` + cap gate + once-per-poll notification + dismissal at remove + temperature:0 verification (MRG-05, D-08/D-09/D-10/D-11/D-12)
+
+**Research**: Done — see .planning/phases/20-merge-quota-guards-critical/20-RESEARCH.md (merge function shape, Stage2Job extension pitfalls, counter reset placement, persistent notification pattern all canonicalized; zero new packages).
 
 ### Phase 21: Failure Surface + Diagnostics
 
@@ -175,7 +197,7 @@ Plans:
 
   1. The README has an "AI-based email analysis (v1.3)" section explaining what Stage 2 does, when it runs (every sender-matched email, always-on after Stage 1), and the LLM-authoritative merge semantics with the per-field merge guards.
   2. The README links to Ollama's official documentation as the source of truth for install (no duplication of Docker / Portainer steps) and provides Shop2Parcel-specific model guidance: the `ollama pull qwen3.5:2b` command with the "if the tag fails, try `qwen2.5:3b` or `qwen3:1.7b`" caveat so the user can recover from a stale upstream tag.
-  3. The README documents three networking topologies (HA + Ollama same Docker host network; HA + Ollama on shared bridge; HA and Ollama on separate hosts) with the exact URL form for each — and the user trying `localhost:11434` on the separate-hosts topology is explicitly warned in the same section.
+  3. The README documents three networking topologies (HA + Ollama on same Docker host network, HA + Ollama on shared bridge, HA and Ollama on separate hosts) with example URL forms for each — and the user trying `localhost:11434` on the separate-hosts topology is explicitly warned in the same section.
   4. The README includes a reachability sanity-check command (`docker exec homeassistant wget -qO- http://<HOST>:11434/api/tags`) with an example healthy response, so the user can independently verify connectivity before opening the integration's config flow.
 
 **Plans**: TBD
@@ -190,9 +212,9 @@ Plans:
 | 15. OllamaClient Foundation | v1.3 | 4/4 | Complete    | 2026-06-06 |
 | 16. OllamaExtractor + Schema Composition | v1.3 | 3/3 | Complete    | 2026-06-09 |
 | 17. Config-Flow Expansion | v1.3 | 4/4 | Complete    | 2026-06-11 |
-| 18. Queue Plumbing (transitional) | v1.3 | 0/0 | Not started | — |
-| 19. Worker Spawn + Poll Loop Flip | v1.3 | 0/0 | Not started | — |
-| 20. Merge + Quota Guards (CRITICAL) | v1.3 | 0/0 | Not started | — |
+| 18. Queue Plumbing (transitional) | v1.3 | 2/2 | Complete    | 2026-06-12 |
+| 19. Worker Spawn + Poll Loop Flip | v1.3 | 2/2 | Complete    | 2026-06-12 |
+| 20. Merge + Quota Guards (CRITICAL) | v1.3 | 0/3 | Planned     | — |
 | 21. Failure Surface + Diagnostics | v1.3 | 0/0 | Not started | — |
 | 22. README Setup + End-to-End Validation | v1.3 | 0/0 | Not started | — |
 

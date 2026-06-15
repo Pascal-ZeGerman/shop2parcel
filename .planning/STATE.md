@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: AI-based Email Analysis
-status: ready_to_plan
-stopped_at: Phase 17 complete (4/4) — ready to discuss Phase 18
-last_updated: 2026-06-11T00:12:56.091Z
-last_activity: 2026-06-10 -- Phase 17 execution started
+status: executing
+stopped_at: Phase 20 Plan 01 complete
+last_updated: "2026-06-15T20:00:00Z"
+last_activity: 2026-06-15 -- Phase 20 Plan 01 complete (merge_llm_authoritative)
 progress:
   total_phases: 8
-  completed_phases: 2
-  total_plans: 11
-  completed_plans: 11
-  percent: 25
+  completed_phases: 5
+  total_plans: 18
+  completed_plans: 16
+  percent: 63
 ---
 
 # Project State
@@ -21,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-05)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** Phase 18 — queue plumbing (transitional)
+**Current focus:** Phase 20 — merge + quota guards (critical)
 
 ## Current Position
 
-Phase: 18
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-06-11
+Phase: 20
+Plan: 01 complete, 02+ pending
+Status: Executing
+Last activity: 2026-06-15 -- Phase 20 Plan 01 complete (merge_llm_authoritative pure module)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 43
+- Total plans completed: 47
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -55,6 +55,8 @@ Last activity: 2026-06-11
 | 15 | 4 | - | - |
 | 16 | 3 | - | - |
 | 17 | 4 | - | - |
+| 18 | 2 | - | - |
+| 19 | 2 | - | - |
 
 **Recent Trend:**
 
@@ -101,6 +103,8 @@ Recent decisions affecting current work:
 - v1.3 architecture lock: drop-newest backpressure on QueueFull (drop-oldest rejected — wastes head-of-queue work, breaks FIFO activity-log ordering)
 - v1.3 quota-burn mitigation set is INSEPARABLE: per-field merge guards + carrier-regex pre-POST validation + `temperature:0` + `MAX_STAGE2_POSTS_PER_POLL` cap + scoped skip-dedup. All five land in Phase 20.
 - v1.3 Phase 15-04: `live_ollama` pytest marker registered in `pyproject.toml`; single opt-in smoke test `tests/api/test_ollama_client_live.py` gated by `OLLAMA_URL` env var (D-10/D-11/D-12/D-13). CI silently skips. Phase 15 complete: 384 tests passing, 1 skipped (the live smoke).
+- Phase 20-01: merge_llm_authoritative returns tuple[ShipmentData, list[dict]] (Option A) — merge.py stays HA-free per D-02; coordinator emits stage2_conflict event using returned conflicts list
+- Phase 20-01: type: ignore[arg-type] on dataclasses.replace(**overrides) — mypy cannot resolve dict[str, str | None] spread against ShipmentData typed replace() overload; runtime values always valid
 
 ### Roadmap Evolution
 
@@ -185,11 +189,11 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-Last session: 2026-06-10T18:50:48.759Z
-Stopped at: Phase 17 context gathered
-Next action: Run `/gsd:verify-work` on Phase 15, then plan Phase 16 via `/gsd:plan-phase --research-phase 16` (flagged NEEDS RESEARCH).
+Last session: 2026-06-15T20:00:00Z
+Stopped at: Phase 20 Plan 01 complete
+Next action: Execute Phase 20 Plan 02 (coordinator wiring: MRG-02, MRG-05, FAIL-03).
 
 ## Operator Next Steps
 
-- Run `/gsd:verify-work` to verify Phase 15 deliverables
-- For Phases 16, 19, 20 (NEEDS RESEARCH), use `/gsd:plan-phase --research-phase N` so a research pass runs before plan drafting
+- `/gsd:execute-phase 20` — execute Phase 20 Plan 02 (coordinator wiring)
+- `/gsd:verify-work 18` — optionally resolve 2 human_needed verification items in Phase 18 first
