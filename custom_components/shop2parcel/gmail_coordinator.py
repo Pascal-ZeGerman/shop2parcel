@@ -72,6 +72,8 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         if self.config_entry is None:
             raise UpdateFailed("config_entry is None — coordinator not properly initialized")
 
+        self._reset_stage2_poll_counters()  # Phase 20 MRG-05 / D-11: reset per-poll counters
+
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
             self.hass, self.config_entry

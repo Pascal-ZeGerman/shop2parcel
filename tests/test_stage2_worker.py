@@ -1014,3 +1014,289 @@ async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
         # FAIL-03: Tracking number must NOT be written to dedup store.
         assert job.storage_key not in coord._submitted_tracking_numbers
+
+
+# ---------------------------------------------------------------------------
+# Phase 20 Plan 03 Task 1: MRG-05 scaffolding tests (RED gate)
+# ---------------------------------------------------------------------------
+
+
+def test_max_stage2_posts_per_poll_constant_exists():
+    """MRG-05 D-08: MAX_STAGE2_POSTS_PER_POLL must equal 5 in const.py."""
+    from custom_components.shop2parcel.const import MAX_STAGE2_POSTS_PER_POLL
+
+    assert MAX_STAGE2_POSTS_PER_POLL == 5
+
+
+def test_stage2_cap_notification_id_prefix_exists():
+    """MRG-05 D-08: STAGE2_CAP_NOTIFICATION_ID_PREFIX must be 'shop2parcel_stage2_cap'."""
+    from custom_components.shop2parcel.const import STAGE2_CAP_NOTIFICATION_ID_PREFIX
+
+    assert STAGE2_CAP_NOTIFICATION_ID_PREFIX == "shop2parcel_stage2_cap"
+
+
+def test_stage2_cap_notification_id_helper():
+    """MRG-05 D-08: stage2_cap_notification_id returns expected string for a given entry_id."""
+    from custom_components.shop2parcel.const import stage2_cap_notification_id
+
+    result = stage2_cap_notification_id("abc123")
+    assert result == "shop2parcel_stage2_cap_abc123"
+
+
+async def test_coordinator_has_stage2_poll_counter_attrs(hass, mock_stage2_config_entry):
+    """MRG-05 D-11: Coordinator __init__ must set _stage2_posts_this_poll and
+    _stage2_cap_notified_this_poll to 0 / False respectively."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore"),
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+    ):
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        assert coord._stage2_posts_this_poll == 0
+        assert coord._stage2_cap_notified_this_poll is False
+
+
+async def test_coordinator_has_reset_stage2_poll_counters_method(hass, mock_stage2_config_entry):
+    """MRG-05 D-11: _reset_stage2_poll_counters must exist and reset both attrs."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore"),
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+    ):
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Manually set to non-defaults to verify reset works.
+        coord._stage2_posts_this_poll = 3
+        coord._stage2_cap_notified_this_poll = True
+        coord._reset_stage2_poll_counters()
+        assert coord._stage2_posts_this_poll == 0
+        assert coord._stage2_cap_notified_this_poll is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 20 Plan 03 Task 2: MRG-05 cap gate + notification + increment (RED gate)
+# ---------------------------------------------------------------------------
+
+
+async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
+    """MRG-05: When MAX_STAGE2_POSTS_PER_POLL reached, subsequent jobs are skipped.
+
+    With cap patched to 2, driving 3 jobs must result in exactly 2 POSTs.
+    The 3rd job's storage_key must not appear in _submitted_tracking_numbers
+    (cap-skipped items are NOT deduplicated — retryable next poll).
+    """
+    from custom_components.shop2parcel.const import stage2_cap_notification_id
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.MAX_STAGE2_POSTS_PER_POLL", 2),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        # Drive 3 jobs with distinct storage_keys.
+        for i in range(1, 4):
+            shipment = _make_shipment(message_id=f"msg{i}")
+            job = Stage2Job(
+                storage_key=f"TN{i:06d}",
+                shipment=shipment,
+                html_body="<html/>",
+                message_id=f"msg-id-{i}",
+                meta={"subject": f"Shipped {i}", "from": "noreply@shopify.com"},
+            )
+            await coord._async_process_stage2_job(job)
+
+        # Exactly 2 POSTs (cap = 2).
+        assert mock_parcel_cls.return_value.async_add_delivery.call_count == 2
+        # 3rd job NOT in dedup store — retryable next poll.
+        assert "TN000003" not in coord._submitted_tracking_numbers
+        # 3rd job NOT in enqueued keys (was discarded by cap gate).
+        assert "TN000003" not in coord._stage2_enqueued_keys
+
+
+async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
+    """MRG-05 D-10: Cap notification fires exactly once per poll regardless of cap-hit count.
+
+    With cap patched to 1, driving 3 jobs:
+      - job 1: POST succeeds (counter = 1, cap not yet hit)
+      - job 2: cap hit — notification fires (call_count = 1)
+      - job 3: cap hit — notification does NOT fire again (call_count still 1)
+    """
+    from custom_components.shop2parcel.const import stage2_cap_notification_id
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.MAX_STAGE2_POSTS_PER_POLL", 1),
+        patch(
+            "custom_components.shop2parcel.coordinator.persistent_notification"
+        ) as mock_pn,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        mock_pn.async_create = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        for i in range(1, 4):
+            shipment = _make_shipment(message_id=f"msg{i}")
+            job = Stage2Job(
+                storage_key=f"TN{i:06d}",
+                shipment=shipment,
+                html_body="<html/>",
+                message_id=f"msg-id-{i}",
+                meta={"subject": f"Shipped {i}", "from": "noreply@shopify.com"},
+            )
+            await coord._async_process_stage2_job(job)
+
+        # Notification fired exactly once (first cap-hit only).
+        assert mock_pn.async_create.call_count == 1
+        # Notification ID matches stage2_cap_notification_id for this entry.
+        call_kwargs = mock_pn.async_create.call_args.kwargs
+        assert call_kwargs["notification_id"] == stage2_cap_notification_id(
+            mock_stage2_config_entry.entry_id
+        )
+
+
+async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entry):
+    """MRG-05: After driving 2 successful POSTs, reset clears both counters to defaults."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        # Drive 2 successful POSTs.
+        for i in range(1, 3):
+            shipment = _make_shipment(message_id=f"msg{i}")
+            job = Stage2Job(
+                storage_key=f"TN{i:06d}",
+                shipment=shipment,
+                html_body="<html/>",
+                message_id=f"msg-id-{i}",
+                meta={"subject": f"Shipped {i}", "from": "noreply@shopify.com"},
+            )
+            await coord._async_process_stage2_job(job)
+
+        # Counter should be 2 after 2 successful POSTs.
+        assert coord._stage2_posts_this_poll == 2
+        # Now reset (simulates start of next poll).
+        coord._reset_stage2_poll_counters()
+        assert coord._stage2_posts_this_poll == 0
+        assert coord._stage2_cap_notified_this_poll is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 20 Plan 03 Task 3: dismissal + temperature:0 verification (RED gate)
+# ---------------------------------------------------------------------------
+
+
+def test_ollama_client_uses_temperature_zero():
+    """SPEC §AC-13: OllamaClient must POST temperature:0 in options dict.
+
+    Static source-code verification — no live Ollama call required. This is a
+    boundary check that confirms the option has not been accidentally removed or
+    changed in a future refactor (SPEC §Boundaries: verification only, no code change).
+    """
+    # SPEC §Acceptance Criteria item 13 — static source verification of temperature:0
+    import pathlib
+
+    source = pathlib.Path(
+        "custom_components/shop2parcel/api/ollama_client.py"
+    ).read_text()
+    assert '"temperature": 0' in source
+
+
+async def test_async_remove_entry_dismisses_cap_notification(hass, mock_stage2_config_entry):
+    """async_remove_entry must dismiss BOTH debug-mode AND Stage-2 cap notifications."""
+    from custom_components.shop2parcel import async_remove_entry
+    from custom_components.shop2parcel.const import (
+        debug_mode_notification_id,
+        stage2_cap_notification_id,
+    )
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with patch(
+        "homeassistant.components.persistent_notification.async_dismiss"
+    ) as mock_dismiss:
+        await async_remove_entry(hass, mock_stage2_config_entry)
+
+    # Two dismiss calls — one for each notification type.
+    assert mock_dismiss.call_count == 2
+    notification_ids = {
+        call.kwargs["notification_id"]
+        for call in mock_dismiss.call_args_list
+    }
+    assert debug_mode_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
+    assert stage2_cap_notification_id(mock_stage2_config_entry.entry_id) in notification_ids

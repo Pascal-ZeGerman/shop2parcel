@@ -103,20 +103,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Dismiss debug-mode notification when this entry is removed.
+    """Dismiss debug-mode AND Stage-2 cap notifications when this entry is removed.
 
     W4/P14-WR-01: When the user uninstalls/removes the Shop2Parcel integration,
     any persistent debug-mode notification must be cleaned up.  This does not
     fire on a normal unload (e.g., HA restart), only on explicit removal, which
     is the correct behaviour — HA shows the notification again on next startup
     if the entry is re-added with debug_mode=True.
+
+    Phase 20 MRG-05: also dismisses the Stage-2 cap-hit notification so neither
+    notification lingers after the integration is removed.
     """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
-    from .const import debug_mode_notification_id  # noqa: PLC0415
+    from .const import debug_mode_notification_id, stage2_cap_notification_id  # noqa: PLC0415
 
     persistent_notification.async_dismiss(
         hass, notification_id=debug_mode_notification_id(entry.entry_id)
+    )
+    persistent_notification.async_dismiss(
+        hass, notification_id=stage2_cap_notification_id(entry.entry_id)
     )
 
 
