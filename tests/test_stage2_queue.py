@@ -562,3 +562,38 @@ async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry)
         mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg2"))
         await coord._async_update_data()
         mock_parcel_cls.return_value.async_add_delivery.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Stage2Job extended with message_id + meta fields (D-06 / D-07)
+# ---------------------------------------------------------------------------
+
+
+def test_stage2job_has_message_id_and_meta_fields():
+    """D-06: Stage2Job must accept message_id and meta as required keyword arguments."""
+    shipment = _make_shipment()
+    job = Stage2Job(
+        storage_key="1Z999AA10123456784",
+        shipment=shipment,
+        html_body="<html/>",
+        message_id="test-msg-id",
+        meta={"subject": "test", "from": "test@example.com"},
+    )
+    assert job.message_id == "test-msg-id"
+    assert job.meta == {"subject": "test", "from": "test@example.com"}
+    assert job.storage_key == "1Z999AA10123456784"
+    assert job.html_body == "<html/>"
+
+
+def test_stage2job_frozen_with_new_fields():
+    """Stage2Job must remain frozen after adding message_id + meta (D-06)."""
+    shipment = _make_shipment()
+    job = Stage2Job(
+        storage_key="1Z999AA10123456784",
+        shipment=shipment,
+        html_body="<html/>",
+        message_id="test-msg-id",
+        meta={"subject": "test", "from": "test@example.com"},
+    )
+    with pytest.raises(FrozenInstanceError):
+        job.message_id = "other"  # type: ignore[misc]
