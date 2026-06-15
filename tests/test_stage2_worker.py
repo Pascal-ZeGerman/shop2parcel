@@ -1288,16 +1288,15 @@ async def test_async_remove_entry_dismisses_cap_notification(hass, mock_stage2_c
 
     mock_stage2_config_entry.add_to_hass(hass)
     with patch(
-        "custom_components.shop2parcel.persistent_notification"
-    ) as mock_pn:
-        mock_pn.async_dismiss = MagicMock()
+        "homeassistant.components.persistent_notification.async_dismiss"
+    ) as mock_dismiss:
         await async_remove_entry(hass, mock_stage2_config_entry)
 
     # Two dismiss calls — one for each notification type.
-    assert mock_pn.async_dismiss.call_count == 2
+    assert mock_dismiss.call_count == 2
     notification_ids = {
         call.kwargs["notification_id"]
-        for call in mock_pn.async_dismiss.call_args_list
+        for call in mock_dismiss.call_args_list
     }
     assert debug_mode_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
     assert stage2_cap_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
