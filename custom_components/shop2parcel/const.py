@@ -84,7 +84,11 @@ def debug_mode_notification_id(entry_id: str) -> str:
 
 # Phase 20 MRG-05 (CONTEXT.md D-08): per-poll Stage-2 POST cap.
 # Caps Stage-2 POSTs at 5 per poll cycle — 25% of parcelapp's 20-POST daily
-# quota. Even 4 polls/day at the cap stays below the daily limit.
+# quota. 4 polls/day at the cap equals the daily limit (5 × 4 = 20); any
+# additional activity in the same day would exceed the quota. The counter
+# window is "per counter-reset", not a strict per-poll-cycle guarantee — jobs
+# queued by one poll but drained by the next may count against the next poll's
+# quota. See WR-01 in phase 20 REVIEW.md for full analysis.
 # stage2_cap_notification_id mirrors debug_mode_notification_id pattern.
 MAX_STAGE2_POSTS_PER_POLL: int = 5
 STAGE2_CAP_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_cap"
