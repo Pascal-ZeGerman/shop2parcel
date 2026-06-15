@@ -1014,3 +1014,77 @@ async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
         # FAIL-03: Tracking number must NOT be written to dedup store.
         assert job.storage_key not in coord._submitted_tracking_numbers
+
+
+# ---------------------------------------------------------------------------
+# Phase 20 Plan 03 Task 1: MRG-05 scaffolding tests (RED gate)
+# ---------------------------------------------------------------------------
+
+
+def test_max_stage2_posts_per_poll_constant_exists():
+    """MRG-05 D-08: MAX_STAGE2_POSTS_PER_POLL must equal 5 in const.py."""
+    from custom_components.shop2parcel.const import MAX_STAGE2_POSTS_PER_POLL
+
+    assert MAX_STAGE2_POSTS_PER_POLL == 5
+
+
+def test_stage2_cap_notification_id_prefix_exists():
+    """MRG-05 D-08: STAGE2_CAP_NOTIFICATION_ID_PREFIX must be 'shop2parcel_stage2_cap'."""
+    from custom_components.shop2parcel.const import STAGE2_CAP_NOTIFICATION_ID_PREFIX
+
+    assert STAGE2_CAP_NOTIFICATION_ID_PREFIX == "shop2parcel_stage2_cap"
+
+
+def test_stage2_cap_notification_id_helper():
+    """MRG-05 D-08: stage2_cap_notification_id returns expected string for a given entry_id."""
+    from custom_components.shop2parcel.const import stage2_cap_notification_id
+
+    result = stage2_cap_notification_id("abc123")
+    assert result == "shop2parcel_stage2_cap_abc123"
+
+
+async def test_coordinator_has_stage2_poll_counter_attrs(hass, mock_stage2_config_entry):
+    """MRG-05 D-11: Coordinator __init__ must set _stage2_posts_this_poll and
+    _stage2_cap_notified_this_poll to 0 / False respectively."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore"),
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+    ):
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        assert coord._stage2_posts_this_poll == 0
+        assert coord._stage2_cap_notified_this_poll is False
+
+
+async def test_coordinator_has_reset_stage2_poll_counters_method(hass, mock_stage2_config_entry):
+    """MRG-05 D-11: _reset_stage2_poll_counters must exist and reset both attrs."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore"),
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+    ):
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Manually set to non-defaults to verify reset works.
+        coord._stage2_posts_this_poll = 3
+        coord._stage2_cap_notified_this_poll = True
+        coord._reset_stage2_poll_counters()
+        assert coord._stage2_posts_this_poll == 0
+        assert coord._stage2_cap_notified_this_poll is False
