@@ -98,6 +98,7 @@ def test_stage2job_is_frozen():
     shipment = _make_shipment()
     job = Stage2Job(
         storage_key="1Z999AA10123456784",
+        normalized_tn="1Z999AA10123456784",
         shipment=shipment,
         html_body="<html/>",
         message_id="test-msg-id",
@@ -224,6 +225,7 @@ async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -479,6 +481,7 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
         coord._stage2_queue.put_nowait(
             Stage2Job(
                 storage_key="filler",
+                normalized_tn="filler",
                 shipment=filler_shipment,
                 html_body="",
                 message_id="filler-msg-id",
@@ -592,6 +595,7 @@ def test_stage2job_has_message_id_and_meta_fields():
     shipment = _make_shipment()
     job = Stage2Job(
         storage_key="1Z999AA10123456784",
+        normalized_tn="1Z999AA10123456784",
         shipment=shipment,
         html_body="<html/>",
         message_id="test-msg-id",
@@ -600,6 +604,7 @@ def test_stage2job_has_message_id_and_meta_fields():
     assert job.message_id == "test-msg-id"
     assert job.meta == {"subject": "test", "from": "test@example.com"}
     assert job.storage_key == "1Z999AA10123456784"
+    assert job.normalized_tn == "1Z999AA10123456784"
     assert job.html_body == "<html/>"
 
 
@@ -608,6 +613,7 @@ def test_stage2job_frozen_with_new_fields():
     shipment = _make_shipment()
     job = Stage2Job(
         storage_key="1Z999AA10123456784",
+        normalized_tn="1Z999AA10123456784",
         shipment=shipment,
         html_body="<html/>",
         message_id="test-msg-id",

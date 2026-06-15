@@ -316,7 +316,12 @@ async def test_worker_cancelled_on_async_stop_stage2(hass, mock_stage2_config_en
 
 
 async def test_async_stop_stage2_bounded_5_seconds(hass, mock_stage2_config_entry):
-    """QUE-05 timeout: async_stop_stage2 completes within 5-second window even if worker ignores cancel."""
+    """QUE-05 timeout: async_stop_stage2 completes within the 5-second backstop window.
+
+    With explicit task.cancel() before wait_for (WR-02 fix), an idle or shielded worker
+    receives CancelledError and exits quickly. The 5-second wait_for is a backstop for
+    truly stuck workers; the normal path completes well under 5 seconds.
+    """
     mock_stage2_config_entry.add_to_hass(hass)
 
     async def _hang(self) -> None:  # noqa: RUF029
@@ -349,7 +354,10 @@ async def test_async_stop_stage2_bounded_5_seconds(hass, mock_stage2_config_entr
         await coord.async_stop_stage2()
         elapsed = loop.time() - start
 
-        assert 4.5 <= elapsed <= 6.0, f"Expected 5s timeout window, got {elapsed:.2f}s"
+        # With task.cancel() before wait_for, the worker receives CancelledError promptly.
+        # The 5-second backstop remains in place for pathological cases but normal shutdown
+        # completes well under 5 seconds (WR-02 fix: no longer waits the full timeout).
+        assert elapsed <= 6.0, f"async_stop_stage2 must complete within backstop window, got {elapsed:.2f}s"
         assert coord._stage2_worker_task is None
 
 
@@ -447,6 +455,7 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -493,6 +502,7 @@ async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry)
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -539,6 +549,7 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="msg1::1Z999",
+            normalized_tn="1Z999",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -594,6 +605,7 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="1Z999",
+            normalized_tn="1Z999",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -643,6 +655,7 @@ async def test_enqueued_key_discarded_on_ollama_failure_without_dedup(
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="1Z999",
+            normalized_tn="1Z999",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -691,12 +704,16 @@ async def test_worker_does_not_swallow_cancelled_error_during_process_job(
 
         shipment = _make_shipment()
         job = Stage2Job(
-            storage_key="1Z999",
+            storage_key="msg-17a3f4c8b",
+            normalized_tn="1Z999",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
         )
+        # Pre-seed _stage2_enqueued_keys as _enqueue_stage2 would have done.
+        # Without this, the discard assertion is trivially true even when discard is a no-op.
+        coord._stage2_enqueued_keys.add(job.normalized_tn)
         coord._stage2_queue.put_nowait(job)
 
         # Let worker receive the job and the CancelledError propagate.
@@ -766,6 +783,7 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
         )
         job = Stage2Job(
             storage_key="STAGE2TN123456",
+            normalized_tn="STAGE2TN123456",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -826,6 +844,7 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         )
         job = Stage2Job(
             storage_key="ABC123",
+            normalized_tn="ABC123",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -896,6 +915,7 @@ async def test_two_field_conflict_emits_single_event(hass, mock_stage2_config_en
         )
         job = Stage2Job(
             storage_key="ABC",
+            normalized_tn="ABC",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -954,6 +974,7 @@ async def test_ollama_transient_no_post_no_dedup(hass, mock_stage2_config_entry)
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -964,7 +985,7 @@ async def test_ollama_transient_no_post_no_dedup(hass, mock_stage2_config_entry)
         # FAIL-03: POST must NOT be called.
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
         # FAIL-03: Tracking number must NOT be written to dedup store.
-        assert job.storage_key not in coord._submitted_tracking_numbers
+        assert job.normalized_tn not in coord._submitted_tracking_numbers
 
 
 async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
@@ -1003,6 +1024,7 @@ async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -1013,7 +1035,7 @@ async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
         # FAIL-03: POST must NOT be called.
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
         # FAIL-03: Tracking number must NOT be written to dedup store.
-        assert job.storage_key not in coord._submitted_tracking_numbers
+        assert job.normalized_tn not in coord._submitted_tracking_numbers
 
 
 # ---------------------------------------------------------------------------
@@ -1135,6 +1157,7 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
             shipment = _make_shipment(message_id=f"msg{i}")
             job = Stage2Job(
                 storage_key=f"TN{i:06d}",
+                normalized_tn=f"TN{i:06d}",
                 shipment=shipment,
                 html_body="<html/>",
                 message_id=f"msg-id-{i}",
@@ -1194,6 +1217,7 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
             shipment = _make_shipment(message_id=f"msg{i}")
             job = Stage2Job(
                 storage_key=f"TN{i:06d}",
+                normalized_tn=f"TN{i:06d}",
                 shipment=shipment,
                 html_body="<html/>",
                 message_id=f"msg-id-{i}",
@@ -1242,6 +1266,7 @@ async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entr
             shipment = _make_shipment(message_id=f"msg{i}")
             job = Stage2Job(
                 storage_key=f"TN{i:06d}",
+                normalized_tn=f"TN{i:06d}",
                 shipment=shipment,
                 html_body="<html/>",
                 message_id=f"msg-id-{i}",

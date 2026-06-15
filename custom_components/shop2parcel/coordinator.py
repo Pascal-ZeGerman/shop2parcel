@@ -169,8 +169,11 @@ def _sanitise_parser_error(err: BaseException) -> str:
 class Stage2Job:
     """Immutable payload for Stage-2 queue items.
 
-    storage_key: normalized tracking number (dedup key — mirrors _submitted_tracking_numbers).
-        Per D-02: this is the normalized tracking number, NOT the composite coordinator.data key.
+    storage_key: coordinator.data entity key (Gmail message ID or composite key such as
+        "17a3f4c8b::1Z999AA10123456784"). Used as the dict key when writing to coordinator.data.
+    normalized_tn: normalized tracking number — the dedup key that mirrors
+        _submitted_tracking_numbers and _stage2_enqueued_keys. This is the value passed as
+        the first positional argument to _enqueue_stage2.
     shipment: Stage-1 ShipmentData for this email.
     html_body: raw HTML body for Ollama prompt construction (Phase 19 worker reads this).
     message_id: Gmail message ID or IMAP UID — for _emit_scan_event attribution (D-06).
@@ -179,6 +182,7 @@ class Stage2Job:
     """
 
     storage_key: str
+    normalized_tn: str
     shipment: ShipmentData
     html_body: str
     message_id: str
@@ -294,7 +298,11 @@ class Shop2ParcelStore(Store):
                 self.minor_version,
                 self.key.removeprefix("shop2parcel."),
             )
-            return {"submitted_tracking_numbers": [], "quota_exhausted_until": None}
+            return {
+                "submitted_tracking_numbers": [],
+                "quota_exhausted_until": None,
+                "persisted_shipments": {},
+            }
         # Same major, future minor — passthrough.  Minor-version changes are backward
         # compatible by convention so no migration is needed.
         return old_data
@@ -457,10 +465,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         # Step 1 (Phase 19): cancel worker task — must precede queue drain (D-01).
         # QUE-05: 5-second bounded wait via asyncio.wait_for.
-        # wait_for cancels the task internally when the timeout fires (Python 3.11+).
-        # No explicit task.cancel() needed before wait_for — it would be redundant.
+        # Explicit task.cancel() is required before wait_for: without it, wait_for on a
+        # not-yet-cancelled task simply waits for natural completion. An idle worker blocked
+        # on queue.get() never completes on its own, causing a 5-second delay on every clean
+        # shutdown. Cancelling first allows the idle worker to exit immediately; the 5-second
+        # backstop handles workers that are mid-operation when cancelled.
         # CancelledError and TimeoutError are suppressed so unload never raises (QUE-05).
         if self._stage2_worker_task is not None and not self._stage2_worker_task.done():
+            self._stage2_worker_task.cancel()
             with suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(self._stage2_worker_task, timeout=5.0)
         self._stage2_worker_task = None
@@ -504,6 +516,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             return  # silent skip — already in flight (QUE-06)
         job = Stage2Job(
             storage_key=storage_key,
+            normalized_tn=normalized_tn,
             shipment=shipment,
             html_body=html_body,
             message_id=message_id,
@@ -544,7 +557,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         try:
             while True:
                 job: Stage2Job = await self._stage2_queue.get()
-                normalized_tn = job.storage_key
+                normalized_tn = job.normalized_tn
                 try:
                     await self._async_process_stage2_job(job)
                 except asyncio.CancelledError:
@@ -586,7 +599,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Auth failures degrade silently to key-discard + next-poll retry; reauth is triggered
         by the next _async_update_data poll cycle instead.
         """
-        normalized_tn = job.storage_key
+        normalized_tn = job.normalized_tn
 
         # MRG-05: per-poll POST cap gate (D-09). Checked BEFORE the extractor call so
         # cap-skipped jobs never reach Ollama (avoids wasted inference cost during cap-hit polls).
