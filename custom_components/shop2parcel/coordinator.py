@@ -336,8 +336,28 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 19: worker task and extractor sentinels — None until async_start_stage2.
         self._stage2_worker_task: asyncio.Task | None = None
         self._extractor: OllamaExtractor | None = None
+        # Phase 20 MRG-05 / D-11: per-poll Stage-2 POST counters.
+        # Both are reset at the top of each poll cycle via _reset_stage2_poll_counters().
+        # _stage2_posts_this_poll: count of successful Stage-2 POSTs in the current poll.
+        # _stage2_cap_notified_this_poll: True once the cap notification has been fired
+        #   this poll — ensures at most one HA notification per poll (D-10 / T-20-03-02).
+        self._stage2_posts_this_poll: int = 0
+        self._stage2_cap_notified_this_poll: bool = False
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
+
+    def _reset_stage2_poll_counters(self) -> None:
+        """Reset per-poll Stage-2 POST counters to their defaults.
+
+        Must be called at the top of each poll cycle (in GmailCoordinator and
+        ImapCoordinator _async_update_data) BEFORE any email scanning so that
+        counters reflect only the current poll's activity (MRG-05 / D-11).
+
+        Defined here on the base class (DRY) so both subclasses share a single
+        implementation without duplicating the attribute reset logic.
+        """
+        self._stage2_posts_this_poll = 0
+        self._stage2_cap_notified_this_poll = False
 
     @property
     def diagnostics(self) -> PollStats:

@@ -82,6 +82,25 @@ def debug_mode_notification_id(entry_id: str) -> str:
     return f"{DEBUG_MODE_NOTIFICATION_ID_PREFIX}_{entry_id}"
 
 
+# Phase 20 MRG-05 (CONTEXT.md D-08): per-poll Stage-2 POST cap.
+# Caps Stage-2 POSTs at 5 per poll cycle — 25% of parcelapp's 20-POST daily
+# quota. Even 4 polls/day at the cap stays below the daily limit.
+# stage2_cap_notification_id mirrors debug_mode_notification_id pattern.
+MAX_STAGE2_POSTS_PER_POLL: int = 5
+STAGE2_CAP_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_cap"
+
+
+def stage2_cap_notification_id(entry_id: str) -> str:
+    """Return the persistent-notification ID for Stage-2 cap-hit events.
+
+    Mirrors debug_mode_notification_id pattern (P14-WR-03). Using a per-entry
+    suffix prevents notification collision when multiple Shop2Parcel config
+    entries coexist. Fired at most once per poll cycle (D-08) so the user
+    sees a single banner rather than per-job spam.
+    """
+    return f"{STAGE2_CAP_NOTIFICATION_ID_PREFIX}_{entry_id}"
+
+
 def normalize_tracking_number(tracking_number: str) -> str:
     """Normalize a tracking number for dedup comparison.
 
