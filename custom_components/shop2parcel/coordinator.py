@@ -570,7 +570,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if self._extractor is not None:
             try:
                 stage2_result = await self._extractor.async_extract(job.html_body, job.shipment)
-            except (OllamaTransientError, OllamaSchemaError):
+            except (OllamaTransientError, OllamaSchemaError):  # fmt: skip
                 # FAIL-03: Ollama error — no POST, no dedup write; next poll retries.
                 _LOGGER.debug(
                     "Stage-2 worker: Ollama error on job %s — no POST, no dedup write; will retry next poll",

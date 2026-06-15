@@ -458,9 +458,7 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
         await hass.async_block_till_done()
 
         # MRG-01: extractor must have been called with the job's html_body and shipment.
-        mock_extractor_instance.async_extract.assert_awaited_once_with(
-            job.html_body, job.shipment
-        )
+        mock_extractor_instance.async_extract.assert_awaited_once_with(job.html_body, job.shipment)
 
 
 async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry):
