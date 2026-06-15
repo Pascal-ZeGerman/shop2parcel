@@ -555,9 +555,14 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
         post_arg = mock_set_data.call_args.args[0]
         # D-06: snapshot — argument MUST be a new dict, not the same object.
         assert post_arg is not pre
-        # The snapshot must contain the job's storage_key mapped to shipment.
+        # The snapshot must contain the job's storage_key mapped to a ShipmentData.
+        # Phase 20: merge_llm_authoritative always creates a new ShipmentData via
+        # dataclasses.replace, so we check content equality rather than identity.
         assert "msg1::1Z999" in post_arg
-        assert post_arg["msg1::1Z999"] is shipment
+        stored = post_arg["msg1::1Z999"]
+        assert stored.tracking_number == shipment.tracking_number
+        assert stored.carrier_name == shipment.carrier_name
+        assert stored.order_name == shipment.order_name
 
 
 async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry):

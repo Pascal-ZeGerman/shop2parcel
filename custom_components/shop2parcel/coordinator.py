@@ -66,6 +66,7 @@ from .const import (
     MAX_SUBMITTED_TRACKING_NUMBERS,
 )
 from .extractors.ollama_extractor import OllamaExtractor
+from .merge import merge_llm_authoritative
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -541,13 +542,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             raise
 
     async def _async_process_stage2_job(self, job: Stage2Job) -> None:
-        """Process one Stage2Job: extract via Ollama, POST to parcelapp, update state.
+        """Process one Stage2Job: extract via Ollama, merge, POST to parcelapp, update state.
 
         Called by _async_stage2_worker for each drained job.
-        Phase 20 will add merge semantics; Phase 19 uses Stage-1 shipment for POST.
 
         Implements D-05 (per-job store save after POST), D-06 (snapshot pattern),
-        MRG-01 (extractor called for every job even if result unused until Phase 20).
+        MRG-01 (extractor called for every job), MRG-02 (merged shipment POSTed),
+        MRG-03 (stage2_conflict event emitted when LLM disagrees with Stage-1),
+        FAIL-03 (OllamaTransientError / OllamaSchemaError → no POST, no dedup write).
 
         Error hierarchy mirrors inline POST in gmail_coordinator.py lines 434-511:
           - ParcelAppAuthError  -> raise ConfigEntryAuthFailed (caught by worker BLE001)
@@ -561,21 +563,34 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         by the next _async_update_data poll cycle instead.
         """
         normalized_tn = job.storage_key
-        shipment = job.shipment
 
-        # Phase 19 MRG-01: always call extractor (result unused until Phase 20 merge).
-        # Phase 20 will replace job.shipment pass-through with real merge logic.
+        # MRG-02: default to Stage-1 shipment; replaced by merged result after extraction.
+        merged_shipment = job.shipment
+
         if self._extractor is not None:
             try:
-                await self._extractor.async_extract(job.html_body, shipment)
-            except (  # fmt: skip
-                OllamaTransientError,
-                OllamaSchemaError,
-            ):
+                stage2_result = await self._extractor.async_extract(job.html_body, job.shipment)
+            except (OllamaTransientError, OllamaSchemaError):
+                # FAIL-03: Ollama error — no POST, no dedup write; next poll retries.
                 _LOGGER.debug(
-                    "Stage-2 worker: Ollama error on job %s — using Stage-1 shipment for POST",
+                    "Stage-2 worker: Ollama error on job %s — no POST, no dedup write; will retry next poll",
                     normalized_tn,
                     exc_info=True,
+                )
+                self._stage2_enqueued_keys.discard(normalized_tn)
+                return
+
+            # MRG-02: merge Stage-2 result into Stage-1 shipment.
+            merged_shipment, conflicts = merge_llm_authoritative(job.shipment, stage2_result)
+
+            # MRG-03: emit exactly one stage2_conflict event if LLM disagreed.
+            if conflicts:
+                self._emit_scan_event(
+                    message_id=job.message_id,
+                    meta=job.meta,
+                    outcome="stage2_conflict",
+                    tracking_number=normalized_tn,
+                    extra={"conflicts": conflicts},
                 )
 
         parcel_client = ParcelAppClient(
@@ -590,12 +605,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_enqueued_keys.discard(normalized_tn)
             return
 
-        carrier_code = normalize_carrier(shipment.carrier_name)
+        carrier_code = normalize_carrier(merged_shipment.carrier_name)
         try:
             await parcel_client.async_add_delivery(
-                tracking_number=shipment.tracking_number,
+                tracking_number=merged_shipment.tracking_number,
                 carrier_code=carrier_code,
-                description=shipment.order_name or shipment.tracking_number,
+                description=merged_shipment.order_name or merged_shipment.tracking_number,
             )
         except ParcelAppAuthError as err:
             raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
@@ -616,7 +631,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._submitted_tracking_numbers.popitem(last=False)
             self._stage2_enqueued_keys.discard(normalized_tn)
             base = self.data if self.data is not None else {}
-            updated = {**base, job.storage_key: shipment}
+            updated = {**base, job.storage_key: merged_shipment}
             self._pending_shipments = updated
             await self._async_save_store()
             return
@@ -637,8 +652,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         # D-06: snapshot pattern — never mutate self.data directly.
         # Guard: self.data is None before the first coordinator refresh; use empty dict as base.
+        # MRG-02: persist and surface the merged shipment so sensors reflect merged state.
         base = self.data if self.data is not None else {}
-        updated = {**base, job.storage_key: shipment}
+        updated = {**base, job.storage_key: merged_shipment}
         self._pending_shipments = updated  # D-05: assign before save
         await self._async_save_store()  # D-05: per-job save immediately
         self.async_set_updated_data(updated)  # D-06: triggers sensor creation
