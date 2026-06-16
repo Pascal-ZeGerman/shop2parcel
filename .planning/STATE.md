@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: AI-based Email Analysis
-status: executing
-stopped_at: Phase 20 Plan 01 complete
-last_updated: "2026-06-15T20:00:00Z"
+status: ready_to_plan
+stopped_at: Phase 20 complete (3/3) — ready to discuss Phase 21
+last_updated: 2026-06-16T00:03:27.002Z
 last_activity: 2026-06-15 -- Phase 20 Plan 01 complete (merge_llm_authoritative)
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 18
-  completed_plans: 16
+  completed_plans: 24
   percent: 63
 ---
 
@@ -21,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-05)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** Phase 20 — merge + quota guards (critical)
+**Current focus:** Phase 21 — failure surface + diagnostics
 
 ## Current Position
 
-Phase: 20
-Plan: 01 complete, 02+ pending
-Status: Executing
-Last activity: 2026-06-15 -- Phase 20 Plan 01 complete (merge_llm_authoritative pure module)
+Phase: 21
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-06-16
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 47
+- Total plans completed: 50
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -57,6 +57,7 @@ Last activity: 2026-06-15 -- Phase 20 Plan 01 complete (merge_llm_authoritative 
 | 17 | 4 | - | - |
 | 18 | 2 | - | - |
 | 19 | 2 | - | - |
+| 20 | 3 | - | - |
 
 **Recent Trend:**
 

@@ -19,7 +19,7 @@
 - [x] **Phase 17: Config-Flow Expansion** — New Ollama options, `/api/tags` validate-on-save, locked-field disclosure, v1.2 backward-compat fallback (completed 2026-06-10)
 - [x] **Phase 18: Queue Plumbing (transitional)** — Bounded `asyncio.Queue` + drop-newest backpressure + in-flight key dedup, wired into poll loop alongside legacy path (completed 2026-06-12)
 - [x] **Phase 19: Worker Spawn + Poll Loop Flip** — Long-lived background worker via `entry.async_create_background_task`, 5 s cancel-with-suppress shutdown, poll loop becomes Ollama-free (completed 2026-06-12)
-- [ ] **Phase 20: Merge + Quota Guards (CRITICAL)** — LLM-authoritative merge with per-field guards, carrier-regex pre-POST validation, `MAX_STAGE2_POSTS_PER_POLL` cap, skip-dedup-on-failure
+- [x] **Phase 20: Merge + Quota Guards (CRITICAL)** — LLM-authoritative merge with per-field guards, carrier-regex pre-POST validation, `MAX_STAGE2_POSTS_PER_POLL` cap, skip-dedup-on-failure (completed 2026-06-15)
 - [ ] **Phase 21: Failure Surface + Diagnostics** — `_LOGGER.error` + activity-log outcomes + persistent notification with cooldown + `Stage2Sensor` + custom-field sensor attributes
 - [ ] **Phase 22: README Setup + End-to-End Validation** — Docker/Portainer install, three-topology networking notes, model-pull caveat, reachability sanity-check, real-Ollama integration test
 
@@ -165,11 +165,11 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 20-02-PLAN.md — Wire merge into `_async_process_stage2_job` + extend Stage2Job with `message_id` and `meta` (D-06/D-07) + emit `stage2_conflict` activity event + FAIL-03 skip-POST and skip-dedup on Ollama errors (MRG-02, MRG-03 wiring, FAIL-03)
+- [x] 20-02-PLAN.md — Wire merge into `_async_process_stage2_job` + extend Stage2Job with `message_id` and `meta` (D-06/D-07) + emit `stage2_conflict` activity event + FAIL-03 skip-POST and skip-dedup on Ollama errors (MRG-02, MRG-03 wiring, FAIL-03)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 20-03-PLAN.md — `MAX_STAGE2_POSTS_PER_POLL=5` constant + `stage2_cap_notification_id` helper + coordinator counters + `_reset_stage2_poll_counters` + cap gate + once-per-poll notification + dismissal at remove + temperature:0 verification (MRG-05, D-08/D-09/D-10/D-11/D-12)
+- [x] 20-03-PLAN.md — `MAX_STAGE2_POSTS_PER_POLL=5` constant + `stage2_cap_notification_id` helper + coordinator counters + `_reset_stage2_poll_counters` + cap gate + once-per-poll notification + dismissal at remove + temperature:0 verification (MRG-05, D-08/D-09/D-10/D-11/D-12)
 
 **Research**: Done — see .planning/phases/20-merge-quota-guards-critical/20-RESEARCH.md (merge function shape, Stage2Job extension pitfalls, counter reset placement, persistent notification pattern all canonicalized; zero new packages).
 
@@ -214,7 +214,7 @@ Plans:
 | 17. Config-Flow Expansion | v1.3 | 4/4 | Complete    | 2026-06-11 |
 | 18. Queue Plumbing (transitional) | v1.3 | 2/2 | Complete    | 2026-06-12 |
 | 19. Worker Spawn + Poll Loop Flip | v1.3 | 2/2 | Complete    | 2026-06-12 |
-| 20. Merge + Quota Guards (CRITICAL) | v1.3 | 0/3 | Planned     | — |
+| 20. Merge + Quota Guards (CRITICAL) | v1.3 | 3/3 | Complete    | 2026-06-16 |
 | 21. Failure Surface + Diagnostics | v1.3 | 0/0 | Not started | — |
 | 22. README Setup + End-to-End Validation | v1.3 | 0/0 | Not started | — |
 
