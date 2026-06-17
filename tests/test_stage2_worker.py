@@ -1418,3 +1418,732 @@ async def test_async_stop_stage2_resets_even_when_worker_is_none(hass, mock_stag
         # Reset must have fired despite the early-return path.
         assert coord._stage2_consecutive_failures == 0
         assert coord._stage2_last_notify_ts is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 21 Plan 02: Task 2 — FAIL-01/02/04/05 helper methods + wiring
+# ---------------------------------------------------------------------------
+
+# Shared patch list for Task 2 tests — avoids duplication.
+_COORD_PATCHES = [
+    "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+    "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient",
+    "custom_components.shop2parcel.gmail_coordinator.EmailParser",
+    "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow",
+]
+
+
+def _make_job(subject="Order Shipped", sender="noreply@shopify.com", normalized_tn="1Z999TN"):
+    """Helper: build a Stage2Job for testing failure/success helpers."""
+    return Stage2Job(
+        storage_key=f"{normalized_tn}::job",
+        normalized_tn=normalized_tn,
+        shipment=_make_shipment(message_id="msg-fail-test"),
+        html_body="<html/>",
+        message_id="msg-fail-test",
+        meta={"subject": subject, "from": sender},
+    )
+
+
+@pytest.fixture
+def coord_for_fail_tests(hass, mock_stage2_config_entry):
+    """Yield a GmailCoordinator instance ready for _record_stage2_failure/_success tests.
+
+    Worker is NOT started — tests call helpers directly or use _async_process_stage2_job.
+    """
+    import contextlib
+    import unittest.mock
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        yield coord
+
+
+# ---------------------------------------------------------------------------
+# FAIL-01: _record_stage2_failure emits exactly one ERROR log with 4 fields
+# ---------------------------------------------------------------------------
+
+
+async def test_fail_01_ollama_transient_error_logs_error_with_4_fields(
+    caplog, coord_for_fail_tests
+):
+    """FAIL-01: OllamaTransientError causes exactly one ERROR log with subject, sender,
+    error class name, and error message (formerly swallowed at DEBUG level).
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    coord = coord_for_fail_tests
+    job = _make_job(subject="Your order has shipped", sender="noreply@shopify.com")
+    err = OllamaTransientError("connection refused")
+
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        coord._record_stage2_failure(job, err)
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    msg = error_records[0].getMessage()
+    assert "OllamaTransientError" in msg
+    assert "connection refused" in msg
+    assert "Your order has shipped" in msg
+    assert "noreply@shopify.com" in msg
+
+
+async def test_fail_01_ollama_schema_error_logs_error_with_4_fields(caplog, coord_for_fail_tests):
+    """FAIL-01: OllamaSchemaError causes exactly one ERROR log with the 4 required fields."""
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError
+
+    coord = coord_for_fail_tests
+    job = _make_job(subject="Shipment update", sender="carrier@example.com")
+    err = OllamaSchemaError("bad json")
+
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        coord._record_stage2_failure(job, err)
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    msg = error_records[0].getMessage()
+    assert "OllamaSchemaError" in msg
+    assert "bad json" in msg
+    assert "Shipment update" in msg
+    assert "carrier@example.com" in msg
+
+
+async def test_fail_01_worker_outer_generic_exception_logs_error_with_4_fields(
+    hass, mock_stage2_config_entry, caplog
+):
+    """FAIL-01: Generic RuntimeError from the worker outer-except path also produces
+    an ERROR log with the 4 required fields (worker-outer wiring, not just Ollama except).
+    """
+    import logging
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch.object(
+            Shop2ParcelCoordinator,
+            "_async_process_stage2_job",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("unexpected"),
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        job = _make_job()
+        coord._stage2_queue.put_nowait(job)
+
+        with caplog.at_level(logging.ERROR):
+            await asyncio.sleep(0)
+            await hass.async_block_till_done()
+
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(error_records) >= 1
+        combined = " ".join(r.getMessage() for r in error_records)
+        assert "RuntimeError" in combined
+        assert "unexpected" in combined
+
+
+# ---------------------------------------------------------------------------
+# FAIL-02: _record_stage2_failure appends stage2_failed event to scan_events
+# ---------------------------------------------------------------------------
+
+
+async def test_fail_02_emits_stage2_failed_event_on_ollama_transient_error(coord_for_fail_tests):
+    """FAIL-02: OllamaTransientError causes a stage2_failed scan_event with error metadata."""
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    coord = coord_for_fail_tests
+    job = _make_job()
+    err = OllamaTransientError("timeout")
+
+    coord._record_stage2_failure(job, err)
+
+    assert len(coord.diagnostics.scan_events) == 1
+    evt = coord.diagnostics.scan_events[-1]
+    assert evt["outcome"] == "stage2_failed"
+    assert evt["error_type"] == "OllamaTransientError"
+    assert "timeout" in evt["error_msg"]
+    assert evt["tracking_number"] == job.normalized_tn
+    assert evt["message_id"] == job.message_id
+
+
+async def test_fail_02_emits_stage2_failed_event_on_ollama_schema_error(coord_for_fail_tests):
+    """FAIL-02: OllamaSchemaError causes a stage2_failed scan_event."""
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError
+
+    coord = coord_for_fail_tests
+    job = _make_job()
+    err = OllamaSchemaError("no opening brace")
+
+    coord._record_stage2_failure(job, err)
+
+    evt = coord.diagnostics.scan_events[-1]
+    assert evt["outcome"] == "stage2_failed"
+    assert evt["error_type"] == "OllamaSchemaError"
+    assert "no opening brace" in evt["error_msg"]
+
+
+async def test_fail_02_emits_stage2_failed_event_on_worker_outer_exception(coord_for_fail_tests):
+    """FAIL-02: Generic Exception from worker outer-except also appends stage2_failed event."""
+    coord = coord_for_fail_tests
+    job = _make_job()
+    err = RuntimeError("generic crash")
+
+    coord._record_stage2_failure(job, err)
+
+    evt = coord.diagnostics.scan_events[-1]
+    assert evt["outcome"] == "stage2_failed"
+    assert evt["error_type"] == "RuntimeError"
+    assert "generic crash" in evt["error_msg"]
+
+
+# ---------------------------------------------------------------------------
+# FAIL-04: threshold notification + cooldown + re-fire
+# ---------------------------------------------------------------------------
+
+
+async def test_fail_04_notification_fires_at_threshold(hass, coord_for_fail_tests):
+    """FAIL-04: After 3 consecutive Ollama failures, persistent_notification.async_create
+    fires exactly once with the correct notification_id, title, and message body.
+    """
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import (
+        STAGE2_NOTIFY_THRESHOLD,
+        stage2_failing_notification_id,
+    )
+
+    coord = coord_for_fail_tests
+    job = _make_job()
+    err = OllamaTransientError("connection refused")
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for _ in range(STAGE2_NOTIFY_THRESHOLD):
+            coord._record_stage2_failure(job, err)
+
+        assert mock_create.call_count == 1
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["notification_id"] == stage2_failing_notification_id(
+            coord.config_entry.entry_id
+        )
+        assert call_kwargs["title"] == "Shop2Parcel Stage-2 Failing"
+        assert "failed 3 times in a row" in call_kwargs["message"]
+        assert "Stage-1" in call_kwargs["message"]
+
+
+async def test_fail_04_notification_does_not_refire_within_cooldown(hass, coord_for_fail_tests):
+    """FAIL-04 cooldown: A 4th failure within STAGE2_NOTIFY_COOLDOWN_S does NOT re-fire."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import (
+        STAGE2_NOTIFY_COOLDOWN_S,
+        STAGE2_NOTIFY_THRESHOLD,
+    )
+
+    coord = coord_for_fail_tests
+    job = _make_job()
+    err = OllamaTransientError("connection refused")
+
+    BASE_TIME = 1700000000.0
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        with patch("custom_components.shop2parcel.coordinator._time.time", return_value=BASE_TIME):
+            for _ in range(STAGE2_NOTIFY_THRESHOLD):
+                coord._record_stage2_failure(job, err)
+            assert mock_create.call_count == 1
+
+        # Still within cooldown window — should NOT re-fire.
+        inside_cooldown = BASE_TIME + STAGE2_NOTIFY_COOLDOWN_S - 1
+        with patch(
+            "custom_components.shop2parcel.coordinator._time.time", return_value=inside_cooldown
+        ):
+            coord._record_stage2_failure(job, err)
+
+        assert mock_create.call_count == 1  # no re-fire
+
+
+async def test_fail_04_notification_refires_after_cooldown(hass, coord_for_fail_tests):
+    """FAIL-04 re-fire: After STAGE2_NOTIFY_COOLDOWN_S elapses, the next failure DOES re-fire."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import (
+        STAGE2_NOTIFY_COOLDOWN_S,
+        STAGE2_NOTIFY_THRESHOLD,
+    )
+
+    coord = coord_for_fail_tests
+    job = _make_job()
+    err = OllamaTransientError("connection refused")
+
+    BASE_TIME = 1700000000.0
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        with patch("custom_components.shop2parcel.coordinator._time.time", return_value=BASE_TIME):
+            for _ in range(STAGE2_NOTIFY_THRESHOLD):
+                coord._record_stage2_failure(job, err)
+            assert mock_create.call_count == 1
+
+        # Past cooldown — should re-fire.
+        after_cooldown = BASE_TIME + STAGE2_NOTIFY_COOLDOWN_S + 1
+        with patch(
+            "custom_components.shop2parcel.coordinator._time.time", return_value=after_cooldown
+        ):
+            coord._record_stage2_failure(job, err)
+            assert mock_create.call_count == 2
+            # _stage2_last_notify_ts must be updated to the new fire time.
+            assert coord._stage2_last_notify_ts == after_cooldown
+
+
+async def test_fail_04_counter_does_not_reset_after_notification_fires(hass, coord_for_fail_tests):
+    """FAIL-04 D-09: The failure counter is NOT reset when notification fires; cooldown
+    alone gates re-fires. Counter keeps growing on subsequent failures.
+    """
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import STAGE2_NOTIFY_THRESHOLD
+
+    coord = coord_for_fail_tests
+    job = _make_job()
+    err = OllamaTransientError("connection refused")
+
+    with patch.object(persistent_notification, "async_create"):
+        for _ in range(STAGE2_NOTIFY_THRESHOLD):
+            coord._record_stage2_failure(job, err)
+        assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
+
+        # Counter keeps growing; cooldown prevents re-fire.
+        coord._record_stage2_failure(job, err)
+        assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD + 1
+
+
+async def test_fail_04_parcelapp_transient_error_does_not_count_toward_threshold(
+    hass, mock_stage2_config_entry
+):
+    """FAIL-04 D-05: ParcelAppTransientError does NOT increment _stage2_consecutive_failures.
+    5 consecutive ParcelApp failures should leave the counter at 0 and notification unfired.
+    """
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import ParcelAppTransientError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(persistent_notification, "async_create") as mock_create,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppTransientError("5xx from parcelapp")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        # Wire extractor directly — do NOT start the background worker to avoid races.
+        mock_extractor = MagicMock()
+        mock_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        coord._extractor = mock_extractor
+
+        for i in range(5):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+
+        assert coord._stage2_consecutive_failures == 0
+        assert mock_create.call_count == 0
+
+
+async def test_fail_04_parcelapp_already_added_does_not_count_toward_threshold(
+    hass, mock_stage2_config_entry
+):
+    """FAIL-04 D-05: ParcelAppAlreadyAddedError does NOT increment the failure counter."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import ParcelAppAlreadyAddedError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(persistent_notification, "async_create") as mock_create,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        # Wire extractor directly — do NOT start the background worker to avoid races.
+        mock_extractor = MagicMock()
+        mock_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        coord._extractor = mock_extractor
+
+        for i in range(5):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+
+        assert coord._stage2_consecutive_failures == 0
+        assert mock_create.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# FAIL-05: recovery — counter reset + notification dismiss on success
+# ---------------------------------------------------------------------------
+
+
+async def test_fail_05_first_success_after_streak_dismisses_notification(
+    hass, mock_stage2_config_entry
+):
+    """FAIL-05: After a failure streak + notification fire, a successful POST resets the
+    counter to 0 and calls persistent_notification.async_dismiss with the correct ID.
+    """
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import (
+        STAGE2_NOTIFY_THRESHOLD,
+        stage2_failing_notification_id,
+    )
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(persistent_notification, "async_create") as mock_create,
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # GmailCoordinator.__init__ calls async_dismiss(debug_mode_notification_id) when
+        # CONF_DEBUG_MODE is False — capture baseline BEFORE the success test to isolate it.
+        baseline_dismiss_count = mock_dismiss.call_count
+
+        await coord._async_load_store()
+        # Wire extractor directly — do NOT start the background worker to avoid races.
+        fail_extractor = MagicMock()
+        fail_extractor.async_extract = AsyncMock(
+            side_effect=[
+                OllamaTransientError("err1"),
+                OllamaTransientError("err2"),
+                OllamaTransientError("err3"),
+            ]
+        )
+        coord._extractor = fail_extractor
+
+        # 3 failures — notification fires.
+        for i in range(STAGE2_NOTIFY_THRESHOLD):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+
+        assert mock_create.call_count == 1
+        assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
+
+        # Switch extractor to success mode + run success job.
+        success_extractor = MagicMock()
+        success_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        coord._extractor = success_extractor
+
+        success_job = _make_job(normalized_tn="TNSUCCESS")
+        await coord._async_process_stage2_job(success_job)
+
+        assert coord._stage2_consecutive_failures == 0
+        # Exactly ONE new dismiss (from _record_stage2_success) since the baseline.
+        assert mock_dismiss.call_count == baseline_dismiss_count + 1
+        assert mock_dismiss.call_args.kwargs["notification_id"] == stage2_failing_notification_id(
+            coord.config_entry.entry_id
+        )
+
+
+async def test_fail_05_already_added_is_not_a_success(hass, mock_stage2_config_entry):
+    """FAIL-05 D-06: ParcelAppAlreadyAddedError is a graceful rejection, not a success.
+    Counter must NOT reset and async_dismiss must NOT be called.
+    """
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import (
+        OllamaTransientError,
+        ParcelAppAlreadyAddedError,
+    )
+    from custom_components.shop2parcel.const import STAGE2_NOTIFY_THRESHOLD
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Capture baseline (GmailCoordinator.__init__ calls dismiss for debug-mode notification).
+        baseline_dismiss_count = mock_dismiss.call_count
+
+        await coord._async_load_store()
+        # Wire extractors directly — do NOT start background worker.
+        fail_extractor = MagicMock()
+        fail_extractor.async_extract = AsyncMock(
+            side_effect=[OllamaTransientError("err")] * STAGE2_NOTIFY_THRESHOLD
+        )
+        coord._extractor = fail_extractor
+
+        for i in range(STAGE2_NOTIFY_THRESHOLD):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+
+        # Switch extractor to success mode; parcel raises AlreadyAdded — NOT a success.
+        ok_extractor = MagicMock()
+        ok_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        coord._extractor = ok_extractor
+
+        already_added_job = _make_job(normalized_tn="TNALREADY")
+        await coord._async_process_stage2_job(already_added_job)
+
+        assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
+        # No NEW dismiss calls beyond the baseline (AlreadyAdded is NOT a success).
+        assert mock_dismiss.call_count == baseline_dismiss_count
+
+
+async def test_fail_05_cap_skip_is_not_a_success(hass, mock_stage2_config_entry):
+    """FAIL-05 D-06: A cap-skipped job (MAX_STAGE2_POSTS_PER_POLL reached) is NOT a success.
+    Counter must NOT reset and async_dismiss must NOT be called.
+    """
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import (
+        MAX_STAGE2_POSTS_PER_POLL,
+        STAGE2_NOTIFY_THRESHOLD,
+    )
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Capture baseline (GmailCoordinator.__init__ calls dismiss for debug-mode notification).
+        baseline_dismiss_count = mock_dismiss.call_count
+
+        await coord._async_load_store()
+        # Wire extractor — fail 3 times to build up streak.
+        fail_extractor = MagicMock()
+        fail_extractor.async_extract = AsyncMock(
+            side_effect=[OllamaTransientError("err")] * STAGE2_NOTIFY_THRESHOLD
+        )
+        coord._extractor = fail_extractor
+
+        for i in range(STAGE2_NOTIFY_THRESHOLD):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+
+        # Exhaust the cap so the next job hits the cap-skip path (no extractor call).
+        coord._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
+        cap_job = _make_job(normalized_tn="TNCAP")
+        await coord._async_process_stage2_job(cap_job)
+
+        assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
+        # No NEW dismiss calls beyond the baseline (cap-skip is NOT a success).
+        assert mock_dismiss.call_count == baseline_dismiss_count
+
+
+async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_config_entry):
+    """FAIL-05 D-06: A quota-exhausted skip (quota guard before POST) is NOT a success.
+    Counter must NOT reset and async_dismiss must NOT be called.
+    """
+    import time as stdlib_time
+
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import STAGE2_NOTIFY_THRESHOLD
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Capture baseline (GmailCoordinator.__init__ calls dismiss for debug-mode notification).
+        baseline_dismiss_count = mock_dismiss.call_count
+
+        await coord._async_load_store()
+        # Wire extractor — fail 3 times to build up streak.
+        fail_extractor = MagicMock()
+        fail_extractor.async_extract = AsyncMock(
+            side_effect=[OllamaTransientError("err")] * STAGE2_NOTIFY_THRESHOLD
+        )
+        coord._extractor = fail_extractor
+
+        for i in range(STAGE2_NOTIFY_THRESHOLD):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+
+        # Simulate quota exhausted — next job's extractor runs but parcel POST is skipped.
+        ok_extractor = MagicMock()
+        ok_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        coord._extractor = ok_extractor
+        coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
+
+        quota_job = _make_job(normalized_tn="TNQUOTA")
+        await coord._async_process_stage2_job(quota_job)
+
+        assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
+        # No NEW dismiss calls beyond the baseline (quota-skip is NOT a success).
+        assert mock_dismiss.call_count == baseline_dismiss_count
+
+
+async def test_fail_05_dismiss_unconditional_even_when_no_prior_notification(
+    hass, mock_stage2_config_entry
+):
+    """FAIL-05 D-04: async_dismiss is called unconditionally on success even with counter=0.
+    HA's async_dismiss is a no-op on unknown notification IDs so this is safe.
+    """
+    from homeassistant.components import persistent_notification
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # GmailCoordinator.__init__ calls async_dismiss(debug_mode_notification_id) when
+        # CONF_DEBUG_MODE is False — capture baseline BEFORE the success test.
+        baseline_dismiss_count = mock_dismiss.call_count
+
+        await coord._async_load_store()
+        # Wire extractor directly — do NOT start background worker.
+        ok_extractor = MagicMock()
+        ok_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        coord._extractor = ok_extractor
+
+        # No prior failure streak — counter is 0.
+        assert coord._stage2_consecutive_failures == 0
+
+        success_job = _make_job(normalized_tn="TNNOSTREAK")
+        await coord._async_process_stage2_job(success_job)
+
+        # Dismiss must still be called even with no prior notification — exactly 1 new call.
+        assert mock_dismiss.call_count == baseline_dismiss_count + 1

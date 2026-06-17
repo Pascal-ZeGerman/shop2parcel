@@ -400,6 +400,83 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_posts_this_poll = 0
         self._stage2_cap_notified_this_poll = False
 
+    def _record_stage2_failure(self, job: Stage2Job, err: Exception) -> None:
+        """Centralize loud-surface side effects for a Stage-2 Ollama or worker-outer failure.
+
+        Implements FAIL-01 (error log), FAIL-02 (activity event), FAIL-04 (consecutive-failure
+        counter + threshold notification with 1-hour cooldown) per D-01..D-09.
+
+        Pure-surface contract (D-04): does NOT touch control flow — callers must still
+        call self._stage2_enqueued_keys.discard() and return/raise as appropriate.
+
+        Counter scope (D-05): ONLY called from Ollama except and worker-outer except sites —
+        ParcelApp errors (Auth/Quota/AlreadyAdded/InvalidTracking/Transient) are handled
+        inline and never routed through this helper, so the counter tracks Ollama failures only.
+
+        Persistence (D-07): counter persists across polls; reset only on real success
+        (_record_stage2_success, D-06) or async_stop_stage2 (SPEC Req #5).
+        """
+        # FAIL-01: loud error log with 4 required fields (replaces Phase 19 _LOGGER.debug).
+        _LOGGER.error(
+            "Stage-2 worker: %s (%s) for '%s' from '%s'",
+            type(err).__name__,
+            err,
+            job.meta.get("subject", ""),
+            job.meta.get("from", ""),
+        )
+
+        # FAIL-02: append stage2_failed activity event with error metadata.
+        # Use kwarg tracking_number= (not normalized_tn=) per _emit_scan_event signature (Pitfall 5).
+        self._emit_scan_event(
+            message_id=job.message_id,
+            meta=job.meta,
+            outcome="stage2_failed",
+            tracking_number=job.normalized_tn,
+            extra={"error_type": type(err).__name__, "error_msg": str(err)},
+        )
+
+        # FAIL-04: consecutive-failure counter increment + threshold/cooldown notification gate.
+        self._stage2_consecutive_failures += 1
+
+        # D-09 cooldown state machine: fire if at/past threshold AND (never fired OR cooldown elapsed).
+        if self._stage2_consecutive_failures >= STAGE2_NOTIFY_THRESHOLD and (
+            self._stage2_last_notify_ts is None
+            or _time.time() - self._stage2_last_notify_ts >= STAGE2_NOTIFY_COOLDOWN_S
+        ):
+            # D-08: notification body mentions failure count + Stage-1 still working callout.
+            persistent_notification.async_create(
+                self.hass,
+                message=(
+                    f"Stage-2 extraction has failed {self._stage2_consecutive_failures} times in a row. "
+                    f"Check that the Ollama server is reachable and the configured model is pulled. "
+                    f"The integration continues running with Stage-1 results."
+                ),
+                title="Shop2Parcel Stage-2 Failing",
+                notification_id=stage2_failing_notification_id(self.config_entry.entry_id),  # type: ignore[union-attr]
+            )
+            # Update cooldown timestamp to gate re-fires (D-09).
+            self._stage2_last_notify_ts = _time.time()
+
+    def _record_stage2_success(self) -> None:
+        """Centralize loud-surface side effects for a Stage-2 successful POST.
+
+        Implements FAIL-05 (counter reset + notification dismiss) per D-03/D-06.
+
+        Called ONLY from the success path at line 710 (after _stage2_posts_this_poll += 1)
+        — D-06 defines 'success' as a real 2xx POST to parcelapp.net. Graceful rejections
+        (AlreadyAdded, InvalidTracking), cap-skip, and quota-exhausted-skip do NOT call this.
+
+        The async_dismiss is unconditional (D-04): HA no-ops on unknown notification IDs
+        (Assumption A1 in 21-RESEARCH.md), so no _stage2_consecutive_failures > 0 guard is needed.
+        Note (D-03): stage2_succeeded_total increment is Plan 03's job.
+        """
+        self._stage2_consecutive_failures = 0
+        # FAIL-05: unconditional dismiss — HA is a no-op when the ID is unknown.
+        persistent_notification.async_dismiss(
+            self.hass,
+            notification_id=stage2_failing_notification_id(self.config_entry.entry_id),  # type: ignore[union-attr]
+        )
+
     @property
     def diagnostics(self) -> PollStats:
         """Public read-only view of in-memory poll diagnostics."""
@@ -584,9 +661,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Sole blocking point: await self._stage2_queue.get().
 
         CancelledError at any await point propagates to the outer try — never
-        swallowed. Phase 21 owns loud failure surface (FAIL-01..05); Phase 19
-        logs quietly and does NOT crash the worker on OllamaTransientError /
-        OllamaSchemaError.
+        swallowed. Phase 21 (FAIL-01..05) implemented loud failure surface via
+        _record_stage2_failure/_record_stage2_success; worker-outer Exception
+        calls _record_stage2_failure and does NOT crash the worker.
 
         task_done() in finally: ensures queue.join() (if used in tests) never hangs.
         """
@@ -600,13 +677,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 except asyncio.CancelledError:
                     self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
                     raise  # propagate — shuts down the worker
-                except Exception:  # noqa: BLE001
-                    # Phase 21 owns notifications. Phase 19: log debug, discard in-flight key.
-                    _LOGGER.debug(
-                        "Stage-2 worker: error on job %s — discarding in-flight key; next poll retries",
-                        normalized_tn,
-                        exc_info=True,
-                    )
+                except Exception as err:  # noqa: BLE001
+                    # FAIL-01/02/04: surface the failure loudly via the centralized helper (D-01..D-04).
+                    self._record_stage2_failure(job, err)
                     self._stage2_enqueued_keys.discard(normalized_tn)
                 finally:
                     self._stage2_queue.task_done()
@@ -669,13 +742,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if self._extractor is not None:
             try:
                 stage2_result = await self._extractor.async_extract(job.html_body, job.shipment)
-            except (OllamaTransientError, OllamaSchemaError):  # fmt: skip
-                # FAIL-03: Ollama error — no POST, no dedup write; next poll retries.
-                _LOGGER.debug(
-                    "Stage-2 worker: Ollama error on job %s — no POST, no dedup write; will retry next poll",
-                    normalized_tn,
-                    exc_info=True,
-                )
+            except (OllamaTransientError, OllamaSchemaError) as err:  # fmt: skip
+                # FAIL-01/02/04: surface the Ollama failure loudly via helper (D-01..D-04, D-05 scope).
+                # FAIL-03: no POST, no dedup write; next poll retries (D-04 pure-surface: helper does
+                # not touch control flow; existing discard+return below remain unchanged).
+                self._record_stage2_failure(job, err)
                 self._stage2_enqueued_keys.discard(normalized_tn)
                 return
 
@@ -745,6 +816,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         # Success path (mirrors gmail_coordinator.py lines 513-526).
         self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
+        self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
         self._submitted_tracking_numbers[normalized_tn] = None
         if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
             self._submitted_tracking_numbers.popitem(last=False)
