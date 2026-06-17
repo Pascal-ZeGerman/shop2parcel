@@ -87,6 +87,29 @@ _SHIPMENT_FIELD_TYPES: dict[str, type] = {
 }
 
 
+def _safe_custom_attributes(entry: dict) -> dict[str, str | None]:
+    """Return custom_attributes from a persisted_shipments entry with wrong-type guard.
+
+    FLD-03 / D-10 / D-11: Returns entry.get("custom_attributes", {}) if the value is a
+    dict. If the value has the wrong type (e.g. list, str — from hand-editing or a
+    downgrade scenario), emits a WARNING and returns {} so locked fields restore
+    correctly and the integration continues operating (ASVS V5 input validation).
+
+    Placed here immediately after _SHIPMENT_FIELD_TYPES (per 21-RESEARCH.md Open
+    Question #2) so it is adjacent to the dict it reads from and mirrors the
+    existing module-level helper pattern (_extract_email_meta).
+    """
+    val = entry.get("custom_attributes", {})
+    if not isinstance(val, dict):
+        _LOGGER.warning(
+            "persisted_shipments entry has wrong type for custom_attributes (type=%s); "
+            "returning empty dict.",
+            type(val).__name__,
+        )
+        return {}
+    return val
+
+
 def _extract_email_meta(msg: dict) -> dict:
     """Extract subject, from, date, and snippet from a Gmail message dict.
 
@@ -795,7 +818,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 _LOGGER.warning("persisted_shipments entry for %r is invalid — skipping", msg_id)
                 continue
             try:
-                restored[msg_id] = ShipmentData(**{k: entry[k] for k in _SHIPMENT_FIELD_TYPES})
+                restored[msg_id] = ShipmentData(
+                    **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
+                    custom_attributes=_safe_custom_attributes(entry),
+                )
             except TypeError as err:
                 _LOGGER.warning(
                     "persisted_shipments entry for %r could not be reconstructed (%s) — skipping",

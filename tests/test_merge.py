@@ -197,10 +197,10 @@ def test_sanity_check_does_not_apply_to_conflict_path() -> None:
 
 def test_no_ha_imports_in_merge_module() -> None:
     """D-02: merge.py must not import any homeassistant module."""
-    import custom_components.shop2parcel.merge as merge_mod  # noqa: PLC0415
-
     # Inspect the module's source via __file__
     import pathlib  # noqa: PLC0415
+
+    import custom_components.shop2parcel.merge as merge_mod  # noqa: PLC0415
 
     source = pathlib.Path(merge_mod.__file__).read_text()
     assert "homeassistant" not in source, (

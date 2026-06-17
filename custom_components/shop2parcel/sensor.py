@@ -154,4 +154,5 @@ class ShipmentSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
             "tracking_number": shipment.tracking_number,
             "carrier": shipment.carrier_name,
             "email_date": shipment.email_date,
+            **shipment.custom_attributes,
         }
