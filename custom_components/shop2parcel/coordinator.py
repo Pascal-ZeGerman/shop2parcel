@@ -259,6 +259,13 @@ class PollStats:
     # scan_events_total is "all events ever" while scan_events is "most recent 50".
     stage2_enabled: bool = False
     # Phase 17 D-05: derived at async_setup_entry time; False until Ollama URL is set.
+    # Phase 21 DIAG-02: lifetime Stage-2 counters; auto-included in asdict() diagnostics download.
+    stage2_enqueued_total: int = 0
+    stage2_succeeded_total: int = 0
+    stage2_failed_total: int = 0
+    stage2_dropped_backpressure_total: int = 0
+    stage2_schema_error_total: int = 0
+    stage2_conflict_total: int = 0
 
 
 class Shop2ParcelStore(Store):
@@ -438,6 +445,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # FAIL-04: consecutive-failure counter increment + threshold/cooldown notification gate.
         self._stage2_consecutive_failures += 1
 
+        # DIAG-02: lifetime failure counters; stage2_schema_error_total is a sub-counter.
+        self._diagnostics.stage2_failed_total += 1
+        if isinstance(err, OllamaSchemaError):
+            self._diagnostics.stage2_schema_error_total += 1
+
         # D-09 cooldown state machine: fire if at/past threshold AND (never fired OR cooldown elapsed).
         if self._stage2_consecutive_failures >= STAGE2_NOTIFY_THRESHOLD and (
             self._stage2_last_notify_ts is None
@@ -471,6 +483,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Note (D-03): stage2_succeeded_total increment is Plan 03's job.
         """
         self._stage2_consecutive_failures = 0
+        # DIAG-02: lifetime success counter; incremented only on real 2xx POST (D-06).
+        self._diagnostics.stage2_succeeded_total += 1
         # FAIL-05: unconditional dismiss — HA is a no-op when the ID is unknown.
         persistent_notification.async_dismiss(
             self.hass,
@@ -481,6 +495,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def diagnostics(self) -> PollStats:
         """Public read-only view of in-memory poll diagnostics."""
         return self._diagnostics
+
+    @property
+    def stage2_queue_depth(self) -> int:
+        """Current Stage-2 queue depth; 0 when stage2 is disabled."""
+        if self._stage2_queue is None:
+            return 0
+        return self._stage2_queue.qsize()
 
     def _emit_scan_event(
         self,
@@ -651,8 +672,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 outcome="stage2_dropped_backpressure",
                 tracking_number=normalized_tn,
             )
+            self._diagnostics.stage2_dropped_backpressure_total += 1  # DIAG-02
             return  # NO dedup write (QUE-03), NO add to enqueued_keys
         self._stage2_enqueued_keys.add(normalized_tn)  # add AFTER successful put (Anti-Patterns §3)
+        self._diagnostics.stage2_enqueued_total += 1  # DIAG-02: only on successful put_nowait
 
     async def _async_stage2_worker(self) -> None:
         """Single long-lived background worker draining _stage2_queue serially.
@@ -762,6 +785,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     tracking_number=normalized_tn,
                     extra={"conflicts": conflicts},
                 )
+                self._diagnostics.stage2_conflict_total += 1  # DIAG-02
 
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
