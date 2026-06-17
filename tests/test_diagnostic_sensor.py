@@ -289,3 +289,180 @@ async def test_activity_log_sensor_attributes_capped_at_10(hass, mock_config_ent
     assert len(recent_events) == 10, f"expected 10 events (capped), got {len(recent_events)}"
     # Should be the last 10 (indices 5-14)
     assert recent_events[-1]["message_id"] == "gmail:msg14"
+
+
+# ---------------------------------------------------------------------------
+# Phase 21 Plan 03 — DIAG-01: Stage2Sensor class and registration tests
+# ---------------------------------------------------------------------------
+
+
+async def test_stage2_sensor_registered_in_async_setup_entry(hass, mock_config_entry):
+    """DIAG-01: Stage2Sensor is registered via async_setup_entry (unconditionally)."""
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_stage2_queue"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, "stage2_queue diagnostic sensor not registered"
+
+
+async def test_stage2_sensor_registered_even_when_stage2_disabled(hass, mock_config_entry):
+    """DIAG-01 Pitfall 6: Stage2Sensor registered even when stage2_enabled=False."""
+    # mock_config_entry has no CONF_OLLAMA_URL in options → stage2_enabled=False.
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_stage2_queue"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, "Stage2Sensor must be registered unconditionally"
+
+
+async def test_stage2_sensor_unique_id_format(hass, mock_config_entry):
+    """DIAG-01: Stage2Sensor unique_id format is '{DOMAIN}_{entry_id}_stage2_queue'."""
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    assert sensor._attr_unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_stage2_queue"
+
+
+def test_stage2_sensor_attr_name():
+    """DIAG-01: Stage2Sensor._attr_name is 'Stage-2 Queue'."""
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    assert Stage2Sensor._attr_name == "Stage-2 Queue"
+
+
+def test_stage2_sensor_inherits_diagnostic_entity_category():
+    """DIAG-01: Stage2Sensor inherits EntityCategory.DIAGNOSTIC from DiagnosticSensor base."""
+    from homeassistant.helpers.entity import EntityCategory
+
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    assert Stage2Sensor._attr_entity_category == EntityCategory.DIAGNOSTIC
+
+
+def test_stage2_sensor_inherits_state_class_measurement():
+    """DIAG-01: Stage2Sensor inherits SensorStateClass.MEASUREMENT from DiagnosticSensor base."""
+    from homeassistant.components.sensor import SensorStateClass
+
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    assert Stage2Sensor._attr_state_class == SensorStateClass.MEASUREMENT
+
+
+async def test_stage2_sensor_native_value_zero_when_queue_is_none(hass, mock_config_entry):
+    """DIAG-01: Stage2Sensor.native_value returns 0 (not None) when _stage2_queue is None."""
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    assert coordinator._stage2_queue is None
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    assert sensor.native_value == 0
+
+
+async def test_stage2_sensor_native_value_reads_qsize_when_queue_active(
+    hass, mock_config_entry
+):
+    """DIAG-01: Stage2Sensor.native_value returns qsize() when queue is active."""
+    import asyncio
+
+    from custom_components.shop2parcel.coordinator import Stage2Job
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    coordinator._stage2_queue = asyncio.Queue(maxsize=32)
+    shipment = _make_shipment()
+    for i in range(3):
+        job = Stage2Job(
+            storage_key=f"key{i}",
+            normalized_tn=f"TN{i}",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id=f"msg{i}",
+            meta={},
+        )
+        coordinator._stage2_queue.put_nowait(job)
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    assert sensor.native_value == 3
+
+
+async def test_stage2_sensor_extra_state_attributes_contains_exactly_6_keys(
+    hass, mock_config_entry
+):
+    """DIAG-01: Stage2Sensor.extra_state_attributes has exactly 6 keys."""
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    attrs = sensor.extra_state_attributes
+    expected_keys = {
+        "enqueued_total",
+        "succeeded_total",
+        "failed_total",
+        "dropped_backpressure_total",
+        "schema_error_total",
+        "conflict_total",
+    }
+    assert set(attrs.keys()) == expected_keys, f"unexpected keys: {set(attrs.keys())}"
+
+
+async def test_stage2_sensor_extra_state_attributes_reads_pollstats_counters(
+    hass, mock_config_entry
+):
+    """DIAG-01: Stage2Sensor.extra_state_attributes reads from coordinator.diagnostics."""
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    # Manually set counter values on diagnostics.
+    coordinator._diagnostics.stage2_enqueued_total = 5
+    coordinator._diagnostics.stage2_succeeded_total = 3
+    coordinator._diagnostics.stage2_failed_total = 1
+    coordinator._diagnostics.stage2_dropped_backpressure_total = 2
+    coordinator._diagnostics.stage2_schema_error_total = 1
+    coordinator._diagnostics.stage2_conflict_total = 0
+
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    attrs = sensor.extra_state_attributes
+    assert attrs == {
+        "enqueued_total": 5,
+        "succeeded_total": 3,
+        "failed_total": 1,
+        "dropped_backpressure_total": 2,
+        "schema_error_total": 1,
+        "conflict_total": 0,
+    }
+
+
+async def test_stage2_sensor_device_info_matches_other_diagnostic_sensors(
+    hass, mock_config_entry
+):
+    """DIAG-01: Stage2Sensor._attr_device_info has same identifiers as other diagnostic sensors."""
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    assert sensor._attr_device_info is not None
+    assert (DOMAIN, mock_config_entry.entry_id) in sensor._attr_device_info["identifiers"]
+
+
+async def test_all_seven_diagnostic_sensors_registered(hass, mock_config_entry):
+    """DIAG-01/DIAG-08: all 7 diagnostic sensors (including Stage2Sensor) registered at setup."""
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    prefix = f"{DOMAIN}_{mock_config_entry.entry_id}_"
+    expected_suffixes = {
+        "emails_scanned",
+        "new_emails_inspected",
+        "emails_matched",
+        "tracking_numbers_found",
+        "keyword_hits",
+        "activity_log",
+        "stage2_queue",
+    }
+    found = {e.unique_id.removeprefix(prefix) for e in entries if e.unique_id.startswith(prefix)}
+    missing = expected_suffixes - found
+    assert not missing, f"missing diagnostic sensors: {missing}"
