@@ -234,3 +234,63 @@ def test_returns_new_shipmentdata() -> None:
     # Stage-1 not mutated
     assert stage1.tracking_number == "ABC123"
     assert conflicts == []
+
+
+# ---------------------------------------------------------------------------
+# FLD-03 tests — custom_attributes propagation (Phase 21 Plan 01)
+# ---------------------------------------------------------------------------
+
+
+def test_merge_propagates_custom_attributes_when_non_empty() -> None:
+    """FLD-03 / D-12: Non-empty Stage2Result.custom is propagated to merged.custom_attributes."""
+    stage1 = _make_shipment()
+    result = _make_result(
+        locked={"tracking_number": None, "carrier_name": None, "order_name": None},
+        custom={"estimated_delivery": "2026-06-20", "weight": "1kg"},
+    )
+    merged, _ = merge_llm_authoritative(stage1, result)
+    assert merged.custom_attributes == {"estimated_delivery": "2026-06-20", "weight": "1kg"}
+
+
+def test_merge_propagates_empty_custom_attributes() -> None:
+    """FLD-03 / D-12: Empty Stage2Result.custom is propagated as {} — no exception."""
+    stage1 = _make_shipment()
+    result = _make_result(
+        locked={},
+        custom={},
+    )
+    merged, _ = merge_llm_authoritative(stage1, result)
+    assert merged.custom_attributes == {}
+
+
+def test_merge_overwrites_existing_custom_attributes_on_stage1() -> None:
+    """FLD-03 / D-12: Stage-2 custom overwrites existing Stage-1 custom_attributes unconditionally."""
+    stage1 = ShipmentData(
+        tracking_number="ABC123",
+        carrier_name="UPS",
+        order_name="#1",
+        message_id="msg1",
+        email_date=1700000000,
+        custom_attributes={"old_key": "old_val"},
+    )
+    result = _make_result(
+        locked={},
+        custom={"new_key": "new_val"},
+    )
+    merged, _ = merge_llm_authoritative(stage1, result)
+    assert merged.custom_attributes == {"new_key": "new_val"}
+
+
+def test_merge_returns_immutable_shipmentdata_via_replace() -> None:
+    """FLD-03: merge produces a new ShipmentData instance; stage1 is not mutated."""
+    stage1 = _make_shipment()
+    result = _make_result(locked={}, custom={"k": "v"})
+    merged, _ = merge_llm_authoritative(stage1, result)
+    assert merged is not stage1
+    assert stage1.custom_attributes == {}
+
+
+def test_shipmentdata_default_custom_attributes_is_empty_dict() -> None:
+    """FLD-03 Pitfall 1: Positional 5-arg ShipmentData construction still works; default is {}."""
+    s = ShipmentData("1Z" + "A" * 16, "UPS", "#1234", "msg1", 1700000000)
+    assert s.custom_attributes == {}

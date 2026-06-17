@@ -21,8 +21,8 @@ coordinator, which holds ``self.hass``) can emit the ``stage2_conflict`` activit
 event via ``_emit_scan_event`` — keeping this module HA-free per **D-02** and
 CONTEXT.md decisions **D-03 / D-04 / D-05**.
 
-``Stage2Result.custom`` is never read or written here; custom-field surfacing is
-deferred to Phase 21.
+``Stage2Result.custom`` is propagated unconditionally into ``ShipmentData.custom_attributes``
+and surfaced as HA sensor attributes (FLD-03). Custom fields are never POSTed to parcelapp.net.
 """
 
 from __future__ import annotations
@@ -78,8 +78,9 @@ def merge_llm_authoritative(
           ``_emit_scan_event(outcome="stage2_conflict", extra={"conflicts": conflicts})``
           (CONTEXT.md **D-04 / D-05**).
 
-    ``Stage2Result.custom`` is never read or written here (out of scope for
-    Phase 20; custom-field surfacing is Phase 21).
+    ``Stage2Result.custom`` is unconditionally propagated into the merged
+    ``ShipmentData.custom_attributes`` (FLD-03) — user-added fields surface as
+    HA sensor attributes and are never POSTed to parcelapp.net.
     """
     overrides: dict[str, str | None] = {}
     conflicts: list[dict] = []
@@ -114,4 +115,7 @@ def merge_llm_authoritative(
     # mypy cannot resolve the **dict[str, str | None] spread against ShipmentData's
     # typed keyword-only replace() overload — the runtime values are always valid.
     merged: ShipmentData = replace(stage1, **overrides)  # type: ignore[arg-type]
+    # FLD-03 / D-12: unconditionally propagate Stage2Result.custom into custom_attributes.
+    # Stage2Result.custom is always a dict per Phase 16 extractor contract — empty-over-empty is harmless.
+    merged = replace(merged, custom_attributes=result.custom)
     return merged, conflicts
