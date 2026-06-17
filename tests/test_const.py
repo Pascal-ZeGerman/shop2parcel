@@ -135,3 +135,41 @@ def test_phase17_existing_constants_unaffected():
     assert DOMAIN == "shop2parcel"
     assert CONF_POLL_INTERVAL == "poll_interval"
     assert LOCKED_OLLAMA_FIELDS == ("tracking_number", "carrier_name", "order_name")
+
+
+# -------- Phase 21 Plan 02: FAIL-04 notification ID helper + threshold constants ---
+
+
+def test_stage2_failing_notification_id_per_entry_format():
+    """FAIL-04: stage2_failing_notification_id returns correct prefixed ID for a given entry."""
+    from custom_components.shop2parcel.const import stage2_failing_notification_id
+
+    assert stage2_failing_notification_id("abc123") == "shop2parcel_stage2_failing_abc123"
+
+
+def test_stage2_failing_notification_id_distinct_from_cap():
+    """FAIL-04: stage2_failing_notification_id uses a different prefix than stage2_cap_notification_id.
+
+    Ensures notifications from FAIL-04 (consecutive failures) and MRG-05 (per-poll POST cap)
+    do not overwrite each other in HA's notification panel (T-21-02-04 + P14-WR-03 pattern).
+    """
+    from custom_components.shop2parcel.const import (
+        stage2_cap_notification_id,
+        stage2_failing_notification_id,
+    )
+
+    assert stage2_failing_notification_id("abc") != stage2_cap_notification_id("abc")
+
+
+def test_stage2_notify_threshold_default():
+    """FAIL-04: STAGE2_NOTIFY_THRESHOLD is 3 — notification fires after 3 consecutive failures."""
+    from custom_components.shop2parcel.const import STAGE2_NOTIFY_THRESHOLD
+
+    assert STAGE2_NOTIFY_THRESHOLD == 3
+
+
+def test_stage2_notify_cooldown_default():
+    """FAIL-04: STAGE2_NOTIFY_COOLDOWN_S is 3600 — 1-hour cooldown between re-fires."""
+    from custom_components.shop2parcel.const import STAGE2_NOTIFY_COOLDOWN_S
+
+    assert STAGE2_NOTIFY_COOLDOWN_S == 3600

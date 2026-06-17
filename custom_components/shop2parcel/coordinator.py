@@ -66,7 +66,10 @@ from .const import (
     DOMAIN,
     MAX_STAGE2_POSTS_PER_POLL,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    STAGE2_NOTIFY_COOLDOWN_S,
+    STAGE2_NOTIFY_THRESHOLD,
     stage2_cap_notification_id,
+    stage2_failing_notification_id,
 )
 from .extractors.ollama_extractor import OllamaExtractor
 from .merge import merge_llm_authoritative
@@ -377,6 +380,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         #   this poll — ensures at most one HA notification per poll (D-10 / T-20-03-02).
         self._stage2_posts_this_poll: int = 0
         self._stage2_cap_notified_this_poll: bool = False
+        # Phase 21 FAIL-04/05: consecutive-failure streak across polls + notification cooldown timestamp.
+        # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
+        self._stage2_consecutive_failures: int = 0
+        self._stage2_last_notify_ts: float | None = None
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
@@ -486,6 +493,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         QUE-05: 5-second bounded wait via asyncio.wait_for; both CancelledError
         and TimeoutError suppressed so on-unload never raises.
         """
+        # Phase 21 SPEC Req #5: reset failure streak on stage2 stop/reload.
+        # Placed at the TOP of async_stop_stage2 (before any early-return) so the reset
+        # fires unconditionally — even when _stage2_queue is None (CR-01 sentinel path where
+        # async_start_stage2 was never called). A naive 'append at end' would miss this path.
+        self._stage2_consecutive_failures = 0
+        self._stage2_last_notify_ts = None
+
         # Step 1 (Phase 19): cancel worker task — must precede queue drain (D-01).
         # QUE-05: 5-second bounded wait via asyncio.wait_for.
         # Explicit task.cancel() is required before wait_for: without it, wait_for on a

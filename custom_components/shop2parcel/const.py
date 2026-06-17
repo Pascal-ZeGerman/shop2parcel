@@ -105,6 +105,27 @@ def stage2_cap_notification_id(entry_id: str) -> str:
     return f"{STAGE2_CAP_NOTIFICATION_ID_PREFIX}_{entry_id}"
 
 
+# Phase 21 Plan 02 (FAIL-04): consecutive-failure threshold notification constants.
+# After STAGE2_NOTIFY_THRESHOLD consecutive Ollama failures the user sees a persistent
+# notification banner.  Re-fires are gated by STAGE2_NOTIFY_COOLDOWN_S (1 hour) to
+# avoid notification spam under sustained outages (T-21-02-01 DoS mitigation).
+# stage2_failing_notification_id mirrors stage2_cap_notification_id pattern (P14-WR-03).
+STAGE2_NOTIFY_THRESHOLD: int = 3
+STAGE2_NOTIFY_COOLDOWN_S: int = 3600
+STAGE2_FAILING_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_failing"
+
+
+def stage2_failing_notification_id(entry_id: str) -> str:
+    """Return the persistent-notification ID for Stage-2 consecutive-failure events.
+
+    Mirrors stage2_cap_notification_id pattern (P14-WR-03). Using a per-entry
+    suffix prevents notification collision when multiple Shop2Parcel config
+    entries coexist (T-21-02-04). Fired at most once per STAGE2_NOTIFY_COOLDOWN_S
+    window (FAIL-04 threshold notification; 1-hour cooldown via STAGE2_NOTIFY_COOLDOWN_S).
+    """
+    return f"{STAGE2_FAILING_NOTIFICATION_ID_PREFIX}_{entry_id}"
+
+
 def normalize_tracking_number(tracking_number: str) -> str:
     """Normalize a tracking number for dedup comparison.
 

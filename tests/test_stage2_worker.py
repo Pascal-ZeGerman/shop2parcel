@@ -357,7 +357,9 @@ async def test_async_stop_stage2_bounded_5_seconds(hass, mock_stage2_config_entr
         # With task.cancel() before wait_for, the worker receives CancelledError promptly.
         # The 5-second backstop remains in place for pathological cases but normal shutdown
         # completes well under 5 seconds (WR-02 fix: no longer waits the full timeout).
-        assert elapsed <= 6.0, f"async_stop_stage2 must complete within backstop window, got {elapsed:.2f}s"
+        assert elapsed <= 6.0, (
+            f"async_stop_stage2 must complete within backstop window, got {elapsed:.2f}s"
+        )
         assert coord._stage2_worker_task is None
 
 
@@ -1199,9 +1201,7 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.MAX_STAGE2_POSTS_PER_POLL", 1),
-        patch(
-            "custom_components.shop2parcel.coordinator.persistent_notification"
-        ) as mock_pn,
+        patch("custom_components.shop2parcel.coordinator.persistent_notification") as mock_pn,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -1297,9 +1297,7 @@ def test_ollama_client_uses_temperature_zero():
     # SPEC §Acceptance Criteria item 13 — static source verification of temperature:0
     import pathlib
 
-    source = pathlib.Path(
-        "custom_components/shop2parcel/api/ollama_client.py"
-    ).read_text()
+    source = pathlib.Path("custom_components/shop2parcel/api/ollama_client.py").read_text()
     assert '"temperature": 0' in source
 
 
@@ -1312,16 +1310,111 @@ async def test_async_remove_entry_dismisses_cap_notification(hass, mock_stage2_c
     )
 
     mock_stage2_config_entry.add_to_hass(hass)
-    with patch(
-        "homeassistant.components.persistent_notification.async_dismiss"
-    ) as mock_dismiss:
+    with patch("homeassistant.components.persistent_notification.async_dismiss") as mock_dismiss:
         await async_remove_entry(hass, mock_stage2_config_entry)
 
     # Two dismiss calls — one for each notification type.
     assert mock_dismiss.call_count == 2
-    notification_ids = {
-        call.kwargs["notification_id"]
-        for call in mock_dismiss.call_args_list
-    }
+    notification_ids = {call.kwargs["notification_id"] for call in mock_dismiss.call_args_list}
     assert debug_mode_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
     assert stage2_cap_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
+
+
+# ---------------------------------------------------------------------------
+# Phase 21 Plan 02: Task 1 — Foundation layer (FAIL-04/05 state vars)
+# ---------------------------------------------------------------------------
+
+
+async def test_coordinator_init_sets_failure_counter_to_zero(hass, mock_stage2_config_entry):
+    """Phase 21 FAIL-04/05: _stage2_consecutive_failures is 0 and _stage2_last_notify_ts is
+    None immediately after coordinator construction (before any Stage-2 activity).
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        assert coord._stage2_consecutive_failures == 0
+        assert coord._stage2_last_notify_ts is None
+
+
+async def test_async_stop_stage2_resets_failure_counter_to_zero(hass, mock_stage2_config_entry):
+    """Phase 21 SPEC Req #5: async_stop_stage2 resets _stage2_consecutive_failures to 0
+    and _stage2_last_notify_ts to None, even if they were non-zero/non-None before the call.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        # Manually set non-default state to simulate a prior streak.
+        coord._stage2_consecutive_failures = 5
+        coord._stage2_last_notify_ts = 1700000000.0
+
+        await coord.async_stop_stage2()
+
+        assert coord._stage2_consecutive_failures == 0
+        assert coord._stage2_last_notify_ts is None
+
+
+async def test_async_stop_stage2_resets_even_when_worker_is_none(hass, mock_stage2_config_entry):
+    """Phase 21 SPEC Req #5: async_stop_stage2 resets failure counter UNCONDITIONALLY.
+
+    The Phase 18 CR-01 sentinel means async_stop_stage2 has an early-return path
+    when _stage2_queue is None (worker never started). The reset must fire even on
+    this path — this test guards against a naive 'append at end' placement that would
+    be skipped by the early return.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Do NOT call async_start_stage2 — _stage2_queue remains None (CR-01 sentinel path).
+        assert coord._stage2_queue is None
+        assert coord._stage2_worker_task is None
+
+        # Set non-default failure state.
+        coord._stage2_consecutive_failures = 3
+
+        await coord.async_stop_stage2()
+
+        # Reset must have fired despite the early-return path.
+        assert coord._stage2_consecutive_failures == 0
+        assert coord._stage2_last_notify_ts is None
