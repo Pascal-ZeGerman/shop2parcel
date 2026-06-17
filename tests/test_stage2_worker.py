@@ -2191,9 +2191,7 @@ def test_pollstats_asdict_contains_all_6_stage2_counter_keys():
     assert expected_keys <= set(d.keys()), f"missing keys: {expected_keys - set(d.keys())}"
 
 
-async def test_stage2_queue_depth_returns_zero_when_queue_is_none(
-    hass, mock_stage2_config_entry
-):
+async def test_stage2_queue_depth_returns_zero_when_queue_is_none(hass, mock_stage2_config_entry):
     """DIAG-02: stage2_queue_depth returns 0 when _stage2_queue is None (stage2 not started)."""
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -2214,9 +2212,7 @@ async def test_stage2_queue_depth_returns_zero_when_queue_is_none(
         assert coord.stage2_queue_depth == 0
 
 
-async def test_stage2_queue_depth_returns_qsize_when_queue_active(
-    hass, mock_stage2_config_entry
-):
+async def test_stage2_queue_depth_returns_qsize_when_queue_active(hass, mock_stage2_config_entry):
     """DIAG-02: stage2_queue_depth returns qsize() when queue is active."""
     import asyncio
 
@@ -2377,7 +2373,11 @@ async def test_diag_02_stage2_failed_total_increments_on_each_ollama_failure(
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         fail_extractor = MagicMock()
         fail_extractor.async_extract = AsyncMock(
-            side_effect=[OllamaTransientError("e1"), OllamaTransientError("e2"), OllamaTransientError("e3")]
+            side_effect=[
+                OllamaTransientError("e1"),
+                OllamaTransientError("e2"),
+                OllamaTransientError("e3"),
+            ]
         )
         coord._extractor = fail_extractor
         for i in range(3):
@@ -2553,7 +2553,11 @@ async def test_diag_02_stage2_conflict_total_increments_on_mrg_03_conflict(
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         # Extractor returns a locked tracking_number different from Stage-1 → conflict.
         stage2_result = Stage2Result(
-            locked={"tracking_number": "STAGE2_CONFLICT_TN", "carrier_name": None, "order_name": None},
+            locked={
+                "tracking_number": "STAGE2_CONFLICT_TN",
+                "carrier_name": None,
+                "order_name": None,
+            },
             custom={},
             passes_used=1,
             latency_ms=10.0,
@@ -2571,9 +2575,7 @@ async def test_diag_02_stage2_conflict_total_increments_on_mrg_03_conflict(
         assert coord.diagnostics.stage2_failed_total == 0
 
 
-async def test_diag_02_stage2_conflict_total_zero_when_no_conflict(
-    hass, mock_stage2_config_entry
-):
+async def test_diag_02_stage2_conflict_total_zero_when_no_conflict(hass, mock_stage2_config_entry):
     """DIAG-02: stage2_conflict_total stays 0 when Stage-2 result matches Stage-1."""
     from homeassistant.components import persistent_notification
 

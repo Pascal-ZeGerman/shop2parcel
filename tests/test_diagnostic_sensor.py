@@ -328,29 +328,38 @@ async def test_stage2_sensor_unique_id_format(hass, mock_config_entry):
     assert sensor._attr_unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_stage2_queue"
 
 
-def test_stage2_sensor_attr_name():
-    """DIAG-01: Stage2Sensor._attr_name is 'Stage-2 Queue'."""
+async def test_stage2_sensor_attr_name(hass, mock_config_entry):
+    """DIAG-01: Stage2Sensor name is 'Stage-2 Queue' (via HA entity name property on instance)."""
     from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
 
-    assert Stage2Sensor._attr_name == "Stage-2 Queue"
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    # HA Entity._attr_name is a property descriptor; test via class dict
+    assert (
+        Stage2Sensor.__dict__.get("_attr_name") == "Stage-2 Queue" or sensor.name == "Stage-2 Queue"
+    )
 
 
-def test_stage2_sensor_inherits_diagnostic_entity_category():
+async def test_stage2_sensor_inherits_diagnostic_entity_category(hass, mock_config_entry):
     """DIAG-01: Stage2Sensor inherits EntityCategory.DIAGNOSTIC from DiagnosticSensor base."""
     from homeassistant.helpers.entity import EntityCategory
 
     from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
 
-    assert Stage2Sensor._attr_entity_category == EntityCategory.DIAGNOSTIC
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    assert sensor.entity_category == EntityCategory.DIAGNOSTIC
 
 
-def test_stage2_sensor_inherits_state_class_measurement():
+async def test_stage2_sensor_inherits_state_class_measurement(hass, mock_config_entry):
     """DIAG-01: Stage2Sensor inherits SensorStateClass.MEASUREMENT from DiagnosticSensor base."""
     from homeassistant.components.sensor import SensorStateClass
 
     from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
 
-    assert Stage2Sensor._attr_state_class == SensorStateClass.MEASUREMENT
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    assert sensor.state_class == SensorStateClass.MEASUREMENT
 
 
 async def test_stage2_sensor_native_value_zero_when_queue_is_none(hass, mock_config_entry):
@@ -363,9 +372,7 @@ async def test_stage2_sensor_native_value_zero_when_queue_is_none(hass, mock_con
     assert sensor.native_value == 0
 
 
-async def test_stage2_sensor_native_value_reads_qsize_when_queue_active(
-    hass, mock_config_entry
-):
+async def test_stage2_sensor_native_value_reads_qsize_when_queue_active(hass, mock_config_entry):
     """DIAG-01: Stage2Sensor.native_value returns qsize() when queue is active."""
     import asyncio
 
@@ -436,9 +443,7 @@ async def test_stage2_sensor_extra_state_attributes_reads_pollstats_counters(
     }
 
 
-async def test_stage2_sensor_device_info_matches_other_diagnostic_sensors(
-    hass, mock_config_entry
-):
+async def test_stage2_sensor_device_info_matches_other_diagnostic_sensors(hass, mock_config_entry):
     """DIAG-01: Stage2Sensor._attr_device_info has same identifiers as other diagnostic sensors."""
     from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
 
