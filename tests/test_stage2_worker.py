@@ -2147,3 +2147,465 @@ async def test_fail_05_dismiss_unconditional_even_when_no_prior_notification(
 
         # Dismiss must still be called even with no prior notification — exactly 1 new call.
         assert mock_dismiss.call_count == baseline_dismiss_count + 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 21 Plan 03 — DIAG-02: PollStats stage2_*_total counters and
+# stage2_queue_depth property
+# ---------------------------------------------------------------------------
+
+
+def test_pollstats_default_stage2_counters_zero():
+    """DIAG-02: All 6 new stage2_*_total fields default to 0 on PollStats construction."""
+    from dataclasses import fields
+
+    from custom_components.shop2parcel.coordinator import PollStats
+
+    ps = PollStats()
+    assert ps.stage2_enqueued_total == 0
+    assert ps.stage2_succeeded_total == 0
+    assert ps.stage2_failed_total == 0
+    assert ps.stage2_dropped_backpressure_total == 0
+    assert ps.stage2_schema_error_total == 0
+    assert ps.stage2_conflict_total == 0
+
+
+def test_pollstats_asdict_contains_all_6_stage2_counter_keys():
+    """DIAG-02: dataclasses.asdict(PollStats()) includes all 6 new stage2 counter keys.
+
+    Proves the diagnostics download auto-includes them (Assumption A2).
+    """
+    from dataclasses import asdict
+
+    from custom_components.shop2parcel.coordinator import PollStats
+
+    d = asdict(PollStats())
+    expected_keys = {
+        "stage2_enqueued_total",
+        "stage2_succeeded_total",
+        "stage2_failed_total",
+        "stage2_dropped_backpressure_total",
+        "stage2_schema_error_total",
+        "stage2_conflict_total",
+    }
+    assert expected_keys <= set(d.keys()), f"missing keys: {expected_keys - set(d.keys())}"
+
+
+async def test_stage2_queue_depth_returns_zero_when_queue_is_none(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_queue_depth returns 0 when _stage2_queue is None (stage2 not started)."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        assert coord._stage2_queue is None
+        assert coord.stage2_queue_depth == 0
+
+
+async def test_stage2_queue_depth_returns_qsize_when_queue_active(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_queue_depth returns qsize() when queue is active."""
+    import asyncio
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Manually assign queue with 3 items.
+        coord._stage2_queue = asyncio.Queue(maxsize=32)
+        shipment = _make_shipment()
+        for i in range(3):
+            job = Stage2Job(
+                storage_key=f"key{i}",
+                normalized_tn=f"TN{i}",
+                shipment=shipment,
+                html_body="<html/>",
+                message_id=f"msg{i}",
+                meta={},
+            )
+            coord._stage2_queue.put_nowait(job)
+        assert coord.stage2_queue_depth == 3
+
+
+async def test_diag_02_stage2_enqueued_total_increments_on_successful_put(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_enqueued_total increments on each successful put_nowait."""
+    import asyncio
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        coord._stage2_queue = asyncio.Queue(maxsize=32)
+        shipment = _make_shipment()
+        # Enqueue 2 distinct tracking numbers.
+        coord._enqueue_stage2("TN001", "key1", shipment, "<html/>", message_id="m1", meta={})
+        coord._enqueue_stage2("TN002", "key2", shipment, "<html/>", message_id="m2", meta={})
+        assert coord.diagnostics.stage2_enqueued_total == 2
+
+
+async def test_diag_02_stage2_enqueued_total_does_not_increment_on_dedup_skip(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_enqueued_total does NOT increment on QUE-06 dedup short-circuit."""
+    import asyncio
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        coord._stage2_queue = asyncio.Queue(maxsize=32)
+        shipment = _make_shipment()
+        # First enqueue succeeds.
+        coord._enqueue_stage2("TN001", "key1", shipment, "<html/>", message_id="m1", meta={})
+        assert coord.diagnostics.stage2_enqueued_total == 1
+        # Second enqueue with same key hits dedup short-circuit — counter stays at 1.
+        coord._enqueue_stage2("TN001", "key1", shipment, "<html/>", message_id="m1", meta={})
+        assert coord.diagnostics.stage2_enqueued_total == 1
+
+
+async def test_diag_02_stage2_dropped_backpressure_total_increments_on_queue_full(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_dropped_backpressure_total increments when queue is full;
+    stage2_enqueued_total does NOT increment on the dropped item.
+    """
+    import asyncio
+
+    from homeassistant.components import persistent_notification
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(persistent_notification, "async_create"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        coord._stage2_queue = asyncio.Queue(maxsize=1)
+        shipment = _make_shipment()
+        # First enqueue fills the queue.
+        coord._enqueue_stage2("TN001", "key1", shipment, "<html/>", message_id="m1", meta={})
+        assert coord.diagnostics.stage2_enqueued_total == 1
+        # Second enqueue with distinct key hits QueueFull.
+        coord._enqueue_stage2("TN002", "key2", shipment, "<html/>", message_id="m2", meta={})
+        assert coord.diagnostics.stage2_dropped_backpressure_total == 1
+        # Dropped item does NOT count as enqueued.
+        assert coord.diagnostics.stage2_enqueued_total == 1
+
+
+async def test_diag_02_stage2_failed_total_increments_on_each_ollama_failure(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_failed_total increments on each OllamaTransientError failure."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        fail_extractor = MagicMock()
+        fail_extractor.async_extract = AsyncMock(
+            side_effect=[OllamaTransientError("e1"), OllamaTransientError("e2"), OllamaTransientError("e3")]
+        )
+        coord._extractor = fail_extractor
+        for i in range(3):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+        assert coord.diagnostics.stage2_failed_total == 3
+
+
+async def test_diag_02_stage2_schema_error_total_increments_only_on_schema_errors(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_schema_error_total only increments for OllamaSchemaError;
+    stage2_failed_total counts both OllamaTransientError and OllamaSchemaError.
+    """
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError, OllamaTransientError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        fail_extractor = MagicMock()
+        fail_extractor.async_extract = AsyncMock(
+            side_effect=[
+                OllamaTransientError("transient"),
+                OllamaSchemaError("schema1"),
+                OllamaSchemaError("schema2"),
+            ]
+        )
+        coord._extractor = fail_extractor
+        for i in range(3):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+        # All 3 count as failures.
+        assert coord.diagnostics.stage2_failed_total == 3
+        # Only 2 are schema errors.
+        assert coord.diagnostics.stage2_schema_error_total == 2
+
+
+async def test_diag_02_stage2_failed_total_does_not_increment_on_parcelapp_errors(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_failed_total does NOT increment on ParcelAppTransientError (D-05 scope)."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import ParcelAppTransientError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        ok_extractor = MagicMock()
+        ok_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
+        coord._extractor = ok_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=[ParcelAppTransientError("net")] * 5
+        )
+        for i in range(5):
+            job = _make_job(normalized_tn=f"TN{i:04d}")
+            await coord._async_process_stage2_job(job)
+        # ParcelApp errors must NOT bump stage2_failed_total.
+        assert coord.diagnostics.stage2_failed_total == 0
+
+
+async def test_diag_02_stage2_succeeded_total_increments_only_at_line_710_path(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_succeeded_total increments on real 2xx POST; stays unchanged on
+    ParcelAppAlreadyAddedError (graceful-reject, D-06).
+    """
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import ParcelAppAlreadyAddedError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        ok_extractor = MagicMock()
+        ok_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
+        coord._extractor = ok_extractor
+        # First call: real 2xx success.
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        success_job = _make_job(normalized_tn="TNSUCCESS")
+        await coord._async_process_stage2_job(success_job)
+        assert coord.diagnostics.stage2_succeeded_total == 1
+
+        # Second call: ParcelAppAlreadyAddedError (graceful-reject) — succeeded_total stays at 1.
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already")
+        )
+        already_job = _make_job(normalized_tn="TNALREADY")
+        await coord._async_process_stage2_job(already_job)
+        assert coord.diagnostics.stage2_succeeded_total == 1
+
+
+async def test_diag_02_stage2_conflict_total_increments_on_mrg_03_conflict(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_conflict_total increments in MRG-03 branch; stage2_failed_total stays 0."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Extractor returns a locked tracking_number different from Stage-1 → conflict.
+        stage2_result = Stage2Result(
+            locked={"tracking_number": "STAGE2_CONFLICT_TN", "carrier_name": None, "order_name": None},
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        conflict_extractor = MagicMock()
+        conflict_extractor.async_extract = AsyncMock(return_value=stage2_result)
+        coord._extractor = conflict_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        job = _make_job(normalized_tn="1Z999AA10123456784")
+        await coord._async_process_stage2_job(job)
+
+        # conflict counted; failure counter NOT bumped.
+        assert coord.diagnostics.stage2_conflict_total == 1
+        assert coord.diagnostics.stage2_failed_total == 0
+
+
+async def test_diag_02_stage2_conflict_total_zero_when_no_conflict(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_conflict_total stays 0 when Stage-2 result matches Stage-1."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # Extractor returns empty locked dict (no overrides) → no conflict.
+        stage2_result = Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        ok_extractor = MagicMock()
+        ok_extractor.async_extract = AsyncMock(return_value=stage2_result)
+        coord._extractor = ok_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        job = _make_job(normalized_tn="TNNOCONFLICT")
+        await coord._async_process_stage2_job(job)
+
+        assert coord.diagnostics.stage2_conflict_total == 0
