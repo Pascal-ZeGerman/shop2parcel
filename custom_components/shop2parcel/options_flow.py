@@ -307,9 +307,7 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             if name not in existing_names:
                 return self.async_show_form(
                     step_id="remove_custom_field",
-                    data_schema=vol.Schema(
-                        {vol.Required(CONF_FIELD_NAME): vol.In(existing_names)}
-                    ),
+                    data_schema=vol.Schema({vol.Required(CONF_FIELD_NAME): vol.In(existing_names)}),
                     errors={"base": "invalid_field_name"},
                 )
             new_options = dict(self.config_entry.options)

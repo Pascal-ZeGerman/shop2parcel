@@ -2,16 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: AI-based Email Analysis
-status: ready_to_plan
-stopped_at: Phase 20 complete (3/3) — ready to discuss Phase 21
-last_updated: 2026-06-16T00:03:27.002Z
-last_activity: 2026-06-15 -- Phase 20 Plan 01 complete (merge_llm_authoritative)
+current_phase: 22
+current_phase_name: README Setup + End-to-End Validation
+status: complete
+stopped_at: v1.3 milestone closed — all 8 phases shipped, 37/37 requirements met
+last_updated: "2026-06-17T00:00:00.000Z"
+last_activity: 2026-06-17
+last_activity_desc: v1.3 milestone complete — archived, tagged, REQUIREMENTS.md removed
 progress:
   total_phases: 8
-  completed_phases: 5
-  total_plans: 18
-  completed_plans: 24
-  percent: 63
+  completed_phases: 8
+  total_plans: 23
+  completed_plans: 23
+  percent: 100
 ---
 
 # Project State
@@ -21,20 +24,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-05)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** Phase 21 — failure surface + diagnostics
+**Current focus:** v1.3 shipped — planning next milestone
 
 ## Current Position
 
-Phase: 21
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-06-16
+Phase: 22 — README Setup + End-to-End Validation
+Plan: Complete (2/2)
+Status: Milestone v1.3 SHIPPED — all 8 phases, 23 plans, 37/37 requirements complete
+Last activity: 2026-06-17 — v1.3 milestone closed and archived
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 50
+- Total plans completed: 55
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -58,6 +61,8 @@ Last activity: 2026-06-16
 | 18 | 2 | - | - |
 | 19 | 2 | - | - |
 | 20 | 3 | - | - |
+| 22 | 2 | - | - |
+| 21 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -71,6 +76,11 @@ Last activity: 2026-06-16
 | Phase 05-sensor-entities P01 | 10 | 3 tasks | 4 files |
 | Phase 15-ollamaclient-foundation P03 | 7 | 3 tasks | 2 files |
 | Phase 15-ollamaclient-foundation P04 | 4 | 3 tasks | 2 files |
+| Phase 22 P01 | 15 | 2 tasks | 1 files |
+| Phase 22 P02 | 2 | 1 tasks | 1 files |
+| Phase 21 P01 | 25 | 2 tasks | 7 files |
+| Phase 21 P02 | 26 | 2 tasks | 4 files |
+| Phase 21 P03 | 8m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -106,6 +116,7 @@ Recent decisions affecting current work:
 - v1.3 Phase 15-04: `live_ollama` pytest marker registered in `pyproject.toml`; single opt-in smoke test `tests/api/test_ollama_client_live.py` gated by `OLLAMA_URL` env var (D-10/D-11/D-12/D-13). CI silently skips. Phase 15 complete: 384 tests passing, 1 skipped (the live smoke).
 - Phase 20-01: merge_llm_authoritative returns tuple[ShipmentData, list[dict]] (Option A) — merge.py stays HA-free per D-02; coordinator emits stage2_conflict event using returned conflicts list
 - Phase 20-01: type: ignore[arg-type] on dataclasses.replace(**overrides) — mypy cannot resolve dict[str, str | None] spread against ShipmentData typed replace() overload; runtime values always valid
+- [Phase ?]: Phase 22 D-12/D-13/D-14/D-15: tests/test_stage2_e2e_live.py ships with live_ollama marker, OLLAMA_URL gate, and OllamaExtractor construction — fulfills Phase 15 D-13 deferral
 
 ### Roadmap Evolution
 
@@ -190,11 +201,10 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-Last session: 2026-06-15T20:00:00Z
-Stopped at: Phase 20 Plan 01 complete
-Next action: Execute Phase 20 Plan 02 (coordinator wiring: MRG-02, MRG-05, FAIL-03).
+Last session: 2026-06-17T00:00:00.000Z
+Stopped at: v1.3 milestone archived — ROADMAP.md collapsed, PROJECT.md updated, REQUIREMENTS.md removed
+Next action: Start v1.4 milestone planning.
 
 ## Operator Next Steps
 
-- `/gsd:execute-phase 20` — execute Phase 20 Plan 02 (coordinator wiring)
-- `/gsd:verify-work 18` — optionally resolve 2 human_needed verification items in Phase 18 first
+- `/gsd-new-milestone` — start v1.4 milestone (questioning → research → requirements → roadmap)
