@@ -77,7 +77,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # (RESEARCH.md Pitfall 3).
     if coordinator._diagnostics.stage2_enabled:
         await coordinator.async_start_stage2()
-        entry.async_on_unload(lambda: hass.async_create_task(coordinator.async_stop_stage2()))
+
+        def _stop_stage2() -> None:
+            hass.async_create_task(coordinator.async_stop_stage2())
+
+        entry.async_on_unload(_stop_stage2)
     await coordinator.async_config_entry_first_refresh()
 
     # Phase 5 D-08: schedule once-daily delivered-shipment cleanup.

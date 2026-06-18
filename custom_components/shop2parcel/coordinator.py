@@ -552,6 +552,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Phase 19 D-03/D-04: builds OllamaClient and OllamaExtractor once per
         setup/reload cycle from entry.options; extractor is cached as self._extractor.
         """
+        assert self.config_entry is not None
         raw = self.config_entry.options.get(CONF_QUEUE_MAXLEN, DEFAULT_QUEUE_MAXLEN)
         maxlen = max(1, min(256, int(raw)))
         self._stage2_queue = asyncio.Queue(maxsize=maxlen)
@@ -657,6 +658,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             message_id=message_id,
             meta=meta,
         )
+        assert self._stage2_queue is not None
         try:
             self._stage2_queue.put_nowait(job)
         except asyncio.QueueFull:
@@ -690,6 +692,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         task_done() in finally: ensures queue.join() (if used in tests) never hangs.
         """
+        assert self.config_entry is not None
+        assert self._stage2_queue is not None
         _LOGGER.debug("Stage-2 worker started for entry %s", self.config_entry.entry_id)
         try:
             while True:
@@ -732,6 +736,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Auth failures degrade silently to key-discard + next-poll retry; reauth is triggered
         by the next _async_update_data poll cycle instead.
         """
+        assert self.config_entry is not None
         normalized_tn = job.normalized_tn
 
         # MRG-05: per-poll POST cap gate (D-09). Checked BEFORE the extractor call so
