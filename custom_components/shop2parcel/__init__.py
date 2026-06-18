@@ -120,13 +120,20 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
-    from .const import debug_mode_notification_id, stage2_cap_notification_id  # noqa: PLC0415
+    from .const import (  # noqa: PLC0415
+        debug_mode_notification_id,
+        stage2_cap_notification_id,
+        stage2_failing_notification_id,
+    )
 
     persistent_notification.async_dismiss(
         hass, notification_id=debug_mode_notification_id(entry.entry_id)
     )
     persistent_notification.async_dismiss(
         hass, notification_id=stage2_cap_notification_id(entry.entry_id)
+    )
+    persistent_notification.async_dismiss(
+        hass, notification_id=stage2_failing_notification_id(entry.entry_id)
     )
 
 

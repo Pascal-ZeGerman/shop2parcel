@@ -93,8 +93,11 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         the server is reachable and the chosen model is available.
         """
         errors: dict[str, str] = {}
+        ollama_url = self.config_entry.options.get(CONF_OLLAMA_URL, "")
+        stage2_status = "enabled" if ollama_url.strip() else "disabled (set Ollama URL to enable)"
         description_placeholders: dict[str, str] = {
             "locked_fields": ", ".join(LOCKED_OLLAMA_FIELDS),
+            "stage2_status": stage2_status,
         }
 
         conn_type = self.config_entry.data.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_GMAIL)

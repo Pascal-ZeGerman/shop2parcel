@@ -868,8 +868,8 @@ async def test_async_remove_entry_dismisses_debug_notification(hass, mock_config
     with patch("homeassistant.components.persistent_notification.async_dismiss") as mock_dismiss:
         await async_remove_entry(hass, mock_config_entry)
 
-    # Phase 20: two dismiss calls (debug_mode + stage2_cap).
-    assert mock_dismiss.call_count == 2
+    # Phase 20 + I2 fix: three dismiss calls (debug_mode + stage2_cap + stage2_failing).
+    assert mock_dismiss.call_count == 3
     # The debug-mode notification must be one of the dismissed IDs.
     notification_ids = {call.kwargs["notification_id"] for call in mock_dismiss.call_args_list}
     assert debug_mode_notification_id(mock_config_entry.entry_id) in notification_ids

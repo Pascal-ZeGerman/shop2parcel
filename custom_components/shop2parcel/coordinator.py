@@ -406,6 +406,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         self._stage2_posts_this_poll = 0
         self._stage2_cap_notified_this_poll = False
+        if self.config_entry is not None:
+            persistent_notification.async_dismiss(
+                self.hass,
+                notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
+            )
 
     def _record_stage2_failure(self, job: Stage2Job, err: Exception) -> None:
         """Centralize loud-surface side effects for a Stage-2 Ollama or worker-outer failure.
@@ -621,11 +626,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         while not self._stage2_queue.empty():
             try:
                 self._stage2_queue.get_nowait()
+                self._stage2_queue.task_done()
             except asyncio.QueueEmpty:
                 break
         # CR-02: preserve maxsize so backpressure invariant holds after a reload.
         self._stage2_queue = asyncio.Queue(maxsize=prev_maxsize)
         self._stage2_enqueued_keys.clear()
+        if self._store_loaded:
+            await self._async_save_store()
         _LOGGER.debug("Stage-2 queue stopped and cleared")
 
     def _enqueue_stage2(
@@ -824,6 +832,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_enqueued_keys.discard(normalized_tn)
             return
         except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
+            self._stage2_posts_this_poll += 1
             # Write dedup so next poll does not retry; discard in-flight key.
             self._submitted_tracking_numbers[normalized_tn] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
@@ -854,11 +863,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # D-06: snapshot pattern — never mutate self.data directly.
         # Guard: self.data is None before the first coordinator refresh; use empty dict as base.
         # MRG-02: persist and surface the merged shipment so sensors reflect merged state.
-        base = self.data if self.data is not None else {}
-        updated = {**base, job.storage_key: merged_shipment}
-        self._pending_shipments = updated  # D-05: assign before save
+        self._pending_shipments = {**(self.data or {}), job.storage_key: merged_shipment}
         await self._async_save_store()  # D-05: per-job save immediately
-        self.async_set_updated_data(updated)  # D-06: triggers sensor creation
+        # Re-snapshot self.data immediately before publish to avoid stale-base race (S2).
+        self.async_set_updated_data({**(self.data or {}), job.storage_key: merged_shipment})
         _LOGGER.debug("Stage-2 worker: posted %s successfully", normalized_tn)
 
     async def _async_load_store(self) -> None:
