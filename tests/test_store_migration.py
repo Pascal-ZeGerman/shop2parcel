@@ -316,12 +316,14 @@ async def test_shipments_saved_to_store_after_poll(
         "persisted_shipments must contain the shipment keyed by message_id"
     )
     entry = materialized["persisted_shipments"]["MSG_NEW"]
+    # custom_attributes is included in asdict() output since Phase 21 Plan 01 added it to ShipmentData.
     assert entry == {
         "tracking_number": "TN_NEW",
         "carrier_name": "UPS",
         "order_name": "#1001",
         "message_id": "MSG_NEW",
         "email_date": 1700000000,
+        "custom_attributes": {},
     }, f"persisted_shipments entry has wrong fields: {entry!r}"
 
 
@@ -840,4 +842,133 @@ async def test_load_store_non_dict_persisted_shipments_emits_warning(
     warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("persisted_shipments" in r.getMessage() for r in warning_records), (
         "WARNING must be emitted when persisted_shipments is not a dict"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FLD-03 / D-10 / D-11: _safe_custom_attributes + _async_load_store (Phase 21 Plan 01)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_load_store_old_record_without_custom_attributes_defaults_to_empty_dict(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D-10: Pre-Phase-21 store record (no custom_attributes key) restores with custom_attributes={}.
+
+    No STORAGE_VERSION bump required — backward compat via _safe_custom_attributes helper.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {
+                "msg1": {
+                    "tracking_number": "1Z",
+                    "carrier_name": "UPS",
+                    "order_name": "#1",
+                    "message_id": "msg1",
+                    "email_date": 1700000000,
+                    # no custom_attributes key — old pre-Phase-21 record
+                }
+            },
+        }
+    )
+    coordinator._store = mock_store
+    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert "msg1" in coordinator._restored_shipments
+    assert coordinator._restored_shipments["msg1"].custom_attributes == {}, (
+        "Old pre-Phase-21 record without custom_attributes key must restore with custom_attributes={}"
+    )
+
+
+async def test_async_load_store_new_record_with_custom_attributes_restores_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D-10: Store entry with custom_attributes restores the values correctly."""
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {
+                "msg2": {
+                    "tracking_number": "1Z",
+                    "carrier_name": "UPS",
+                    "order_name": "#2",
+                    "message_id": "msg2",
+                    "email_date": 1700000001,
+                    "custom_attributes": {"estimated_delivery": "2026-06-20"},
+                }
+            },
+        }
+    )
+    coordinator._store = mock_store
+    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert "msg2" in coordinator._restored_shipments
+    assert coordinator._restored_shipments["msg2"].custom_attributes == {
+        "estimated_delivery": "2026-06-20"
+    }, "Store entry with custom_attributes must restore values correctly"
+
+
+async def test_async_load_store_wrong_type_custom_attributes_degrades_silently_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D-11: wrong-type custom_attributes (e.g. list) degrades to {} with WARNING log."""
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {
+                "msg3": {
+                    "tracking_number": "1Z",
+                    "carrier_name": "UPS",
+                    "order_name": "#3",
+                    "message_id": "msg3",
+                    "email_date": 1700000002,
+                    "custom_attributes": ["not", "a", "dict"],  # wrong type — list
+                }
+            },
+        }
+    )
+    coordinator._store = mock_store
+    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
+        await coordinator._async_load_store()
+
+    assert "msg3" in coordinator._restored_shipments, (
+        "Entry with wrong-type custom_attributes must still be restored (locked fields valid)"
+    )
+    assert coordinator._restored_shipments["msg3"].custom_attributes == {}, (
+        "Wrong-type custom_attributes must degrade silently to {}"
+    )
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("wrong type for custom_attributes" in r.getMessage() for r in warning_records), (
+        "WARNING must contain 'wrong type for custom_attributes'"
+    )
+    assert any("list" in r.getMessage() for r in warning_records), (
+        "WARNING must mention the wrong type name 'list'"
     )

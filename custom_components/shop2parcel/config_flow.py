@@ -56,6 +56,7 @@ from .const import (
     CONF_IMAP_PORT,
     CONF_IMAP_TLS,
     CONF_IMAP_USERNAME,
+    CONF_STAGE2_ENABLED,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
     DOMAIN,
@@ -289,6 +290,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                 return self.async_create_entry(
                     title=user_input[CONF_NAME],
                     data={**self._data, CONF_API_KEY: user_input[CONF_API_KEY]},
+                    options={CONF_STAGE2_ENABLED: False},
                 )
 
         return self.async_show_form(

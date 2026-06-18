@@ -2,15 +2,35 @@
 
 ## What This Is
 
-Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) or any IMAP mailbox for Shopify shipping confirmation emails, extracts tracking data (tracking number, carrier, order number), and forwards it to parcelapp.net. Shipments appear as HA sensor entities automatically — no manual entry. Multiple accounts (Gmail and/or IMAP) can be configured per HA instance, each running its own polling coordinator. A configurable debug/dry-run mode allows full diagnostic output without submitting real data to parcelapp.net.
+Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) or any IMAP mailbox for Shopify-style shipping confirmation emails, extracts tracking data (tracking number, carrier, order number) via a two-stage pipeline — fast template parsers first, then a local Ollama LLM for emails the templates miss or need augmenting — and forwards it to parcelapp.net. Shipments appear as HA sensor entities automatically. Multiple accounts (Gmail and/or IMAP) can be configured per HA instance, each running its own polling coordinator. A configurable debug/dry-run mode allows full diagnostic output without submitting real data to parcelapp.net.
 
 ## Core Value
 
 Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
 
-## Current State: v1.2 Shipped
+## Current State: v1.3 AI-based Email Analysis — SHIPPED 2026-06-17
 
-**Shipped:** 2026-06-05 — v1.2 Debug Switch complete.
+Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local Ollama LLM (Stage 2), always-on, with bounded async queue, LLM-authoritative merge, five quota-burn mitigations, loud failure surface, `Stage2Sensor` diagnostic entity, and complete README setup section.
+
+## Previous Milestones
+
+<details>
+<summary>v1.3 AI-based Email Analysis — shipped 2026-06-17</summary>
+
+- Two-stage extraction pipeline: template parsers (Stage 1) + local Ollama LLM (Stage 2), always-on
+- `OllamaClient` with 2-pass JSON parse, NFKC normalization; `OllamaExtractor` with dynamic JSON-Schema from field list
+- Bounded async queue + long-lived worker per coordinator; drop-newest backpressure + in-flight key dedup
+- Five quota-burn mitigations: per-field merge guards, carrier-regex TN sanity, `temperature:0`, `MAX_STAGE2_POSTS_PER_POLL=5` cap, skip-dedup-on-failure
+- `Stage2Sensor` diagnostic entity + extended `PollStats` with 6 Stage-2 counters
+- User-extensible custom extraction fields as sensor attributes; persistent HA notification with 1-hour cooldown after N consecutive Stage-2 failures
+- README "AI-based email analysis (v1.3)" section: 3 networking topologies, localhost foot-gun warning, model guidance, reachability sanity-check
+- **Codebase:** ~22,458 LOC total (integration + tests), 616 tests passing, manifest v1.3.x
+- **Config flow:** Ollama URL (required), model name, timeout, queue maxlen, custom field CRUD with locked-field disclosure
+
+</details>
+
+<details>
+<summary>v1.2 Debug Switch — shipped 2026-06-05</summary>
 
 - Dedup store persistence bug fixed: already-added 400s treated as idempotent success; no more restart loops
 - HA Store STORAGE_VERSION 3: persists `coordinator.data` (ShipmentData objects) across HA restarts — sensors reappear after first poll without manual intervention
@@ -19,7 +39,7 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - **Connection methods:** Gmail OAuth2 and IMAP (app-password / SSL / STARTTLS)
 - **Carriers supported:** Shopify standard, UPS, USPS, FedEx
 
-## Previous Milestones
+</details>
 
 <details>
 <summary>v1.1 Debug-Ready — shipped 2026-05-17</summary>
@@ -68,8 +88,21 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - ✓ Fixed dedup store persistence: already-added 400 responses treated as idempotent success; coordinator no longer writes rejected TNs to dedup store on restart — v1.2 (Phase 13)
 - ✓ HA Store STORAGE_VERSION 3: persists coordinator.data (ShipmentData objects) across restarts; v2→v3 migration with per-entry type validation — v1.2 (Phase 13.1)
 - ✓ Debug/dry-run mode: 365-day window override, dedup bypass, dry-run POST suppression, per-email INFO logging, persistent HA notification — v1.2 (Phase 14)
+- ✓ Two-stage extraction pipeline: always-on Ollama Stage 2 after Stage-1 template parsers — v1.3 (Phases 15–22)
+- ✓ Bounded async queue + long-lived worker per coordinator; drop-newest backpressure + in-flight key dedup — v1.3 (Phases 18–19)
+- ✓ LLM-authoritative merge with per-field conflict guards + carrier-regex TN sanity + `MAX_STAGE2_POSTS_PER_POLL=5` cap — v1.3 (Phase 20)
+- ✓ Stage-2 failure surface: ERROR log + `stage2_failed` activity event + persistent HA notification + skip-dedup-on-failure — v1.3 (Phase 21)
+- ✓ `Stage2Sensor` diagnostic entity + PollStats Stage-2 counters + user custom extraction fields as sensor attributes — v1.3 (Phase 21)
+- ✓ README "AI-based email analysis (v1.3)" section with Ollama networking guide and reachability sanity-check — v1.3 (Phase 22)
 
-### Active (future milestones)
+### Active (v1.4+)
+
+- [ ] Custom extraction fields persisted across HA restarts (STORAGE_VERSION 3→4 migration)
+- [ ] Stage-2 inference-latency rolling-average sensor
+- [ ] "Test extraction" dry-run textarea in options flow
+- [ ] Delivery status tracking — shipment sensor state reflects current delivery status (formerly deferred)
+
+### Active (deferred to future milestones)
 
 - [ ] Delivery status tracking — shipment sensor state reflects current delivery status
 - [ ] Configurable cleanup grace period for delivered shipments (currently hardcoded 24h)
@@ -85,15 +118,20 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 - Multi-store Shopify support — single store per integration instance
 - European carrier templates (Amazon DE, DHL, DPD, Zalando, OTTO) — US-focused product
 - Debug mode as auto-trigger on HA debug logging — orthogonal concerns; would silently suppress real parcelapp POSTs when user enables HA debug logging
+- Hosted/cloud LLM providers (OpenAI, Anthropic, Gemini) for Stage 2 — local-only by design; user-owned model, no third-party email-content exposure
+- HA-Store-persisted Stage-2 queue — restart-survival adds storage migration burden; full-window rescan already re-discovers unprocessed emails next poll
+- Hardcoded `localhost:11434` default for Ollama URL — Pi-on-Pi co-located Docker is one of several layouts; URL must be user-supplied to avoid silently-misconfigured installs
 
 ## Context
 
-- **Architecture:** `DataUpdateCoordinator` (one per account) → `GmailClient` or `ImapClient` → `EmailParser` → `ParcelAppClient`. Sensor entities subscribe to coordinator updates.
-- **Auth storage:** Gmail OAuth2 tokens and IMAP credentials stored in HA config entry `data` (encrypted at rest). Parcelapp API key also in `data`.
+- **Architecture:** `DataUpdateCoordinator` (one per account) → `GmailClient` or `ImapClient` → `EmailParser` → Stage-1 template parsers → bounded `asyncio.Queue` → long-lived Stage-2 worker → `OllamaExtractor` + `merge_llm_authoritative` → `ParcelAppClient`. Sensor entities subscribe to coordinator updates.
+- **Auth storage:** Gmail OAuth2 tokens and IMAP credentials stored in HA config entry `data` (encrypted at rest). Parcelapp API key and Ollama URL also in `data`.
 - **Dedup:** `Shop2ParcelStore` (STORAGE_VERSION 3) persists `_submitted_tracking_numbers: OrderedDict[str, None]` (LRU cap 1000) AND `_persisted_shipments: dict[str, ShipmentData]` across HA restarts. v2→v3 migration path included.
-- **Parser:** Template registry (CARRIER_REGISTRY) with `detect_fn` + `parse_fn` per carrier. Shopify fallback uses BS4 `<p>` scan then regex keyword match.
+- **Stage-2 queue:** In-memory only (HA-restart-lossy by design); full-window rescan re-discovers unprocessed emails. Drop-newest backpressure + in-flight key dedup set.
+- **Parser:** Template registry (CARRIER_REGISTRY) with `detect_fn` + `parse_fn` per carrier. Shopify fallback uses BS4 `<p>` scan then regex keyword match. Stage 2 always runs after Stage 1 on sender-matched emails.
+- **Merge:** `merge_llm_authoritative(stage1, stage2_result)` returns `(merged_ShipmentData, conflicts_list)`. LLM overwrites Stage-1 fields only when Stage 1 returned `None` or values match (normalized). Conflicts keep Stage 1 and emit a `stage2_conflict` activity event.
 - **Environment:** Raspberry Pi dev environment with PyPI network-blocked — aiohttp/aioresponses symlinked from sibling venv.
-- **Codebase:** ~13,641 LOC total (integration + tests), 361 tests, manifest v1.2.x.
+- **Codebase:** ~22,458 LOC total (integration + tests), 616 tests passing, manifest v1.3.x.
 
 ## Constraints
 
@@ -126,6 +164,13 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 | STORAGE_VERSION 3 persists ShipmentData | Sensors vanished after HA restart because coordinator.data was not persisted | ✓ Good — v1.2 Phase 13.1 |
 | _SHIPMENT_FIELD_TYPES for per-entry validation | Prevents corrupt store entries from crashing coordinator on load | ✓ Good — v1.2 Phase 13.1 |
 | Debug mode as config option (not auto-trigger) | Debug logging and dry-run mode are orthogonal; debug mode suppresses real POSTs intentionally | ✓ Good — v1.2 Phase 14 |
+| In-memory Stage-2 queue (HA-restart-lossy) | Storage migration burden not justified; full-window rescan re-discovers unprocessed emails | ✓ Good — v1.3 Phase 18 |
+| Single long-lived worker per coordinator | Ollama serializes per-model + parcelapp 20/day quota — multi-worker rejected | ✓ Good — v1.3 Phase 19 |
+| Drop-newest backpressure (not drop-oldest) | Drop-oldest wastes head-of-queue work and breaks FIFO activity-log ordering | ✓ Good — v1.3 Phase 18 |
+| 5-mitigation quota-burn set is inseparable | All five land together — partial deployment leaves parcelapp quota exposed | ✓ Good — v1.3 Phase 20 |
+| merge_llm_authoritative returns (ShipmentData, list) tuple | Keeps merge.py HA-free per D-02; coordinator emits events using returned conflicts list | ✓ Good — v1.3 Phase 20 |
+| stage2_enabled derived from options (not stored) | Avoids STORAGE_VERSION bump for v1.2 → v1.3 upgrades; backward-compat out of the box | ✓ Good — v1.3 Phase 17 |
+| OllamaClient 2-pass JSON parse pipeline | Pass 1 = normalize + json.loads; Pass 2 = fence-strip + normalize + json.loads on JSONDecodeError only | ✓ Good — v1.3 Phase 15 |
 
 ## Evolution
 
@@ -137,4 +182,4 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 5. Update Context with current state
 
 ---
-*Last updated: 2026-06-05 after v1.2 milestone*
+*Last updated: 2026-06-17 after v1.3 AI-based email analysis milestone*

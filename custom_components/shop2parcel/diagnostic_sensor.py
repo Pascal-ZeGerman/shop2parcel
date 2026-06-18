@@ -221,3 +221,39 @@ class ActivityLogSensor(DiagnosticSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
         return {"recent_events": list(d.scan_events)[-10:]}
+
+
+class Stage2Sensor(DiagnosticSensor):
+    """sensor.shop2parcel_stage2_queue — Stage-2 queue depth and lifetime counters.
+
+    DIAG-01: queue depth as native_value; 6 lifetime stage2 counters as
+    extra_state_attributes. Registered unconditionally (no stage2_enabled
+    gate) so Stage-1-only users see zero values and can confirm the
+    integration is not silently failing.
+    """
+
+    _attr_name = "Stage-2 Queue"
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_stage2_queue"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.stage2_queue_depth
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        d = self.coordinator.diagnostics
+        return {
+            "enqueued_total": d.stage2_enqueued_total,
+            "succeeded_total": d.stage2_succeeded_total,
+            "failed_total": d.stage2_failed_total,
+            "dropped_backpressure_total": d.stage2_dropped_backpressure_total,
+            "schema_error_total": d.stage2_schema_error_total,
+            "conflict_total": d.stage2_conflict_total,
+        }

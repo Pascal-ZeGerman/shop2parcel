@@ -15,6 +15,55 @@ A Home Assistant custom integration that monitors your email inbox (Gmail OAuth2
 3. Extracts the tracking number and carrier from the email.
 4. Posts the shipment to parcelapp.net via its API so you can track it in the Parcel app.
 5. Creates a `sensor.shop2parcel_shipment_<order_name>` entity in Home Assistant showing current shipment status.
+6. If Ollama is configured, sends the email body to a local LLM for structured extraction, filling in fields the template parser left empty and verifying the result.
+
+## AI-based email analysis (v1.3)
+
+**Prerequisites:**
+
+- A running Ollama instance reachable from your Home Assistant server
+- The recommended model pulled: `ollama pull qwen3.5:2b`
+
+Ollama installation is outside the scope of this guide. See the [official Ollama documentation](https://ollama.com/download) for install instructions.
+
+### Model
+
+Pull the recommended model before enabling Stage 2:
+
+```
+ollama pull qwen3.5:2b
+```
+
+If the tag is unavailable, try `qwen2.5:3b` or `qwen3:1.7b` as alternatives.
+
+### What Stage 2 does
+
+- Runs after every sender-matched email, immediately following the Stage-1 template parse.
+- Sends the email body to your local Ollama instance for structured LLM extraction of tracking number, carrier, and order name.
+- The LLM value fills in fields the template parser left empty; when both Stage 1 and Stage 2 produce a value for the same field, the Stage-1 template result is kept.
+- If Ollama is unreachable or extraction fails, the Stage-1 template result is posted instead — no shipments are lost.
+
+### Networking
+
+| Topology | Ollama URL example | Notes |
+|---|---|---|
+| HA + Ollama on same Docker host network | `http://ollama:11434` | Use the Ollama container name as hostname |
+| HA + Ollama on shared Docker bridge | `http://<bridge-IP>:11434` | Use the bridge gateway IP |
+| HA and Ollama on separate hosts | `http://192.168.0.X:11434` | Use the host IP or hostname; do NOT use `localhost` |
+
+> Warning: `localhost:11434` only works if HA and Ollama run inside the same container. For all other topologies, use the Ollama host's IP address or container name.
+
+### Verifying connectivity
+
+Before opening the integration's config flow, confirm that HA can reach Ollama:
+
+```
+docker exec homeassistant wget -qO- http://<HOST>:11434/api/tags
+```
+
+A healthy response is a JSON object containing `"models": [...]`. If you see an empty body, a connection refused error, or a 404, Ollama is not reachable from the HA container.
+
+---
 
 ## Prerequisites
 

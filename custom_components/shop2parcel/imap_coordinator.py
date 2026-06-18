@@ -51,6 +51,7 @@ from .const import (
 )
 from .coordinator import (
     Shop2ParcelCoordinator,
+    Stage2Job,  # noqa: F401 — type import; subclass calls _enqueue_stage2 which constructs Stage2Job
     _extract_imap_email_meta,
     _next_midnight_utc,
     _sanitise_parser_error,
@@ -98,6 +99,8 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         if entry is None:
             raise UpdateFailed("config_entry is None — coordinator not properly initialized")
         imap_client = cast(ImapClient, self._email_client)
+
+        self._reset_stage2_poll_counters()  # Phase 20 MRG-05 / D-11: reset per-poll counters
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
@@ -313,6 +316,19 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                         **imap_meta,
                     }
                 )
+
+                # Phase 18 D-03: route Stage-2-enabled entries to the queue; the entire inline
+                # POST section (debug_mode, quota_blocked, parcel POST) is bypassed.
+                if self._diagnostics.stage2_enabled:
+                    self._enqueue_stage2(
+                        normalized,
+                        storage_key,
+                        shipment,
+                        html,
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                    )
+                    continue
 
                 # DBG-04: suppress POST in debug mode; append dry_run_suppressed event and continue.
                 if debug_mode:

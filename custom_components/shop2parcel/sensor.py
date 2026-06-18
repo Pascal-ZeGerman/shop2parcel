@@ -35,6 +35,7 @@ from .diagnostic_sensor import (
     EmailsScannedSensor,
     KeywordHitsSensor,
     NewEmailsInspectedSensor,
+    Stage2Sensor,
     TrackingNumbersFoundSensor,
 )
 
@@ -63,6 +64,8 @@ async def async_setup_entry(
 
     # Phase 7 (D-09): register static diagnostic sensors.
     # Phase 11 (ACTLOG-04): ActivityLogSensor added as 6th diagnostic sensor.
+    # Phase 21 (DIAG-01): Stage2Sensor added as 7th diagnostic sensor — unconditionally
+    #   (no stage2_enabled gate: Pitfall 6). Stage-1-only users see zero values.
     async_add_entities(
         [
             EmailsScannedSensor(coordinator, entry),
@@ -71,6 +74,7 @@ async def async_setup_entry(
             TrackingNumbersFoundSensor(coordinator, entry),
             KeywordHitsSensor(coordinator, entry),
             ActivityLogSensor(coordinator, entry),
+            Stage2Sensor(coordinator, entry),
         ]
     )
 
@@ -154,4 +158,5 @@ class ShipmentSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
             "tracking_number": shipment.tracking_number,
             "carrier": shipment.carrier_name,
             "email_date": shipment.email_date,
+            **shipment.custom_attributes,
         }

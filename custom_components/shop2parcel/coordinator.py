@@ -11,40 +11,68 @@ Locked decisions (CONTEXT.md):
 - D-04: Store schema {"submitted_tracking_numbers": [...], "quota_exhausted_until": int | None, "persisted_shipments": {msg_id: ShipmentData-as-dict}}.
 - D-05: Quota exhausted -> polls continue, POST step skipped.
 - D-06: quota_exhausted_until = err.reset_at OR next_midnight_utc().
+- Phase 18: Stage2Job frozen dataclass + async_start_stage2/async_stop_stage2/_enqueue_stage2 base methods (QUE-01, QUE-03, QUE-06).
 """
 
 from __future__ import annotations
 
+import asyncio
 import email as _email_stdlib
 import logging
 import re
+import time as _time
 from collections import OrderedDict, deque
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .api.carrier_codes import normalize_carrier
 from .api.email_parser import ShipmentData
 from .api.exceptions import (
+    OllamaSchemaError,
+    OllamaTransientError,
+    ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
+    ParcelAppInvalidTrackingError,
+    ParcelAppQuotaError,
     ParcelAppTransientError,
 )
+from .api.ollama_client import OllamaClient
 from .api.parcelapp import ParcelAppClient
 from .const import (
     CONF_API_KEY,
+    CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
+    CONF_OLLAMA_MODEL,
+    CONF_OLLAMA_TIMEOUT,
+    CONF_OLLAMA_URL,
     CONF_POLL_INTERVAL,
+    CONF_QUEUE_MAXLEN,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
+    MAX_STAGE2_POSTS_PER_POLL,
+    MAX_SUBMITTED_TRACKING_NUMBERS,
+    STAGE2_NOTIFY_COOLDOWN_S,
+    STAGE2_NOTIFY_THRESHOLD,
+    stage2_cap_notification_id,
+    stage2_failing_notification_id,
 )
+from .extractors.ollama_extractor import OllamaExtractor
+from .merge import merge_llm_authoritative
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +88,29 @@ _SHIPMENT_FIELD_TYPES: dict[str, type] = {
     "message_id": str,
     "email_date": int,
 }
+
+
+def _safe_custom_attributes(entry: dict) -> dict[str, str | None]:
+    """Return custom_attributes from a persisted_shipments entry with wrong-type guard.
+
+    FLD-03 / D-10 / D-11: Returns entry.get("custom_attributes", {}) if the value is a
+    dict. If the value has the wrong type (e.g. list, str — from hand-editing or a
+    downgrade scenario), emits a WARNING and returns {} so locked fields restore
+    correctly and the integration continues operating (ASVS V5 input validation).
+
+    Placed here immediately after _SHIPMENT_FIELD_TYPES (per 21-RESEARCH.md Open
+    Question #2) so it is adjacent to the dict it reads from and mirrors the
+    existing module-level helper pattern (_extract_email_meta).
+    """
+    val = entry.get("custom_attributes", {})
+    if not isinstance(val, dict):
+        _LOGGER.warning(
+            "persisted_shipments entry has wrong type for custom_attributes (type=%s); "
+            "returning empty dict.",
+            type(val).__name__,
+        )
+        return {}
+    return val
 
 
 def _extract_email_meta(msg: dict) -> dict:
@@ -140,6 +191,30 @@ def _sanitise_parser_error(err: BaseException) -> str:
     return sanitised[:100]
 
 
+@dataclass(frozen=True, slots=True)
+class Stage2Job:
+    """Immutable payload for Stage-2 queue items.
+
+    storage_key: coordinator.data entity key (Gmail message ID or composite key such as
+        "17a3f4c8b::1Z999AA10123456784"). Used as the dict key when writing to coordinator.data.
+    normalized_tn: normalized tracking number — the dedup key that mirrors
+        _submitted_tracking_numbers and _stage2_enqueued_keys. This is the value passed as
+        the first positional argument to _enqueue_stage2.
+    shipment: Stage-1 ShipmentData for this email.
+    html_body: raw HTML body for Ollama prompt construction (Phase 19 worker reads this).
+    message_id: Gmail message ID or IMAP UID — for _emit_scan_event attribution (D-06).
+    meta: Email metadata dict {'subject': str, 'from': str} — for _emit_scan_event
+        attribution (D-06). Populated from _extract_email_meta / _extract_imap_email_meta.
+    """
+
+    storage_key: str
+    normalized_tn: str
+    shipment: ShipmentData
+    html_body: str
+    message_id: str
+    meta: dict
+
+
 @dataclass(slots=True)
 class PollStats:
     """Phase 7 (DIAG-05..DIAG-12): in-memory diagnostic accumulator.
@@ -182,6 +257,15 @@ class PollStats:
     # ^ Cumulative count since HA restart. Intentionally NOT bounded by scan_events.maxlen.
     # After >50 events: scan_events_total > len(scan_events). This is correct —
     # scan_events_total is "all events ever" while scan_events is "most recent 50".
+    stage2_enabled: bool = False
+    # Phase 17 D-05: derived at async_setup_entry time; False until Ollama URL is set.
+    # Phase 21 DIAG-02: lifetime Stage-2 counters; auto-included in asdict() diagnostics download.
+    stage2_enqueued_total: int = 0
+    stage2_succeeded_total: int = 0
+    stage2_failed_total: int = 0
+    stage2_dropped_backpressure_total: int = 0
+    stage2_schema_error_total: int = 0
+    stage2_conflict_total: int = 0
 
 
 class Shop2ParcelStore(Store):
@@ -247,7 +331,11 @@ class Shop2ParcelStore(Store):
                 self.minor_version,
                 self.key.removeprefix("shop2parcel."),
             )
-            return {"submitted_tracking_numbers": [], "quota_exhausted_until": None}
+            return {
+                "submitted_tracking_numbers": [],
+                "quota_exhausted_until": None,
+                "persisted_shipments": {},
+            }
         # Same major, future minor — passthrough.  Minor-version changes are backward
         # compatible by convention so no migration is needed.
         return old_data
@@ -285,13 +373,135 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._pending_shipments: dict[str, ShipmentData] = {}
         self._restored_shipments: dict[str, ShipmentData] = {}
         self._store_loaded: bool = False
+        # Phase 18 CR-01: sentinel so async_stop_stage2 is safe to call before
+        # async_start_stage2 (e.g. Phase 19 worker or a reload race).
+        self._stage2_queue: asyncio.Queue[Stage2Job] | None = None
+        self._stage2_enqueued_keys: set[str] = set()
+        # Phase 19: worker task and extractor sentinels — None until async_start_stage2.
+        self._stage2_worker_task: asyncio.Task | None = None
+        self._extractor: OllamaExtractor | None = None
+        # Phase 20 MRG-05 / D-11: per-poll Stage-2 POST counters.
+        # Both are reset at the top of each poll cycle via _reset_stage2_poll_counters().
+        # _stage2_posts_this_poll: count of successful Stage-2 POSTs in the current poll.
+        # _stage2_cap_notified_this_poll: True once the cap notification has been fired
+        #   this poll — ensures at most one HA notification per poll (D-10 / T-20-03-02).
+        self._stage2_posts_this_poll: int = 0
+        self._stage2_cap_notified_this_poll: bool = False
+        # Phase 21 FAIL-04/05: consecutive-failure streak across polls + notification cooldown timestamp.
+        # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
+        self._stage2_consecutive_failures: int = 0
+        self._stage2_last_notify_ts: float | None = None
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
+
+    def _reset_stage2_poll_counters(self) -> None:
+        """Reset per-poll Stage-2 POST counters to their defaults.
+
+        Must be called at the top of each poll cycle (in GmailCoordinator and
+        ImapCoordinator _async_update_data) BEFORE any email scanning so that
+        counters reflect only the current poll's activity (MRG-05 / D-11).
+
+        Defined here on the base class (DRY) so both subclasses share a single
+        implementation without duplicating the attribute reset logic.
+        """
+        self._stage2_posts_this_poll = 0
+        self._stage2_cap_notified_this_poll = False
+
+    def _record_stage2_failure(self, job: Stage2Job, err: Exception) -> None:
+        """Centralize loud-surface side effects for a Stage-2 Ollama or worker-outer failure.
+
+        Implements FAIL-01 (error log), FAIL-02 (activity event), FAIL-04 (consecutive-failure
+        counter + threshold notification with 1-hour cooldown) per D-01..D-09.
+
+        Pure-surface contract (D-04): does NOT touch control flow — callers must still
+        call self._stage2_enqueued_keys.discard() and return/raise as appropriate.
+
+        Counter scope (D-05): ONLY called from Ollama except and worker-outer except sites —
+        ParcelApp errors (Auth/Quota/AlreadyAdded/InvalidTracking/Transient) are handled
+        inline and never routed through this helper, so the counter tracks Ollama failures only.
+
+        Persistence (D-07): counter persists across polls; reset only on real success
+        (_record_stage2_success, D-06) or async_stop_stage2 (SPEC Req #5).
+        """
+        # FAIL-01: loud error log with 4 required fields (replaces Phase 19 _LOGGER.debug).
+        _LOGGER.error(
+            "Stage-2 worker: %s (%s) for '%s' from '%s'",
+            type(err).__name__,
+            err,
+            job.meta.get("subject", ""),
+            job.meta.get("from", ""),
+        )
+
+        # FAIL-02: append stage2_failed activity event with error metadata.
+        # Use kwarg tracking_number= (not normalized_tn=) per _emit_scan_event signature (Pitfall 5).
+        self._emit_scan_event(
+            message_id=job.message_id,
+            meta=job.meta,
+            outcome="stage2_failed",
+            tracking_number=job.normalized_tn,
+            extra={"error_type": type(err).__name__, "error_msg": str(err)},
+        )
+
+        # FAIL-04: consecutive-failure counter increment + threshold/cooldown notification gate.
+        self._stage2_consecutive_failures += 1
+
+        # DIAG-02: lifetime failure counters; stage2_schema_error_total is a sub-counter.
+        self._diagnostics.stage2_failed_total += 1
+        if isinstance(err, OllamaSchemaError):
+            self._diagnostics.stage2_schema_error_total += 1
+
+        # D-09 cooldown state machine: fire if at/past threshold AND (never fired OR cooldown elapsed).
+        if self._stage2_consecutive_failures >= STAGE2_NOTIFY_THRESHOLD and (
+            self._stage2_last_notify_ts is None
+            or _time.time() - self._stage2_last_notify_ts >= STAGE2_NOTIFY_COOLDOWN_S
+        ):
+            # D-08: notification body mentions failure count + Stage-1 still working callout.
+            persistent_notification.async_create(
+                self.hass,
+                message=(
+                    f"Stage-2 extraction has failed {self._stage2_consecutive_failures} times in a row. "
+                    f"Check that the Ollama server is reachable and the configured model is pulled. "
+                    f"The integration continues running with Stage-1 results."
+                ),
+                title="Shop2Parcel Stage-2 Failing",
+                notification_id=stage2_failing_notification_id(self.config_entry.entry_id),  # type: ignore[union-attr]
+            )
+            # Update cooldown timestamp to gate re-fires (D-09).
+            self._stage2_last_notify_ts = _time.time()
+
+    def _record_stage2_success(self) -> None:
+        """Centralize loud-surface side effects for a Stage-2 successful POST.
+
+        Implements FAIL-05 (counter reset + notification dismiss) per D-03/D-06.
+
+        Called ONLY from the success path at line 710 (after _stage2_posts_this_poll += 1)
+        — D-06 defines 'success' as a real 2xx POST to parcelapp.net. Graceful rejections
+        (AlreadyAdded, InvalidTracking), cap-skip, and quota-exhausted-skip do NOT call this.
+
+        The async_dismiss is unconditional (D-04): HA no-ops on unknown notification IDs
+        (Assumption A1 in 21-RESEARCH.md), so no _stage2_consecutive_failures > 0 guard is needed.
+        Note (D-03): stage2_succeeded_total increment is Plan 03's job.
+        """
+        self._stage2_consecutive_failures = 0
+        # DIAG-02: lifetime success counter; incremented only on real 2xx POST (D-06).
+        self._diagnostics.stage2_succeeded_total += 1
+        # FAIL-05: unconditional dismiss — HA is a no-op when the ID is unknown.
+        persistent_notification.async_dismiss(
+            self.hass,
+            notification_id=stage2_failing_notification_id(self.config_entry.entry_id),  # type: ignore[union-attr]
+        )
 
     @property
     def diagnostics(self) -> PollStats:
         """Public read-only view of in-memory poll diagnostics."""
         return self._diagnostics
+
+    @property
+    def stage2_queue_depth(self) -> int:
+        """Current Stage-2 queue depth; 0 when stage2 is disabled."""
+        if self._stage2_queue is None:
+            return 0
+        return self._stage2_queue.qsize()
 
     def _emit_scan_event(
         self,
@@ -328,6 +538,328 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             event.update(extra)
         d.scan_events.append(event)
         d.scan_events_total += 1
+
+    async def async_start_stage2(self) -> None:
+        """Construct the Stage-2 queue, build OllamaExtractor, and spawn the worker.
+
+        Called from async_setup_entry when stage2_enabled=True.
+
+        QUE-01: reads CONF_QUEUE_MAXLEN from config entry options, clamps to [1, 256],
+        constructs self._stage2_queue and self._stage2_enqueued_keys.
+
+        Phase 19 D-02: spawns the background worker via
+        entry.async_create_background_task after queue and extractor are ready (QUE-04).
+        Phase 19 D-03/D-04: builds OllamaClient and OllamaExtractor once per
+        setup/reload cycle from entry.options; extractor is cached as self._extractor.
+        """
+        assert self.config_entry is not None
+        raw = self.config_entry.options.get(CONF_QUEUE_MAXLEN, DEFAULT_QUEUE_MAXLEN)
+        maxlen = max(1, min(256, int(raw)))
+        self._stage2_queue = asyncio.Queue(maxsize=maxlen)
+        self._stage2_enqueued_keys = set()
+        _LOGGER.debug("Stage-2 queue constructed with maxsize=%d", maxlen)
+
+        # Phase 19 D-03: build extractor once per setup/reload cycle.
+        session = async_get_clientsession(self.hass)
+        url = self.config_entry.options[CONF_OLLAMA_URL]
+        model = self.config_entry.options.get(CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
+        timeout = float(self.config_entry.options.get(CONF_OLLAMA_TIMEOUT, DEFAULT_OLLAMA_TIMEOUT))
+        client = OllamaClient(session=session, base_url=url, model=model, timeout=timeout)
+
+        # Phase 19 D-04: parse field_list from options (once at setup; never per-job).
+        raw_fields = self.config_entry.options.get(CONF_CUSTOM_FIELDS, [])
+        field_list = [(f["name"], f.get("description")) for f in raw_fields if isinstance(f, dict)]
+        self._extractor = OllamaExtractor(client=client, field_list=field_list)
+
+        # Phase 19 D-02: spawn worker after queue and extractor are ready (QUE-04).
+        # async_create_background_task auto-registers task in entry._background_tasks;
+        # HA provides a 10-second hard-cancel fallback; our 5-second explicit cancel in
+        # async_stop_stage2 fires first (config_entries.py _async_process_on_unload).
+        self._stage2_worker_task = self.config_entry.async_create_background_task(
+            self.hass,
+            self._async_stage2_worker(),
+            name="shop2parcel_stage2_worker",
+        )
+        _LOGGER.debug("Stage-2 worker spawned for entry %s", self.config_entry.entry_id)
+
+    async def async_stop_stage2(self) -> None:
+        """Cancel worker (bounded 5 s), drain queue, release extractor.
+
+        D-01 sequence: (1) cancel worker task, (2) drain and reset queue.
+        Cancelling before drain is critical — cancelling after could leave a
+        worker that already received a get() result still running.
+
+        QUE-05: 5-second bounded wait via asyncio.wait_for; both CancelledError
+        and TimeoutError suppressed so on-unload never raises.
+        """
+        # Phase 21 SPEC Req #5: reset failure streak on stage2 stop/reload.
+        # Placed at the TOP of async_stop_stage2 (before any early-return) so the reset
+        # fires unconditionally — even when _stage2_queue is None (CR-01 sentinel path where
+        # async_start_stage2 was never called). A naive 'append at end' would miss this path.
+        self._stage2_consecutive_failures = 0
+        self._stage2_last_notify_ts = None
+
+        # Step 1 (Phase 19): cancel worker task — must precede queue drain (D-01).
+        # QUE-05: 5-second bounded wait via asyncio.wait_for.
+        # Explicit task.cancel() is required before wait_for: without it, wait_for on a
+        # not-yet-cancelled task simply waits for natural completion. An idle worker blocked
+        # on queue.get() never completes on its own, causing a 5-second delay on every clean
+        # shutdown. Cancelling first allows the idle worker to exit immediately; the 5-second
+        # backstop handles workers that are mid-operation when cancelled.
+        # CancelledError and TimeoutError are suppressed so unload never raises (QUE-05).
+        if self._stage2_worker_task is not None and not self._stage2_worker_task.done():
+            self._stage2_worker_task.cancel()
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(self._stage2_worker_task, timeout=5.0)
+        self._stage2_worker_task = None
+        self._extractor = None  # release OllamaClient / aiohttp session reference
+
+        # Step 2 (Phase 18 CR-02): drain and reset queue, preserving maxsize.
+        if self._stage2_queue is None:
+            return
+        prev_maxsize = self._stage2_queue.maxsize
+        while not self._stage2_queue.empty():
+            try:
+                self._stage2_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # CR-02: preserve maxsize so backpressure invariant holds after a reload.
+        self._stage2_queue = asyncio.Queue(maxsize=prev_maxsize)
+        self._stage2_enqueued_keys.clear()
+        _LOGGER.debug("Stage-2 queue stopped and cleared")
+
+    def _enqueue_stage2(
+        self,
+        normalized_tn: str,
+        storage_key: str,
+        shipment: ShipmentData,
+        html_body: str,
+        *,
+        message_id: str,
+        meta: dict,
+    ) -> None:
+        """Enqueue a Stage-2 job with in-flight dedup and drop-newest backpressure.
+
+        QUE-06: skips silently if normalized_tn already in _stage2_enqueued_keys.
+        QUE-03: on QueueFull, logs warning + emits stage2_dropped_backpressure event,
+                does NOT write to _submitted_tracking_numbers.
+        Uses put_nowait (never await put) per QUE-07.
+
+        The add to _stage2_enqueued_keys happens ONLY after successful put_nowait
+        (Anti-Patterns §3) — if put_nowait raises QueueFull, the key is NOT added.
+        """
+        if normalized_tn in self._stage2_enqueued_keys:
+            return  # silent skip — already in flight (QUE-06)
+        job = Stage2Job(
+            storage_key=storage_key,
+            normalized_tn=normalized_tn,
+            shipment=shipment,
+            html_body=html_body,
+            message_id=message_id,
+            meta=meta,
+        )
+        assert self._stage2_queue is not None
+        try:
+            self._stage2_queue.put_nowait(job)
+        except asyncio.QueueFull:
+            _LOGGER.warning(
+                "Stage-2 queue full (%d/%d); dropping %s — will retry next poll",
+                self._stage2_queue.qsize(),
+                self._stage2_queue.maxsize,
+                normalized_tn,
+            )
+            self._emit_scan_event(
+                message_id=message_id,
+                meta=meta,
+                outcome="stage2_dropped_backpressure",
+                tracking_number=normalized_tn,
+            )
+            self._diagnostics.stage2_dropped_backpressure_total += 1  # DIAG-02
+            return  # NO dedup write (QUE-03), NO add to enqueued_keys
+        self._stage2_enqueued_keys.add(normalized_tn)  # add AFTER successful put (Anti-Patterns §3)
+        self._diagnostics.stage2_enqueued_total += 1  # DIAG-02: only on successful put_nowait
+
+    async def _async_stage2_worker(self) -> None:
+        """Single long-lived background worker draining _stage2_queue serially.
+
+        QUE-02: runs until cancelled via task.cancel() from async_stop_stage2.
+        Sole blocking point: await self._stage2_queue.get().
+
+        CancelledError at any await point propagates to the outer try — never
+        swallowed. Phase 21 (FAIL-01..05) implemented loud failure surface via
+        _record_stage2_failure/_record_stage2_success; worker-outer Exception
+        calls _record_stage2_failure and does NOT crash the worker.
+
+        task_done() in finally: ensures queue.join() (if used in tests) never hangs.
+        """
+        assert self.config_entry is not None
+        assert self._stage2_queue is not None
+        _LOGGER.debug("Stage-2 worker started for entry %s", self.config_entry.entry_id)
+        try:
+            while True:
+                job: Stage2Job = await self._stage2_queue.get()
+                normalized_tn = job.normalized_tn
+                try:
+                    await self._async_process_stage2_job(job)
+                except asyncio.CancelledError:
+                    self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
+                    raise  # propagate — shuts down the worker
+                except Exception as err:  # noqa: BLE001
+                    # FAIL-01/02/04: surface the failure loudly via the centralized helper (D-01..D-04).
+                    self._record_stage2_failure(job, err)
+                    self._stage2_enqueued_keys.discard(normalized_tn)
+                finally:
+                    self._stage2_queue.task_done()
+        except asyncio.CancelledError:
+            _LOGGER.debug("Stage-2 worker cancelled — exiting cleanly")
+            raise
+
+    async def _async_process_stage2_job(self, job: Stage2Job) -> None:
+        """Process one Stage2Job: extract via Ollama, merge, POST to parcelapp, update state.
+
+        Called by _async_stage2_worker for each drained job.
+
+        Implements D-05 (per-job store save after POST), D-06 (snapshot pattern),
+        MRG-01 (extractor called for every job), MRG-02 (merged shipment POSTed),
+        MRG-03 (stage2_conflict event emitted when LLM disagrees with Stage-1),
+        MRG-05 (per-poll POST cap gate + once-per-poll notification + D-12 counter),
+        FAIL-03 (OllamaTransientError / OllamaSchemaError → no POST, no dedup write).
+
+        Error hierarchy mirrors inline POST in gmail_coordinator.py lines 434-511:
+          - ParcelAppAuthError  -> raise ConfigEntryAuthFailed (caught by worker BLE001)
+          - ParcelAppQuotaError -> update _quota_exhausted_until + log warning
+          - ParcelAppAlreadyAddedError / ParcelAppInvalidTrackingError -> dedup-write + continue
+          - ParcelAppTransientError -> log warning, discard key, allow retry
+
+        Note (T-19-08): ConfigEntryAuthFailed raised here is caught by _async_stage2_worker's
+        except Exception (BLE001) — HA's reauth flow is NOT triggered from worker context.
+        Auth failures degrade silently to key-discard + next-poll retry; reauth is triggered
+        by the next _async_update_data poll cycle instead.
+        """
+        assert self.config_entry is not None
+        normalized_tn = job.normalized_tn
+
+        # MRG-05: per-poll POST cap gate (D-09). Checked BEFORE the extractor call so
+        # cap-skipped jobs never reach Ollama (avoids wasted inference cost during cap-hit polls).
+        if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
+            if not self._stage2_cap_notified_this_poll:
+                # D-10: fire exactly one notification per poll (first cap-hit only).
+                self._stage2_cap_notified_this_poll = True
+                persistent_notification.async_create(
+                    self.hass,
+                    message=(
+                        f"Shop2Parcel Stage-2 cap hit: {MAX_STAGE2_POSTS_PER_POLL} POST(s) "
+                        f"already sent this poll cycle. Remaining items will retry on the "
+                        f"next poll cycle."
+                    ),
+                    title="Shop2Parcel Stage-2 Cap Hit",
+                    notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
+                )
+            _LOGGER.debug(
+                "Stage-2 worker: cap hit (%d/%d) — skipping POST for %s; will retry next poll",
+                self._stage2_posts_this_poll,
+                MAX_STAGE2_POSTS_PER_POLL,
+                normalized_tn,
+            )
+            self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
+            return  # no extractor, no POST, no dedup write
+
+        # MRG-02: default to Stage-1 shipment; replaced by merged result after extraction.
+        merged_shipment = job.shipment
+
+        if self._extractor is not None:
+            try:
+                stage2_result = await self._extractor.async_extract(job.html_body, job.shipment)
+            except (OllamaTransientError, OllamaSchemaError) as err:  # fmt: skip
+                # FAIL-01/02/04: surface the Ollama failure loudly via helper (D-01..D-04, D-05 scope).
+                # FAIL-03: no POST, no dedup write; next poll retries (D-04 pure-surface: helper does
+                # not touch control flow; existing discard+return below remain unchanged).
+                self._record_stage2_failure(job, err)
+                self._stage2_enqueued_keys.discard(normalized_tn)
+                return
+
+            # MRG-02: merge Stage-2 result into Stage-1 shipment.
+            merged_shipment, conflicts = merge_llm_authoritative(job.shipment, stage2_result)
+
+            # MRG-03: emit exactly one stage2_conflict event if LLM disagreed.
+            if conflicts:
+                self._emit_scan_event(
+                    message_id=job.message_id,
+                    meta=job.meta,
+                    outcome="stage2_conflict",
+                    tracking_number=normalized_tn,
+                    extra={"conflicts": conflicts},
+                )
+                self._diagnostics.stage2_conflict_total += 1  # DIAG-02
+
+        parcel_client = ParcelAppClient(
+            session=async_get_clientsession(self.hass),
+            api_key=self.config_entry.data[CONF_API_KEY],
+        )
+
+        # Quota guard: skip POST and discard key if quota is exhausted.
+        now = int(_time.time())
+        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+            _LOGGER.debug("Stage-2 worker: quota exhausted — skipping POST for %s", normalized_tn)
+            self._stage2_enqueued_keys.discard(normalized_tn)
+            return
+
+        carrier_code = normalize_carrier(merged_shipment.carrier_name)
+        try:
+            await parcel_client.async_add_delivery(
+                tracking_number=merged_shipment.tracking_number,
+                carrier_code=carrier_code,
+                description=merged_shipment.order_name or merged_shipment.tracking_number,
+            )
+        except ParcelAppAuthError as err:
+            raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
+        except ParcelAppQuotaError as err:
+            self._quota_exhausted_until = (
+                err.reset_at if err.reset_at is not None else _next_midnight_utc()
+            )
+            _LOGGER.warning(
+                "parcelapp.net daily quota exhausted (Stage-2 worker); forwarding paused: %s",
+                str(err)[:100],
+            )
+            self._stage2_enqueued_keys.discard(normalized_tn)
+            return
+        except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
+            # Write dedup so next poll does not retry; discard in-flight key.
+            self._submitted_tracking_numbers[normalized_tn] = None
+            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                self._submitted_tracking_numbers.popitem(last=False)
+            self._stage2_enqueued_keys.discard(normalized_tn)
+            base = self.data if self.data is not None else {}
+            updated = {**base, job.storage_key: merged_shipment}
+            self._pending_shipments = updated
+            await self._async_save_store()
+            return
+        except ParcelAppTransientError as err:
+            _LOGGER.warning(
+                "Stage-2 worker: parcelapp transient error for %s: %s",
+                normalized_tn,
+                str(err)[:100],
+            )
+            self._stage2_enqueued_keys.discard(normalized_tn)
+            return
+
+        # Success path (mirrors gmail_coordinator.py lines 513-526).
+        self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
+        self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
+        self._submitted_tracking_numbers[normalized_tn] = None
+        if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+            self._submitted_tracking_numbers.popitem(last=False)
+        self._stage2_enqueued_keys.discard(normalized_tn)  # Phase 18 WR-01 fix
+
+        # D-06: snapshot pattern — never mutate self.data directly.
+        # Guard: self.data is None before the first coordinator refresh; use empty dict as base.
+        # MRG-02: persist and surface the merged shipment so sensors reflect merged state.
+        base = self.data if self.data is not None else {}
+        updated = {**base, job.storage_key: merged_shipment}
+        self._pending_shipments = updated  # D-05: assign before save
+        await self._async_save_store()  # D-05: per-job save immediately
+        self.async_set_updated_data(updated)  # D-06: triggers sensor creation
+        _LOGGER.debug("Stage-2 worker: posted %s successfully", normalized_tn)
 
     async def _async_load_store(self) -> None:
         """Hydrate dedup, quota, and persisted shipments state from Store.
@@ -401,7 +933,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 _LOGGER.warning("persisted_shipments entry for %r is invalid — skipping", msg_id)
                 continue
             try:
-                restored[msg_id] = ShipmentData(**{k: entry[k] for k in _SHIPMENT_FIELD_TYPES})
+                restored[msg_id] = ShipmentData(
+                    **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
+                    custom_attributes=_safe_custom_attributes(entry),
+                )
             except TypeError as err:
                 _LOGGER.warning(
                     "persisted_shipments entry for %r could not be reconstructed (%s) — skipping",

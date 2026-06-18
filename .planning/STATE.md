@@ -1,16 +1,19 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: Debug Switch
-status: Awaiting next milestone
-stopped_at: milestone close in progress
-last_updated: "2026-06-05T20:17:03.615Z"
-last_activity: 2026-06-05 — Milestone v1.2 completed and archived
+milestone: v1.3
+milestone_name: AI-based Email Analysis
+current_phase: 22
+current_phase_name: README Setup + End-to-End Validation
+status: complete
+stopped_at: v1.3 milestone closed — all 8 phases shipped, 37/37 requirements met
+last_updated: "2026-06-17T00:00:00.000Z"
+last_activity: 2026-06-17
+last_activity_desc: v1.3 milestone complete — archived, tagged, REQUIREMENTS.md removed
 progress:
-  total_phases: 15
-  completed_phases: 15
-  total_plans: 47
-  completed_plans: 47
+  total_phases: 8
+  completed_phases: 8
+  total_plans: 23
+  completed_plans: 23
   percent: 100
 ---
 
@@ -21,20 +24,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-05)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** Planning next milestone
+**Current focus:** v1.3 shipped — planning next milestone
 
 ## Current Position
 
-Phase: Milestone v1.2 complete
-Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-06-05 — Milestone v1.2 completed and archived
+Phase: 22 — README Setup + End-to-End Validation
+Plan: Complete (2/2)
+Status: Milestone v1.3 SHIPPED — all 8 phases, 23 plans, 37/37 requirements complete
+Last activity: 2026-06-17 — v1.3 milestone closed and archived
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 32
+- Total plans completed: 55
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -52,6 +55,14 @@ Last activity: 2026-06-05 — Milestone v1.2 completed and archived
 | 10 | 3 | - | - |
 | 11 | 3 | - | - |
 | 12 | 3 | - | - |
+| 15 | 4 | - | - |
+| 16 | 3 | - | - |
+| 17 | 4 | - | - |
+| 18 | 2 | - | - |
+| 19 | 2 | - | - |
+| 20 | 3 | - | - |
+| 22 | 2 | - | - |
+| 21 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -63,6 +74,13 @@ Last activity: 2026-06-05 — Milestone v1.2 completed and archived
 | Phase 02-api-clients P02 | 4 | 2 tasks | 5 files |
 | Phase 02-api-clients P03 | 9 | 1 tasks | 2 files |
 | Phase 05-sensor-entities P01 | 10 | 3 tasks | 4 files |
+| Phase 15-ollamaclient-foundation P03 | 7 | 3 tasks | 2 files |
+| Phase 15-ollamaclient-foundation P04 | 4 | 3 tasks | 2 files |
+| Phase 22 P01 | 15 | 2 tasks | 1 files |
+| Phase 22 P02 | 2 | 1 tasks | 1 files |
+| Phase 21 P01 | 25 | 2 tasks | 7 files |
+| Phase 21 P02 | 26 | 2 tasks | 4 files |
+| Phase 21 P03 | 8m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -89,6 +107,16 @@ Recent decisions affecting current work:
 - Phase 13.1: STORAGE_VERSION bumped to 3; v2->v3 migration preserves submitted_tracking_numbers + quota_exhausted_until, seeds persisted_shipments as {}
 - Phase 13.1: _SHIPMENT_FIELD_TYPES module-level constant used for per-entry type validation in _async_load_store (T-13.1-04 ASVS V5)
 - Phase 13.1: _pending_shipments assigned before _async_save_store() so debounced lambda captures updated state
+- v1.3 Phase 15: OllamaClient mirrors `parcelapp.py` shape — session injection, no HA imports, custom exception taxonomy (`OllamaTransientError`, `OllamaSchemaError`)
+- v1.3 Phase 15-03: OllamaClient 2-pass parse pipeline shipped (Pass 1 = normalize + json.loads; Pass 2 = fence-strip + normalize + json.loads on Pass 1 JSONDecodeError only). Missing-`{` from normalize is a hard fail (no Pass 2 retry). NFKC preserves Cyrillic A — Phase 20 carrier-regex pre-POST validation will catch any homoglyph slips on real tracking numbers.
+- v1.3 architecture lock: in-memory queue only (HA-restart-lossy by design); full-window rescan re-discovers un-dedup'd emails — no STORAGE_VERSION bump
+- v1.3 architecture lock: single long-lived worker per coordinator; multi-worker rejected (Ollama serializes per-model + ParcelApp 20/day quota)
+- v1.3 architecture lock: drop-newest backpressure on QueueFull (drop-oldest rejected — wastes head-of-queue work, breaks FIFO activity-log ordering)
+- v1.3 quota-burn mitigation set is INSEPARABLE: per-field merge guards + carrier-regex pre-POST validation + `temperature:0` + `MAX_STAGE2_POSTS_PER_POLL` cap + scoped skip-dedup. All five land in Phase 20.
+- v1.3 Phase 15-04: `live_ollama` pytest marker registered in `pyproject.toml`; single opt-in smoke test `tests/api/test_ollama_client_live.py` gated by `OLLAMA_URL` env var (D-10/D-11/D-12/D-13). CI silently skips. Phase 15 complete: 384 tests passing, 1 skipped (the live smoke).
+- Phase 20-01: merge_llm_authoritative returns tuple[ShipmentData, list[dict]] (Option A) — merge.py stays HA-free per D-02; coordinator emits stage2_conflict event using returned conflicts list
+- Phase 20-01: type: ignore[arg-type] on dataclasses.replace(**overrides) — mypy cannot resolve dict[str, str | None] spread against ShipmentData typed replace() overload; runtime values always valid
+- [Phase ?]: Phase 22 D-12/D-13/D-14/D-15: tests/test_stage2_e2e_live.py ships with live_ollama marker, OLLAMA_URL gate, and OllamaExtractor construction — fulfills Phase 15 D-13 deferral
 
 ### Roadmap Evolution
 
@@ -99,6 +127,7 @@ Recent decisions affecting current work:
 - Phase 11 added (v1.1): Activity Log & Debug Logging — per-email scan event ring buffer + comprehensive DEBUG-level logging
 - Phase 12 added: Address tech debt
 - Phase 13.1 inserted after Phase 13: Sensor Restore on Restart — coordinator.data not persisted means all sensors unavailable after restart (HA log audit finding) (URGENT)
+- v1.3 Phases 15–22 added: OllamaClient foundation → extractor → config-flow → queue → worker → merge+quota guards → failure surface+diagnostics → README+e2e. Phases 16, 19, 20 flagged NEEDS RESEARCH.
 
 ### Pending Todos
 
@@ -108,7 +137,7 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-None — Phase 1 gates cleared. parcelapp.net API documented. Gmail OAuth2 is standard (no discovery needed).
+None — v1.3 roadmap drafted, 37/37 requirements mapped, three NEEDS RESEARCH phases flagged. Ready to run `/gsd:plan-phase 15`.
 
 ### Quick Tasks Completed
 
@@ -172,10 +201,10 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-Last session: 2026-06-05 — /gsd:complete-milestone v1.2
-Stopped at: milestone close in progress
-Next action: v1.2 archived; start /gsd:new-milestone for v1.3
+Last session: 2026-06-17T00:00:00.000Z
+Stopped at: v1.3 milestone archived — ROADMAP.md collapsed, PROJECT.md updated, REQUIREMENTS.md removed
+Next action: Start v1.4 milestone planning.
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- `/gsd-new-milestone` — start v1.4 milestone (questioning → research → requirements → roadmap)

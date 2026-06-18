@@ -52,7 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # which requires google/googleapiclient stubs to be in sys.modules. Deferring to
     # function scope ensures the test harness (conftest.py) has registered the mocks
     # before this import runs. At production runtime there is no difference.
-    from .const import CONF_CONNECTION_TYPE, CONNECTION_TYPE_IMAP  # noqa: PLC0415
+    from .const import CONF_CONNECTION_TYPE, CONF_OLLAMA_URL, CONNECTION_TYPE_IMAP  # noqa: PLC0415
     from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
     from .gmail_coordinator import GmailCoordinator  # noqa: PLC0415
     from .imap_coordinator import ImapCoordinator  # noqa: PLC0415
@@ -64,6 +64,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         coordinator = GmailCoordinator(hass, entry)
     await coordinator._async_load_store()
+    # Phase 17 D-05: derive stage2_enabled before first poll.
+    # bool() coerces any non-empty URL string to True without exposing the URL value.
+    # Empty string fallback prevents AttributeError on v1.2 entries with no ollama_url key.
+    coordinator._diagnostics.stage2_enabled = bool(entry.options.get(CONF_OLLAMA_URL, ""))
+    # Phase 18: when Stage-2 is enabled, construct the bounded queue + in-flight
+    # dedup set so the first poll's enqueues already have somewhere to land.
+    # Register async_stop_stage2 via async_on_unload so HA tears down the queue
+    # on every unload path (clean unload, exception, HA shutdown). Wrap the async
+    # callable in a sync lambda + hass.async_create_task to be robust across HA
+    # versions whose async_on_unload semantics differ for async vs sync callables
+    # (RESEARCH.md Pitfall 3).
+    if coordinator._diagnostics.stage2_enabled:
+        await coordinator.async_start_stage2()
+
+        def _stop_stage2() -> None:
+            hass.async_create_task(coordinator.async_stop_stage2())
+
+        entry.async_on_unload(_stop_stage2)
     await coordinator.async_config_entry_first_refresh()
 
     # Phase 5 D-08: schedule once-daily delivered-shipment cleanup.
@@ -89,20 +107,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Dismiss debug-mode notification when this entry is removed.
+    """Dismiss debug-mode AND Stage-2 cap notifications when this entry is removed.
 
     W4/P14-WR-01: When the user uninstalls/removes the Shop2Parcel integration,
     any persistent debug-mode notification must be cleaned up.  This does not
     fire on a normal unload (e.g., HA restart), only on explicit removal, which
     is the correct behaviour — HA shows the notification again on next startup
     if the entry is re-added with debug_mode=True.
+
+    Phase 20 MRG-05: also dismisses the Stage-2 cap-hit notification so neither
+    notification lingers after the integration is removed.
     """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
-    from .const import debug_mode_notification_id  # noqa: PLC0415
+    from .const import debug_mode_notification_id, stage2_cap_notification_id  # noqa: PLC0415
 
     persistent_notification.async_dismiss(
         hass, notification_id=debug_mode_notification_id(entry.entry_id)
+    )
+    persistent_notification.async_dismiss(
+        hass, notification_id=stage2_cap_notification_id(entry.entry_id)
     )
 
 

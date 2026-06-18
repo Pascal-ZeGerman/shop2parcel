@@ -76,12 +76,16 @@ async def test_dbg01_gmail_toggle(hass):
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
     ):
-        result_true = await handler.async_step_init(
+        result_true = await handler.async_step_settings(
             user_input={
                 CONF_POLL_INTERVAL: 30,
                 CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_DEBUG_MODE: True,
+                "ollama_url": "",
+                "ollama_model": "qwen3.5:2b",
+                "ollama_timeout": 60,
+                "queue_maxlen": 32,
             }
         )
     assert result_true["type"] == "create_entry"
@@ -96,12 +100,16 @@ async def test_dbg01_gmail_toggle(hass):
     with patch.object(
         type(handler2), "config_entry", new_callable=PropertyMock, return_value=fake_entry2
     ):
-        result_false = await handler2.async_step_init(
+        result_false = await handler2.async_step_settings(
             user_input={
                 CONF_POLL_INTERVAL: 30,
                 CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_DEBUG_MODE: False,
+                "ollama_url": "",
+                "ollama_model": "qwen3.5:2b",
+                "ollama_timeout": 60,
+                "queue_maxlen": 32,
             }
         )
     assert result_false["type"] == "create_entry"
@@ -118,11 +126,15 @@ async def test_dbg01_imap_toggle(hass):
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
     ):
-        result = await handler.async_step_init(
+        result = await handler.async_step_settings(
             user_input={
                 CONF_POLL_INTERVAL: 30,
                 CONF_IMAP_SEARCH: "SUBJECT shipped",
                 CONF_DEBUG_MODE: True,
+                "ollama_url": "",
+                "ollama_model": "qwen3.5:2b",
+                "ollama_timeout": 60,
+                "queue_maxlen": 32,
             }
         )
     assert result["type"] == "create_entry"
@@ -839,7 +851,12 @@ async def test_dbg06_imap_notification(hass, mock_imap_config_entry):
 
 
 async def test_async_remove_entry_dismisses_debug_notification(hass, mock_config_entry):
-    """DBG-07: async_remove_entry calls persistent_notification.async_dismiss with per-entry id."""
+    """DBG-07: async_remove_entry calls persistent_notification.async_dismiss with per-entry id.
+
+    Phase 20 MRG-05: async_remove_entry now dismisses BOTH the debug-mode and
+    Stage-2 cap notifications. This test verifies the debug-mode notification is
+    still dismissed (call_count >= 1, with the correct notification_id in the calls).
+    """
     from custom_components.shop2parcel import async_remove_entry
 
     mock_config_entry.add_to_hass(hass)
@@ -851,7 +868,8 @@ async def test_async_remove_entry_dismisses_debug_notification(hass, mock_config
     with patch("homeassistant.components.persistent_notification.async_dismiss") as mock_dismiss:
         await async_remove_entry(hass, mock_config_entry)
 
-    mock_dismiss.assert_called_once_with(
-        hass,
-        notification_id=debug_mode_notification_id(mock_config_entry.entry_id),
-    )
+    # Phase 20: two dismiss calls (debug_mode + stage2_cap).
+    assert mock_dismiss.call_count == 2
+    # The debug-mode notification must be one of the dismissed IDs.
+    notification_ids = {call.kwargs["notification_id"] for call in mock_dismiss.call_args_list}
+    assert debug_mode_notification_id(mock_config_entry.entry_id) in notification_ids

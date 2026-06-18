@@ -44,6 +44,9 @@ class ShipmentData:
     order_name: str  # e.g. "#1234" or "#AB-1234"; "" for direct carrier emails
     message_id: str  # stable message identifier — Gmail message ID (Gmail path) or IMAP UID as string (IMAP path)
     email_date: int  # Unix timestamp (seconds)
+    custom_attributes: dict[str, str | None] = field(
+        default_factory=dict
+    )  # FLD-03: user-added Stage-2 extraction fields; surfaced as sensor attributes, never POSTed
 
 
 @dataclass(slots=True, frozen=True)

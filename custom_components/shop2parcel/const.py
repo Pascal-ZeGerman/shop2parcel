@@ -82,6 +82,50 @@ def debug_mode_notification_id(entry_id: str) -> str:
     return f"{DEBUG_MODE_NOTIFICATION_ID_PREFIX}_{entry_id}"
 
 
+# Phase 20 MRG-05 (CONTEXT.md D-08): per-poll Stage-2 POST cap.
+# Caps Stage-2 POSTs at 5 per poll cycle — 25% of parcelapp's 20-POST daily
+# quota. 4 polls/day at the cap equals the daily limit (5 × 4 = 20); any
+# additional activity in the same day would exceed the quota. The counter
+# window is "per counter-reset", not a strict per-poll-cycle guarantee — jobs
+# queued by one poll but drained by the next may count against the next poll's
+# quota. See WR-01 in phase 20 REVIEW.md for full analysis.
+# stage2_cap_notification_id mirrors debug_mode_notification_id pattern.
+MAX_STAGE2_POSTS_PER_POLL: int = 5
+STAGE2_CAP_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_cap"
+
+
+def stage2_cap_notification_id(entry_id: str) -> str:
+    """Return the persistent-notification ID for Stage-2 cap-hit events.
+
+    Mirrors debug_mode_notification_id pattern (P14-WR-03). Using a per-entry
+    suffix prevents notification collision when multiple Shop2Parcel config
+    entries coexist. Fired at most once per poll cycle (D-08) so the user
+    sees a single banner rather than per-job spam.
+    """
+    return f"{STAGE2_CAP_NOTIFICATION_ID_PREFIX}_{entry_id}"
+
+
+# Phase 21 Plan 02 (FAIL-04): consecutive-failure threshold notification constants.
+# After STAGE2_NOTIFY_THRESHOLD consecutive Ollama failures the user sees a persistent
+# notification banner.  Re-fires are gated by STAGE2_NOTIFY_COOLDOWN_S (1 hour) to
+# avoid notification spam under sustained outages (T-21-02-01 DoS mitigation).
+# stage2_failing_notification_id mirrors stage2_cap_notification_id pattern (P14-WR-03).
+STAGE2_NOTIFY_THRESHOLD: int = 3
+STAGE2_NOTIFY_COOLDOWN_S: int = 3600
+STAGE2_FAILING_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_failing"
+
+
+def stage2_failing_notification_id(entry_id: str) -> str:
+    """Return the persistent-notification ID for Stage-2 consecutive-failure events.
+
+    Mirrors stage2_cap_notification_id pattern (P14-WR-03). Using a per-entry
+    suffix prevents notification collision when multiple Shop2Parcel config
+    entries coexist (T-21-02-04). Fired at most once per STAGE2_NOTIFY_COOLDOWN_S
+    window (FAIL-04 threshold notification; 1-hour cooldown via STAGE2_NOTIFY_COOLDOWN_S).
+    """
+    return f"{STAGE2_FAILING_NOTIFICATION_ID_PREFIX}_{entry_id}"
+
+
 def normalize_tracking_number(tracking_number: str) -> str:
     """Normalize a tracking number for dedup comparison.
 
@@ -89,3 +133,35 @@ def normalize_tracking_number(tracking_number: str) -> str:
     upper() handles casing inconsistencies in email content.
     """
     return tracking_number.strip().upper()
+
+
+# Phase 16: Stage-2 LLM extraction (locked field set — owned by extractor,
+# surfaced by Phase 17 options flow). The tuple is consumed by:
+#   * extractors/ollama_extractor.py.build_schema (required keys)
+#   * extractors/ollama_extractor.py._validate_fields (collision check, Plan 03)
+#   * Phase 20 merge_llm_authoritative (locked-vs-custom routing)
+# Order is observable downstream — JSON Schema ``required`` array semantics
+# depend on declared order for some validators (D-06).
+LOCKED_OLLAMA_FIELDS: tuple[str, str, str] = (
+    "tracking_number",
+    "carrier_name",
+    "order_name",
+)
+
+# Phase 17: Ollama Stage-2 configuration constants.
+# CONF_OLLAMA_URL: user-supplied Ollama server base URL (required for Stage 2;
+#   empty/absent → Stage-1-only path; no default — hardcoding localhost is unsafe
+#   because Pi-on-Pi co-located Docker is only one of several network topologies).
+CONF_OLLAMA_URL = "ollama_url"
+CONF_OLLAMA_MODEL = "ollama_model"
+DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
+CONF_OLLAMA_TIMEOUT = "ollama_timeout"
+DEFAULT_OLLAMA_TIMEOUT = 60  # seconds
+CONF_QUEUE_MAXLEN = "queue_maxlen"
+DEFAULT_QUEUE_MAXLEN = 32
+CONF_CUSTOM_FIELDS = "custom_fields"  # list[dict]: {"name": str, "description": str | None}
+# CONF_STAGE2_ENABLED: derived boolean; set in async_setup_entry from CONF_OLLAMA_URL presence.
+# Never exposed as a user-editable form field (D-05, T-17-02-03).
+CONF_STAGE2_ENABLED = "stage2_enabled"
+CONF_FIELD_NAME = "field_name"  # str, used in add/remove options steps
+CONF_FIELD_DESCRIPTION = "field_description"  # str | None

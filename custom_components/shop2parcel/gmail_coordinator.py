@@ -47,6 +47,7 @@ from .const import (
 )
 from .coordinator import (
     Shop2ParcelCoordinator,
+    Stage2Job,  # noqa: F401 — type import; subclass calls _enqueue_stage2 which constructs Stage2Job
     _extract_email_meta,
     _next_midnight_utc,
     _sanitise_parser_error,
@@ -70,6 +71,8 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
         if self.config_entry is None:
             raise UpdateFailed("config_entry is None — coordinator not properly initialized")
+
+        self._reset_stage2_poll_counters()  # Phase 20 MRG-05 / D-11: reset per-poll counters
 
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
@@ -370,6 +373,19 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         **email_meta,
                     }
                 )
+
+                # Phase 18 D-03: route Stage-2-enabled entries to the queue; the entire inline
+                # POST section (debug_mode, quota_blocked, parcel POST) is bypassed.
+                if self._diagnostics.stage2_enabled:
+                    self._enqueue_stage2(
+                        normalized,
+                        storage_key,
+                        shipment,
+                        html,
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                    )
+                    continue
 
                 # DBG-04: in debug mode, suppress POST and record dry_run_suppressed event.
                 if debug_mode:
