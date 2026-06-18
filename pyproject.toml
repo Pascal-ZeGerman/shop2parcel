@@ -16,6 +16,7 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
     "aioresponses",
     "pytest-homeassistant-custom-component",
 ]
@@ -30,6 +31,13 @@ markers = [
 
 [tool.coverage.run]
 source = ["custom_components"]
+
+[tool.coverage.report]
+# Enforced floor — CI fails if total coverage drops below this. Set a couple
+# points below the measured total (87.5% as of the test-coverage pass) so normal
+# fluctuation doesn't break CI; ratchet it up as coverage improves.
+fail_under = 85
+show_missing = true
 
 [tool.ruff]
 line-length = 100

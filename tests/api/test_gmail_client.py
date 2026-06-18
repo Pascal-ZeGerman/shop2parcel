@@ -60,6 +60,7 @@ from custom_components.shop2parcel.api.gmail_client import (  # noqa: E402
     GmailClient,
     build_incremental_query,
     extract_html_body,
+    extract_text_body,
 )
 
 # Re-bind HttpError in gmail_client's module namespace so that isinstance() checks
@@ -396,6 +397,130 @@ def test_default_gmail_query_has_no_label_inbox():
         "DEFAULT_GMAIL_QUERY must not contain 'label:inbox' — archived emails "
         "would be silently excluded (QF-01 fix)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Pagination — nextPageToken drives a second list() call (covers pageToken branch)
+# ---------------------------------------------------------------------------
+
+
+class _SequencedExecutor:
+    """Async executor returning a queued sequence of execute() results.
+
+    build() calls (functools.partial) return the service mock; each subsequent
+    request.execute() call pops the next dict from ``pages``.
+    """
+
+    def __init__(self, service, pages):
+        self.service = service
+        self._pages = list(pages)
+        self.list_kwargs: list[dict] = []
+
+    async def __call__(self, func, *args):
+        if isinstance(func, partial):
+            return self.service
+        return self._pages.pop(0)
+
+
+async def test_list_messages_paginates_across_pages():
+    """A nextPageToken on the first page triggers a second list() call with pageToken set."""
+    captured_kwargs: list[dict] = []
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.side_effect = lambda **kw: (
+        captured_kwargs.append(kw) or MagicMock()
+    )
+
+    executor = _SequencedExecutor(
+        service,
+        pages=[
+            {"messages": [{"id": "a"}], "nextPageToken": "PAGE2"},
+            {"messages": [{"id": "b"}]},  # no nextPageToken → loop ends
+        ],
+    )
+    client = GmailClient(executor)
+    messages, _ = await client.async_list_messages("fake-token", "from:shopify")
+
+    assert messages == [{"id": "a"}, {"id": "b"}]
+    assert len(captured_kwargs) == 2
+    assert "pageToken" not in captured_kwargs[0]
+    assert captured_kwargs[1].get("pageToken") == "PAGE2"
+
+
+# ---------------------------------------------------------------------------
+# async_get_message error classification (covers the get error path)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_message_auth_error_on_401():
+    """async_get_message → HttpError 401 is classified as GmailAuthError."""
+    http_err = make_http_error(401)
+    service = MagicMock()
+    executor = _CapturingExecutor(service=service, raise_on_execute=http_err)
+    client = GmailClient(executor)
+    with pytest.raises(GmailAuthError):
+        await client.async_get_message("fake-token", "msg123")
+
+
+async def test_get_message_transient_error_on_500():
+    """async_get_message → HttpError 500 is classified as GmailTransientError."""
+    http_err = make_http_error(500)
+    service = MagicMock()
+    executor = _CapturingExecutor(service=service, raise_on_execute=http_err)
+    client = GmailClient(executor)
+    with pytest.raises(GmailTransientError):
+        await client.async_get_message("fake-token", "msg123")
+
+
+# ---------------------------------------------------------------------------
+# extract_html_body — invalid base64 returns None (covers the decode-failure guard)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_html_body_returns_none_on_invalid_base64():
+    """Undecodable base64 data (invalid length) returns None rather than raising."""
+    # A single data char + "==" padding is an invalid base64 length → binascii.Error.
+    payload = {"mimeType": "text/html", "body": {"data": "A"}}
+    assert extract_html_body(payload) is None
+
+
+# ---------------------------------------------------------------------------
+# extract_text_body — mirror of extract_html_body for the text/plain fallback
+# ---------------------------------------------------------------------------
+
+
+def test_extract_text_body_decodes_base64url():
+    """text/plain part with base64url data → decoded UTF-8 string returned."""
+    original = "Your order has shipped"
+    encoded = base64.urlsafe_b64encode(original.encode("utf-8")).decode("ascii")
+    payload = {"mimeType": "text/plain", "body": {"data": encoded}}
+    assert extract_text_body(payload) == original
+
+
+def test_extract_text_body_recurses_into_parts():
+    """Multipart payload with text/plain in a nested part → text body returned."""
+    original = "Tracking: 1Z999"
+    encoded = base64.urlsafe_b64encode(original.encode("utf-8")).decode("ascii")
+    payload = {
+        "mimeType": "multipart/mixed",
+        "body": {"data": ""},
+        "parts": [
+            {"mimeType": "text/html", "body": {"data": ""}},
+            {"mimeType": "text/plain", "body": {"data": encoded}},
+        ],
+    }
+    assert extract_text_body(payload) == original
+
+
+def test_extract_text_body_returns_none_on_invalid_base64():
+    """Undecodable base64 (invalid length) in a text/plain part returns None rather than raising."""
+    payload = {"mimeType": "text/plain", "body": {"data": "A"}}
+    assert extract_text_body(payload) is None
+
+
+def test_extract_text_body_returns_none_when_no_text_part():
+    """A payload with no text/plain content returns None."""
+    payload = {"mimeType": "text/html", "body": {"data": ""}, "parts": []}
+    assert extract_text_body(payload) is None
 
 
 def test_default_gmail_query_keeps_spam_exclusion():
