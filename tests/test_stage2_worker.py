@@ -324,9 +324,16 @@ async def test_async_stop_stage2_bounded_5_seconds(hass, mock_stage2_config_entr
     """
     mock_stage2_config_entry.add_to_hass(hass)
 
+    _inner_task: asyncio.Task | None = None
+
     async def _hang(self) -> None:  # noqa: RUF029
         """Simulates a worker that ignores CancelledError by shielding its internal wait."""
-        await asyncio.shield(asyncio.Event().wait())
+        nonlocal _inner_task
+        _inner_task = asyncio.get_running_loop().create_task(asyncio.Event().wait())
+        try:
+            await asyncio.shield(_inner_task)
+        except asyncio.CancelledError:
+            raise
 
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -361,6 +368,13 @@ async def test_async_stop_stage2_bounded_5_seconds(hass, mock_stage2_config_entr
             f"async_stop_stage2 must complete within backstop window, got {elapsed:.2f}s"
         )
         assert coord._stage2_worker_task is None
+        # Cancel the inner shielded task so Python 3.14 doesn't flag it as a lingering task.
+        if _inner_task is not None and not _inner_task.done():
+            _inner_task.cancel()
+            try:
+                await _inner_task
+            except asyncio.CancelledError:
+                pass
 
 
 async def test_no_worker_leak_after_3_reloads(hass, mock_stage2_config_entry):
