@@ -752,8 +752,9 @@ async def test_worker_does_not_swallow_cancelled_error_during_process_job(
 
 
 async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_config_entry):
-    """MRG-02: When stage1.tracking_number is None and stage2 provides a valid value,
-    POST receives the stage2 value (promotion path)."""
+    """I6 precondition: When stage1.tracking_number is None, _async_process_stage2_job
+    raises AssertionError — coordinators only enqueue emails with a resolved Stage-1
+    tracking number (I6 contract). Stage-2 promotion of None is a contract violation."""
     from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
@@ -805,12 +806,11 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
         )
-        await coord._async_process_stage2_job(job)
+        with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+            await coord._async_process_stage2_job(job)
 
-        # POST must receive the stage2 tracking number, not None.
-        mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
-        call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
-        assert call_kwargs["tracking_number"] == "STAGE2TN123456"
+        # Per I6 contract, POST must NOT be called when stage1.tracking_number is None.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
 
 
 async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_config_entry):
@@ -1316,22 +1316,24 @@ def test_ollama_client_uses_temperature_zero():
 
 
 async def test_async_remove_entry_dismisses_cap_notification(hass, mock_stage2_config_entry):
-    """async_remove_entry must dismiss BOTH debug-mode AND Stage-2 cap notifications."""
+    """async_remove_entry must dismiss debug-mode, Stage-2 cap, AND Stage-2 failing notifications."""
     from custom_components.shop2parcel import async_remove_entry
     from custom_components.shop2parcel.const import (
         debug_mode_notification_id,
         stage2_cap_notification_id,
+        stage2_failing_notification_id,
     )
 
     mock_stage2_config_entry.add_to_hass(hass)
     with patch("homeassistant.components.persistent_notification.async_dismiss") as mock_dismiss:
         await async_remove_entry(hass, mock_stage2_config_entry)
 
-    # Two dismiss calls — one for each notification type.
-    assert mock_dismiss.call_count == 2
+    # Three dismiss calls — one for each notification type (I2 fix adds stage2_failing).
+    assert mock_dismiss.call_count == 3
     notification_ids = {call.kwargs["notification_id"] for call in mock_dismiss.call_args_list}
     assert debug_mode_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
     assert stage2_cap_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
+    assert stage2_failing_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
 
 
 # ---------------------------------------------------------------------------

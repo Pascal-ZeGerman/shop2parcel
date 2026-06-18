@@ -141,7 +141,10 @@ def preprocess_html(html: str) -> tuple[str, list[str]]:
     Returns:
         Tuple of ``(prose, links)``. Empty input yields ``("", [])``.
     """
-    soup = BeautifulSoup(html, "lxml")
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception as err:  # noqa: BLE001
+        raise OllamaSchemaError(f"HTML preprocessing failed: {type(err).__name__}") from err
     prose = soup.get_text(separator=" ", strip=True)
 
     seen: set[str] = set()
@@ -411,9 +414,7 @@ class OllamaExtractor:
             if isinstance(v, str) and v == "":
                 v = None
             if v is not None and not isinstance(v, str):
-                raise OllamaSchemaError(
-                    f"locked field '{name}' has invalid type: {type(v).__name__}"
-                )
+                raise OllamaSchemaError(f"field '{name}' has invalid type: {type(v).__name__}")
             if name in LOCKED_OLLAMA_FIELDS:
                 locked[name] = v
             else:

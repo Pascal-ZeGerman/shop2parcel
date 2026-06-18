@@ -82,6 +82,14 @@ def merge_llm_authoritative(
     ``ShipmentData.custom_attributes`` (FLD-03) — user-added fields surface as
     HA sensor attributes and are never POSTed to parcelapp.net.
     """
+    # Precondition: coordinators only enqueue emails with a resolved Stage-1
+    # tracking number, so stage1.tracking_number must be non-None here.
+    # The assert surfaces any future caller that violates this contract loudly
+    # rather than silently constructing a ShipmentData with tracking_number=None.
+    assert stage1.tracking_number is not None, (
+        "merge_llm_authoritative precondition: stage1.tracking_number must be non-None"
+    )
+
     overrides: dict[str, str | None] = {}
     conflicts: list[dict] = []
 
