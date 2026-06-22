@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 import voluptuous as vol
+from homeassistant.helpers.selector import SelectSelector
 
 from custom_components.shop2parcel.api.exceptions import OllamaTransientError
-from homeassistant.helpers.selector import SelectSelector
 from custom_components.shop2parcel.const import (
     CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
@@ -32,7 +32,7 @@ from custom_components.shop2parcel.const import (
     MAX_RESCAN_WINDOW_DAYS,
     MIN_RESCAN_WINDOW_DAYS,
 )
-from custom_components.shop2parcel.options_flow import OptionsFlowHandler, _OLLAMA_LOCALHOST_URL
+from custom_components.shop2parcel.options_flow import _OLLAMA_LOCALHOST_URL, OptionsFlowHandler
 
 
 def _make_handler_with_options(options: dict) -> tuple[OptionsFlowHandler, MagicMock]:

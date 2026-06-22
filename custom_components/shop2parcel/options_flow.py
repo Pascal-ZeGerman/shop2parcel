@@ -167,7 +167,9 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             ollama_url_default = await self._probe_ollama_localhost()
         else:
             ollama_url_default = stored_url
-        stage2_status = "enabled" if ollama_url_default.strip() else "disabled (set Ollama URL to enable)"
+        stage2_status = (
+            "enabled" if ollama_url_default.strip() else "disabled (set Ollama URL to enable)"
+        )
         description_placeholders: dict[str, str] = {
             "locked_fields": ", ".join(LOCKED_OLLAMA_FIELDS),
             "stage2_status": stage2_status,
