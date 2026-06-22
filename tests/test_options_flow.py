@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 import voluptuous as vol
@@ -32,7 +32,7 @@ from custom_components.shop2parcel.const import (
     MAX_RESCAN_WINDOW_DAYS,
     MIN_RESCAN_WINDOW_DAYS,
 )
-from custom_components.shop2parcel.options_flow import OptionsFlowHandler
+from custom_components.shop2parcel.options_flow import OptionsFlowHandler, _OLLAMA_LOCALHOST_URL
 
 
 def _make_handler_with_options(options: dict) -> tuple[OptionsFlowHandler, MagicMock]:
@@ -59,6 +59,22 @@ def _make_imap_handler_with_options(options: dict) -> tuple[OptionsFlowHandler, 
     fake_entry.options = options
     fake_entry.data = {"connection_type": "imap"}
     return handler, fake_entry
+
+
+@pytest.fixture(autouse=True)
+def no_localhost_probe():
+    """Suppress the localhost Ollama probe in all tests.
+
+    Tests that specifically verify probe behaviour override this via their own
+    patch.object(OptionsFlowHandler, '_probe_ollama_localhost', ...) block,
+    which takes precedence (LIFO patch stack).
+    """
+    with patch.object(
+        OptionsFlowHandler,
+        "_probe_ollama_localhost",
+        new=AsyncMock(return_value=""),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -999,6 +1015,87 @@ async def test_add_custom_field_locked_collision_is_field_scoped(hass, mock_conf
     assert CONF_FIELD_NAME in result["errors"], "Error must be field-scoped to CONF_FIELD_NAME"
     assert "base" not in result["errors"], "Error must NOT be on 'base' (must be field-scoped)"
     assert result["errors"][CONF_FIELD_NAME] == "locked_field_collision"
+
+
+# ---------------------------------------------------------------------------
+# Localhost probe tests (T-probe-01 / T-probe-02 / T-probe-03)
+# ---------------------------------------------------------------------------
+
+
+async def test_probe_localhost_prefills_url_when_ollama_running(hass, mock_config_entry):
+    """T-probe-01: When stored URL is empty and probe finds localhost Ollama, URL field is pre-filled."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(
+            OptionsFlowHandler,
+            "_probe_ollama_localhost",
+            new=AsyncMock(return_value=_OLLAMA_LOCALHOST_URL),
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["qwen3.5:2b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=None)
+
+    assert result["type"] == "form"
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    url_key = schema_dict[CONF_OLLAMA_URL]
+    assert url_key.default() == _OLLAMA_LOCALHOST_URL, (
+        "URL field must be pre-filled with localhost URL when probe succeeds"
+    )
+
+
+async def test_probe_localhost_no_prefill_when_unreachable(hass, mock_config_entry):
+    """T-probe-02: When probe finds nothing (autouse suppresses it), URL field default stays empty."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=None)
+
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    url_key = schema_dict[CONF_OLLAMA_URL]
+    assert url_key.default() == "", "URL field must stay empty when probe finds no Ollama instance"
+
+
+async def test_probe_localhost_skipped_when_url_already_stored(hass, mock_config_entry):
+    """T-probe-03: When a URL is already stored in options, probe is never called."""
+    stored = "http://192.168.0.10:11434"
+    handler, fake_entry = _make_handler_with_options(options={CONF_OLLAMA_URL: stored})
+    probe_mock = AsyncMock(return_value=_OLLAMA_LOCALHOST_URL)
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(OptionsFlowHandler, "_probe_ollama_localhost", new=probe_mock),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=[],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=None)
+
+    assert probe_mock.call_count == 0, "Probe must not run when a URL is already stored"
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    url_key = schema_dict[CONF_OLLAMA_URL]
+    assert url_key.default() == stored, "Stored URL must be used as default, not the probe result"
 
 
 # ---------------------------------------------------------------------------
