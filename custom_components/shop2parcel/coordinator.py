@@ -266,6 +266,7 @@ class PollStats:
     stage2_dropped_backpressure_total: int = 0
     stage2_schema_error_total: int = 0
     stage2_conflict_total: int = 0
+    stage2_quota_skipped_total: int = 0
 
 
 class Shop2ParcelStore(Store):
@@ -406,6 +407,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         self._stage2_posts_this_poll = 0
         self._stage2_cap_notified_this_poll = False
+        if self.config_entry is not None:
+            persistent_notification.async_dismiss(
+                self.hass,
+                notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
+            )
 
     def _record_stage2_failure(self, job: Stage2Job, err: Exception) -> None:
         """Centralize loud-surface side effects for a Stage-2 Ollama or worker-outer failure.
@@ -621,11 +627,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         while not self._stage2_queue.empty():
             try:
                 self._stage2_queue.get_nowait()
+                self._stage2_queue.task_done()
             except asyncio.QueueEmpty:
                 break
         # CR-02: preserve maxsize so backpressure invariant holds after a reload.
         self._stage2_queue = asyncio.Queue(maxsize=prev_maxsize)
         self._stage2_enqueued_keys.clear()
+        if self._store_loaded:
+            await self._async_save_store()
         _LOGGER.debug("Stage-2 queue stopped and cleared")
 
     def _enqueue_stage2(
@@ -764,6 +773,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
             return  # no extractor, no POST, no dedup write
 
+        # Quota guard: checked BEFORE the extractor call so quota-exhausted jobs never reach
+        # Ollama (avoids wasted inference cost when parcelapp daily quota is exhausted).
+        # This must come AFTER the cap gate (above) but BEFORE the extractor — running Ollama
+        # when quota is exhausted wastes GPU resources and causes items to be silently re-enqueued
+        # each poll cycle (since they're never added to _submitted_tracking_numbers), creating an
+        # infinite loop that makes stage2_enqueued_total grow unboundedly with 0 successes.
+        now = int(_time.time())
+        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+            _LOGGER.warning(
+                "Stage-2 worker: quota exhausted — skipping %s; will retry after quota reset",
+                normalized_tn,
+            )
+            self._diagnostics.stage2_quota_skipped_total += 1  # DIAG-02
+            self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
+            return  # no extractor, no POST, no dedup write
+
         # MRG-02: default to Stage-1 shipment; replaced by merged result after extraction.
         merged_shipment = job.shipment
 
@@ -797,13 +822,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             api_key=self.config_entry.data[CONF_API_KEY],
         )
 
-        # Quota guard: skip POST and discard key if quota is exhausted.
-        now = int(_time.time())
-        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
-            _LOGGER.debug("Stage-2 worker: quota exhausted — skipping POST for %s", normalized_tn)
-            self._stage2_enqueued_keys.discard(normalized_tn)
-            return
-
         carrier_code = normalize_carrier(merged_shipment.carrier_name)
         try:
             await parcel_client.async_add_delivery(
@@ -824,6 +842,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_enqueued_keys.discard(normalized_tn)
             return
         except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
+            self._stage2_posts_this_poll += 1
             # Write dedup so next poll does not retry; discard in-flight key.
             self._submitted_tracking_numbers[normalized_tn] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
@@ -854,11 +873,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # D-06: snapshot pattern — never mutate self.data directly.
         # Guard: self.data is None before the first coordinator refresh; use empty dict as base.
         # MRG-02: persist and surface the merged shipment so sensors reflect merged state.
-        base = self.data if self.data is not None else {}
-        updated = {**base, job.storage_key: merged_shipment}
-        self._pending_shipments = updated  # D-05: assign before save
+        self._pending_shipments = {**(self.data or {}), job.storage_key: merged_shipment}
         await self._async_save_store()  # D-05: per-job save immediately
-        self.async_set_updated_data(updated)  # D-06: triggers sensor creation
+        # Re-snapshot self.data immediately before publish to avoid stale-base race (S2).
+        self.async_set_updated_data({**(self.data or {}), job.storage_key: merged_shipment})
         _LOGGER.debug("Stage-2 worker: posted %s successfully", normalized_tn)
 
     async def _async_load_store(self) -> None:

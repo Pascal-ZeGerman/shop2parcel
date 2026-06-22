@@ -35,6 +35,11 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .api.exceptions import OllamaTransientError
 from .api.ollama_client import OllamaClient
@@ -67,6 +72,9 @@ from .const import (
 )
 from .extractors.ollama_extractor import _FIELD_NAME_RE
 
+_OLLAMA_LOCALHOST_URL = "http://localhost:11434"
+_OLLAMA_PROBE_TIMEOUT = 1.0
+
 
 class OptionsFlowHandler(OptionsFlowWithReload):
     """Handle Shop2Parcel options flow.
@@ -75,6 +83,63 @@ class OptionsFlowHandler(OptionsFlowWithReload):
     on save — HA calls async_unload_entry + async_setup_entry with the new
     options dict, and the coordinator picks up the new poll interval.
     """
+
+    async def _build_ollama_model_field(self, url: str = "") -> Any:
+        """Return the voluptuous validator for CONF_OLLAMA_MODEL.
+
+        When ``url`` is non-empty and /api/tags returns a non-empty list,
+        returns a SelectSelector (dropdown) containing all available model tags.
+        The currently-stored model is always included so a model not present on
+        the live server (e.g. after a server restart) does not disappear from
+        the selector.
+
+        Falls back to bare ``str`` in any of these cases:
+        - url is empty or whitespace-only
+        - async_get_tags raises OllamaTransientError (server unreachable / non-200)
+        - async_get_tags returns an empty list
+
+        T-j6w-01: the stored CONF_OLLAMA_TIMEOUT bounds the fetch; a slow/
+        unreachable server fails fast into the text fallback rather than hanging
+        the HA options-flow render.
+        """
+        effective_url = url.strip()
+        if not effective_url:
+            return str
+
+        session = async_get_clientsession(self.hass)
+        timeout = self.config_entry.options.get(CONF_OLLAMA_TIMEOUT, DEFAULT_OLLAMA_TIMEOUT)
+        try:
+            tags: list[str] = await OllamaClient.async_get_tags(session, effective_url, timeout)
+        except OllamaTransientError:
+            # T-j6w-03: swallow server error detail; surface only as text fallback.
+            return str
+
+        if not tags:
+            return str
+
+        # Ensure the currently-stored model is always in the options list so the
+        # current value pre-selects correctly even when the server list has changed.
+        stored_model = self.config_entry.options.get(CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
+        if stored_model not in tags:
+            tags = [stored_model, *tags]
+
+        return SelectSelector(
+            SelectSelectorConfig(
+                options=sorted(tags),
+                mode=SelectSelectorMode.DROPDOWN,
+                custom_value=True,
+                sort=True,
+            )
+        )
+
+    async def _probe_ollama_localhost(self) -> str:
+        """Return _OLLAMA_LOCALHOST_URL if Ollama is listening there, else ''."""
+        session = async_get_clientsession(self.hass)
+        try:
+            await OllamaClient.async_get_tags(session, _OLLAMA_LOCALHOST_URL, _OLLAMA_PROBE_TIMEOUT)
+            return _OLLAMA_LOCALHOST_URL
+        except OllamaTransientError:
+            return ""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Top-level menu: route to settings or custom fields CRUD."""
@@ -91,13 +156,29 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         Both Gmail and IMAP branches include the Ollama fields (D-03).
         When ollama_url is non-empty, GET /api/tags is called to verify
         the server is reachable and the chosen model is available.
+
+        The model field is rendered as a SelectSelector dropdown when the stored
+        URL yields a live model list, and falls back to a free-text str field
+        otherwise (see _build_ollama_model_field).
         """
         errors: dict[str, str] = {}
+        stored_url = self.config_entry.options.get(CONF_OLLAMA_URL, "")
+        if not stored_url and user_input is None:
+            ollama_url_default = await self._probe_ollama_localhost()
+        else:
+            ollama_url_default = stored_url
+        stage2_status = (
+            "enabled" if ollama_url_default.strip() else "disabled (set Ollama URL to enable)"
+        )
         description_placeholders: dict[str, str] = {
             "locked_fields": ", ".join(LOCKED_OLLAMA_FIELDS),
+            "stage2_status": stage2_status,
         }
 
         conn_type = self.config_entry.data.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_GMAIL)
+
+        # Build the model field once and reuse in both branches.
+        model_field = await self._build_ollama_model_field(url=ollama_url_default)
 
         if conn_type == CONNECTION_TYPE_IMAP:
             schema = vol.Schema(
@@ -120,14 +201,14 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                     ): bool,
                     vol.Optional(
                         CONF_OLLAMA_URL,
-                        default=self.config_entry.options.get(CONF_OLLAMA_URL, ""),
+                        default=ollama_url_default,
                     ): str,
                     vol.Required(
                         CONF_OLLAMA_MODEL,
                         default=self.config_entry.options.get(
                             CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL
                         ),
-                    ): str,
+                    ): model_field,
                     vol.Required(
                         CONF_OLLAMA_TIMEOUT,
                         default=self.config_entry.options.get(
@@ -179,14 +260,14 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                     ): bool,
                     vol.Optional(
                         CONF_OLLAMA_URL,
-                        default=self.config_entry.options.get(CONF_OLLAMA_URL, ""),
+                        default=ollama_url_default,
                     ): str,
                     vol.Required(
                         CONF_OLLAMA_MODEL,
                         default=self.config_entry.options.get(
                             CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL
                         ),
-                    ): str,
+                    ): model_field,
                     vol.Required(
                         CONF_OLLAMA_TIMEOUT,
                         default=self.config_entry.options.get(

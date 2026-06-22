@@ -752,8 +752,9 @@ async def test_worker_does_not_swallow_cancelled_error_during_process_job(
 
 
 async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_config_entry):
-    """MRG-02: When stage1.tracking_number is None and stage2 provides a valid value,
-    POST receives the stage2 value (promotion path)."""
+    """I6 precondition: When stage1.tracking_number is None, _async_process_stage2_job
+    raises AssertionError — coordinators only enqueue emails with a resolved Stage-1
+    tracking number (I6 contract). Stage-2 promotion of None is a contract violation."""
     from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
@@ -805,12 +806,11 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
         )
-        await coord._async_process_stage2_job(job)
+        with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+            await coord._async_process_stage2_job(job)
 
-        # POST must receive the stage2 tracking number, not None.
-        mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
-        call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
-        assert call_kwargs["tracking_number"] == "STAGE2TN123456"
+        # Per I6 contract, POST must NOT be called when stage1.tracking_number is None.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
 
 
 async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_config_entry):
@@ -1316,22 +1316,24 @@ def test_ollama_client_uses_temperature_zero():
 
 
 async def test_async_remove_entry_dismisses_cap_notification(hass, mock_stage2_config_entry):
-    """async_remove_entry must dismiss BOTH debug-mode AND Stage-2 cap notifications."""
+    """async_remove_entry must dismiss debug-mode, Stage-2 cap, AND Stage-2 failing notifications."""
     from custom_components.shop2parcel import async_remove_entry
     from custom_components.shop2parcel.const import (
         debug_mode_notification_id,
         stage2_cap_notification_id,
+        stage2_failing_notification_id,
     )
 
     mock_stage2_config_entry.add_to_hass(hass)
     with patch("homeassistant.components.persistent_notification.async_dismiss") as mock_dismiss:
         await async_remove_entry(hass, mock_stage2_config_entry)
 
-    # Two dismiss calls — one for each notification type.
-    assert mock_dismiss.call_count == 2
+    # Three dismiss calls — one for each notification type (I2 fix adds stage2_failing).
+    assert mock_dismiss.call_count == 3
     notification_ids = {call.kwargs["notification_id"] for call in mock_dismiss.call_args_list}
     assert debug_mode_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
     assert stage2_cap_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
+    assert stage2_failing_notification_id(mock_stage2_config_entry.entry_id) in notification_ids
 
 
 # ---------------------------------------------------------------------------
@@ -2101,7 +2103,7 @@ async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_c
             job = _make_job(normalized_tn=f"TN{i:04d}")
             await coord._async_process_stage2_job(job)
 
-        # Simulate quota exhausted — next job's extractor runs but parcel POST is skipped.
+        # Simulate quota exhausted — next job is skipped before reaching extractor.
         ok_extractor = MagicMock()
         ok_extractor.async_extract = AsyncMock(return_value=MagicMock())
         coord._extractor = ok_extractor
@@ -2113,6 +2115,57 @@ async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_c
         assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
         # No NEW dismiss calls beyond the baseline (quota-skip is NOT a success).
         assert mock_dismiss.call_count == baseline_dismiss_count
+
+
+@pytest.mark.asyncio
+async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: quota gate increments stage2_quota_skipped_total and never calls extractor.
+
+    Root-cause fix for stage2-queue-consumer-stall: the quota gate must fire BEFORE
+    the extractor so Ollama is not called during quota exhaustion.  This test verifies
+    both the counter increment and that async_extract is never reached.
+    """
+    import time as stdlib_time
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        # Wire extractor with a spy to confirm it is NOT called during quota exhaustion.
+        spy_extractor = MagicMock()
+        spy_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        coord._extractor = spy_extractor
+
+        # Exhaust quota before processing any job.
+        coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
+
+        job = _make_job(normalized_tn="TNQUOTA2")
+        await coord._async_process_stage2_job(job)
+
+        # Counter must increment (was previously 0 — the invisible stall).
+        assert coord._diagnostics.stage2_quota_skipped_total == 1
+        # Extractor must NOT be called — quota gate now runs before it.
+        spy_extractor.async_extract.assert_not_called()
+        # Success counter must NOT increment.
+        assert coord._diagnostics.stage2_succeeded_total == 0
 
 
 async def test_fail_05_dismiss_unconditional_even_when_no_prior_notification(
@@ -2170,7 +2223,7 @@ async def test_fail_05_dismiss_unconditional_even_when_no_prior_notification(
 
 
 def test_pollstats_default_stage2_counters_zero():
-    """DIAG-02: All 6 new stage2_*_total fields default to 0 on PollStats construction."""
+    """DIAG-02: All stage2_*_total fields default to 0 on PollStats construction."""
     from dataclasses import fields
 
     from custom_components.shop2parcel.coordinator import PollStats
@@ -2182,10 +2235,11 @@ def test_pollstats_default_stage2_counters_zero():
     assert ps.stage2_dropped_backpressure_total == 0
     assert ps.stage2_schema_error_total == 0
     assert ps.stage2_conflict_total == 0
+    assert ps.stage2_quota_skipped_total == 0
 
 
-def test_pollstats_asdict_contains_all_6_stage2_counter_keys():
-    """DIAG-02: dataclasses.asdict(PollStats()) includes all 6 new stage2 counter keys.
+def test_pollstats_asdict_contains_all_stage2_counter_keys():
+    """DIAG-02: dataclasses.asdict(PollStats()) includes all stage2 counter keys.
 
     Proves the diagnostics download auto-includes them (Assumption A2).
     """
@@ -2201,6 +2255,7 @@ def test_pollstats_asdict_contains_all_6_stage2_counter_keys():
         "stage2_dropped_backpressure_total",
         "stage2_schema_error_total",
         "stage2_conflict_total",
+        "stage2_quota_skipped_total",
     }
     assert expected_keys <= set(d.keys()), f"missing keys: {expected_keys - set(d.keys())}"
 

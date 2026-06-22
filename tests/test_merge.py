@@ -53,13 +53,16 @@ def _make_result(
 # ---------------------------------------------------------------------------
 
 
-def test_stage1_none_stage2_valid_wins() -> None:
-    """MRG-03: Stage-1 tracking_number=None → Stage-2 value is promoted."""
+def test_stage1_none_tracking_raises_assertion() -> None:
+    """I6 precondition: Stage-1 tracking_number=None must raise AssertionError.
+
+    Coordinators only enqueue emails with a resolved Stage-1 tracking number,
+    so merge_llm_authoritative asserts non-None upfront (I6 contract).
+    """
     stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
     result = _make_result(locked={"tracking_number": "VALID123"})
-    merged, conflicts = merge_llm_authoritative(stage1, result)
-    assert merged.tracking_number == "VALID123"
-    assert conflicts == []
+    with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+        merge_llm_authoritative(stage1, result)
 
 
 def test_stage2_none_keeps_stage1() -> None:
@@ -111,68 +114,66 @@ def test_two_field_conflict_one_event() -> None:
 
 
 def test_sanity_check_rejects_invalid_empty() -> None:
-    """MRG-04: Empty string Stage-2 tracking_number → silently discarded, no conflict."""
+    """MRG-04 / I6: Stage-1 tracking_number=None raises AssertionError per I6 precondition.
+
+    The MRG-04 sanity gate for tracking_number promotion (Stage-1 None → Stage-2 wins)
+    is dead code in production because the coordinator only enqueues emails with a
+    resolved Stage-1 tracking number. The I6 assert surfaces violations immediately.
+    """
     stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
     result = _make_result(locked={"tracking_number": ""})
-    merged, conflicts = merge_llm_authoritative(stage1, result)
-    assert merged.tracking_number is None
-    assert conflicts == []
+    with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+        merge_llm_authoritative(stage1, result)
 
 
 def test_sanity_check_rejects_5_chars() -> None:
-    """MRG-04: 5-char tracking_number (below 6-char minimum) → discarded."""
+    """MRG-04 / I6: Stage-1 tracking_number=None raises AssertionError per I6 precondition."""
     stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
     result = _make_result(locked={"tracking_number": "AB123"})
-    merged, conflicts = merge_llm_authoritative(stage1, result)
-    assert merged.tracking_number is None
-    assert conflicts == []
+    with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+        merge_llm_authoritative(stage1, result)
 
 
 def test_sanity_check_accepts_6_chars() -> None:
-    """MRG-04: 6-char alphanumeric tracking_number → accepted."""
+    """MRG-04 / I6: Stage-1 tracking_number=None raises AssertionError per I6 precondition."""
     stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
     result = _make_result(locked={"tracking_number": "ABC123"})
-    merged, conflicts = merge_llm_authoritative(stage1, result)
-    assert merged.tracking_number == "ABC123"
-    assert conflicts == []
+    with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+        merge_llm_authoritative(stage1, result)
 
 
 def test_sanity_check_accepts_40_chars() -> None:
-    """MRG-04: 40-char alphanumeric tracking_number (maximum) → accepted."""
+    """MRG-04 / I6: Stage-1 tracking_number=None raises AssertionError per I6 precondition."""
     stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
     value = "A" * 40
     result = _make_result(locked={"tracking_number": value})
-    merged, conflicts = merge_llm_authoritative(stage1, result)
-    assert merged.tracking_number == value
-    assert conflicts == []
+    with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+        merge_llm_authoritative(stage1, result)
 
 
 def test_sanity_check_rejects_41_chars() -> None:
-    """MRG-04: 41-char tracking_number (above 40-char maximum) → discarded."""
+    """MRG-04 / I6: Stage-1 tracking_number=None raises AssertionError per I6 precondition."""
     stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
     value = "A" * 41
     result = _make_result(locked={"tracking_number": value})
-    merged, conflicts = merge_llm_authoritative(stage1, result)
-    assert merged.tracking_number is None
-    assert conflicts == []
+    with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+        merge_llm_authoritative(stage1, result)
 
 
 def test_sanity_check_rejects_special_chars() -> None:
-    """MRG-04: Tracking number with special chars (!) → discarded."""
+    """MRG-04 / I6: Stage-1 tracking_number=None raises AssertionError per I6 precondition."""
     stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
     result = _make_result(locked={"tracking_number": "UPS!123"})
-    merged, conflicts = merge_llm_authoritative(stage1, result)
-    assert merged.tracking_number is None
-    assert conflicts == []
+    with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+        merge_llm_authoritative(stage1, result)
 
 
 def test_sanity_check_accepts_dash_and_space() -> None:
-    """MRG-04: Tracking number with dashes and spaces → accepted."""
+    """MRG-04 / I6: Stage-1 tracking_number=None raises AssertionError per I6 precondition."""
     stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
     result = _make_result(locked={"tracking_number": "ABC-123 XY"})
-    merged, conflicts = merge_llm_authoritative(stage1, result)
-    assert merged.tracking_number == "ABC-123 XY"
-    assert conflicts == []
+    with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
+        merge_llm_authoritative(stage1, result)
 
 
 def test_sanity_check_does_not_apply_to_conflict_path() -> None:

@@ -5,16 +5,16 @@ milestone_name: AI-based Email Analysis
 current_phase: 22
 current_phase_name: README Setup + End-to-End Validation
 status: complete
-stopped_at: v1.3 milestone closed — all 8 phases shipped, 37/37 requirements met
-last_updated: "2026-06-17T00:00:00.000Z"
-last_activity: 2026-06-17
-last_activity_desc: v1.3 milestone complete — archived, tagged, REQUIREMENTS.md removed
+stopped_at: PR #20 CI green — awaiting UAT before v1.3.0 final tag
+last_updated: "2026-06-18T16:30:00.000Z"
+last_activity: 2026-06-18
+last_activity_desc: fixed mypy union-attr + arg-type errors and Python 3.14 lingering task in CI
 progress:
-  total_phases: 8
+  total_phases: 10
   completed_phases: 8
   total_plans: 23
-  completed_plans: 23
-  percent: 100
+  completed_plans: 29
+  percent: 80
 ---
 
 # Project State
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-06-05)
 Phase: 22 — README Setup + End-to-End Validation
 Plan: Complete (2/2)
 Status: Milestone v1.3 SHIPPED — all 8 phases, 23 plans, 37/37 requirements complete
-Last activity: 2026-06-17 — v1.3 milestone closed and archived
+Last activity: 2026-06-18 — Completed quick task 260618-iro: Fix 10 PR-20 code review issues (I1-I7, S1-S3)
 
 ## Performance Metrics
 
@@ -155,6 +155,7 @@ None — v1.3 roadmap drafted, 37/37 requirements mapped, three NEEDS RESEARCH p
 | 260513-p01 | Write missing summary stubs for 01-01-PLAN.md and 06-03-PLAN.md to close the v1.0 archive artifact gap | 2026-05-13 | n/a (docs only) | [260513-p01-write-missing-summary-stubs-for-01-01-pl](./quick/260513-p01-write-missing-summary-stubs-for-01-01-pl/) |
 | 260523-g8u | Reconcile ROADMAP and STATE for Phase 14 (4/4 complete 2026-05-20); audit WR-01..WR-04 — all already shipped on origin/main | 2026-05-23 | n/a (docs only) | [260523-g8u-reconcile-roadmap-and-state-for-phase-14](./quick/260523-g8u-reconcile-roadmap-and-state-for-phase-14/) |
 | 260601-x94 | Fix wrong USPS Informed Delivery sender address in DEFAULT_GMAIL_QUERY | 2026-06-02 | cfb3567 | [260601-x94-fix-wrong-usps-informed-delivery-sender-](./quick/260601-x94-fix-wrong-usps-informed-delivery-sender-/) |
+| 260618-iro | Fix 10 issues from PR 20 code review: I1 (cap notification dismiss), I2 (remove_entry missing dismiss), I3 (drain loop task_done), I4 (cancel-mid-success store flush), I5 (wrong error message in _split_and_coerce), I6 (MRG-04 tracking_number=None invariant), I7 (cap counter includes AlreadyAdded), S1 (BeautifulSoup error handling), S2 (snapshot-before-set_updated_data), S3 (empty URL UX note) | 2026-06-18 | d1b2a09 | [260618-iro-fix-10-issues-from-pr-20-code-review-i1-](./quick/260618-iro-fix-10-issues-from-pr-20-code-review-i1-/) |
 
 ## Deferred Items
 
@@ -201,10 +202,12 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-Last session: 2026-06-17T00:00:00.000Z
-Stopped at: v1.3 milestone archived — ROADMAP.md collapsed, PROJECT.md updated, REQUIREMENTS.md removed
-Next action: Start v1.4 milestone planning.
+Last session: 2026-06-18T16:30:00.000Z
+Stopped at: PR #20 CI all green — waiting for UAT in live HA before cutting v1.3.0 final tag.
+Next action: Run UAT on HA instance, then cut v1.3.0 final tag and merge PR #20.
 
 ## Operator Next Steps
 
-- `/gsd-new-milestone` — start v1.4 milestone (questioning → research → requirements → roadmap)
+- Run UAT on live HA instance — install v1.3.0-rc1 via HACS, test Stage-2 Ollama extraction end-to-end
+- After UAT passes: `git tag v1.3.0 origin/main && git push origin v1.3.0` (after merging PR #20)
+- `/gsd-new-milestone` — start v1.4 milestone planning
