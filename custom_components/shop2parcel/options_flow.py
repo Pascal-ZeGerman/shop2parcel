@@ -35,6 +35,11 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .api.exceptions import OllamaTransientError
 from .api.ollama_client import OllamaClient
@@ -76,6 +81,54 @@ class OptionsFlowHandler(OptionsFlowWithReload):
     options dict, and the coordinator picks up the new poll interval.
     """
 
+    async def _build_ollama_model_field(self) -> Any:
+        """Return the voluptuous validator for CONF_OLLAMA_MODEL.
+
+        When the stored Ollama URL is non-empty and /api/tags returns a
+        non-empty list, returns a SelectSelector (dropdown) containing all
+        available model tags.  The currently-stored model is always included
+        so a model not present on the live server (e.g. after a server restart)
+        does not disappear from the selector.
+
+        Falls back to bare ``str`` in any of these cases:
+        - stored URL is empty or whitespace-only
+        - async_get_tags raises OllamaTransientError (server unreachable / non-200)
+        - async_get_tags returns an empty list
+
+        T-j6w-01: the stored CONF_OLLAMA_TIMEOUT bounds the fetch; a slow/
+        unreachable server fails fast into the text fallback rather than hanging
+        the HA options-flow render.
+        """
+        url = self.config_entry.options.get(CONF_OLLAMA_URL, "").strip()
+        if not url:
+            return str
+
+        session = async_get_clientsession(self.hass)
+        timeout = self.config_entry.options.get(CONF_OLLAMA_TIMEOUT, DEFAULT_OLLAMA_TIMEOUT)
+        try:
+            tags: list[str] = await OllamaClient.async_get_tags(session, url, timeout)
+        except OllamaTransientError:
+            # T-j6w-03: swallow server error detail; surface only as text fallback.
+            return str
+
+        if not tags:
+            return str
+
+        # Ensure the currently-stored model is always in the options list so the
+        # current value pre-selects correctly even when the server list has changed.
+        stored_model = self.config_entry.options.get(CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
+        if stored_model not in tags:
+            tags = [stored_model, *tags]
+
+        return SelectSelector(
+            SelectSelectorConfig(
+                options=sorted(tags),
+                mode=SelectSelectorMode.DROPDOWN,
+                custom_value=True,
+                sort=True,
+            )
+        )
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Top-level menu: route to settings or custom fields CRUD."""
         return self.async_show_menu(
@@ -91,13 +144,23 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         Both Gmail and IMAP branches include the Ollama fields (D-03).
         When ollama_url is non-empty, GET /api/tags is called to verify
         the server is reachable and the chosen model is available.
+
+        The model field is rendered as a SelectSelector dropdown when the stored
+        URL yields a live model list, and falls back to a free-text str field
+        otherwise (see _build_ollama_model_field).
         """
         errors: dict[str, str] = {}
+        ollama_url = self.config_entry.options.get(CONF_OLLAMA_URL, "")
+        stage2_status = "enabled" if ollama_url.strip() else "disabled (set Ollama URL to enable)"
         description_placeholders: dict[str, str] = {
             "locked_fields": ", ".join(LOCKED_OLLAMA_FIELDS),
+            "stage2_status": stage2_status,
         }
 
         conn_type = self.config_entry.data.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_GMAIL)
+
+        # Build the model field once and reuse in both branches.
+        model_field = await self._build_ollama_model_field()
 
         if conn_type == CONNECTION_TYPE_IMAP:
             schema = vol.Schema(
@@ -127,7 +190,7 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                         default=self.config_entry.options.get(
                             CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL
                         ),
-                    ): str,
+                    ): model_field,
                     vol.Required(
                         CONF_OLLAMA_TIMEOUT,
                         default=self.config_entry.options.get(
@@ -186,7 +249,7 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                         default=self.config_entry.options.get(
                             CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL
                         ),
-                    ): str,
+                    ): model_field,
                     vol.Required(
                         CONF_OLLAMA_TIMEOUT,
                         default=self.config_entry.options.get(
