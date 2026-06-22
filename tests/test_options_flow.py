@@ -1,4 +1,4 @@
-"""Tests for Shop2Parcel options flow — covers EMAIL-05, CFG-01/02/03, OLLM-01/02/03, FLD-01/02."""
+"""Tests for Shop2Parcel options flow — covers EMAIL-05, CFG-01/02/03, OLLM-01/02/03, FLD-01/02, QUICK-260622-j6w."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import pytest
 import voluptuous as vol
 
 from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+from homeassistant.helpers.selector import SelectSelector
 from custom_components.shop2parcel.const import (
     CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
@@ -998,3 +999,216 @@ async def test_add_custom_field_locked_collision_is_field_scoped(hass, mock_conf
     assert CONF_FIELD_NAME in result["errors"], "Error must be field-scoped to CONF_FIELD_NAME"
     assert "base" not in result["errors"], "Error must NOT be on 'base' (must be field-scoped)"
     assert result["errors"][CONF_FIELD_NAME] == "locked_field_collision"
+
+
+# ---------------------------------------------------------------------------
+# QUICK-260622-j6w: dropdown model field (Tests A-D)
+# ---------------------------------------------------------------------------
+
+
+async def test_model_field_dropdown_when_tags_available(hass, mock_config_entry):
+    """Test A: stored URL set + /api/tags returns models → CONF_OLLAMA_MODEL is SelectSelector.
+
+    Exercises the Gmail/else branch (the primary branch).
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        }
+    )
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["qwen3.5:2b", "llama3.1:8b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=None)
+
+    assert result["type"] == "form"
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    model_key = schema_dict[CONF_OLLAMA_MODEL]
+    model_validator = schema.schema[model_key]
+
+    assert isinstance(model_validator, SelectSelector), (
+        "CONF_OLLAMA_MODEL must be a SelectSelector when /api/tags returns models"
+    )
+    option_values = [
+        opt if isinstance(opt, str) else opt.get("value", opt)
+        for opt in model_validator.config["options"]
+    ]
+    assert "qwen3.5:2b" in option_values, "qwen3.5:2b must be in dropdown options"
+    assert "llama3.1:8b" in option_values, "llama3.1:8b must be in dropdown options"
+
+
+async def test_model_field_dropdown_imap_branch(hass, mock_imap_config_entry):
+    """Test A (IMAP branch): stored URL + /api/tags returns models → SelectSelector on IMAP form."""
+    handler, fake_entry = _make_imap_handler_with_options(
+        options={
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        }
+    )
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["qwen3.5:2b", "llama3.1:8b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=None)
+
+    assert result["type"] == "form"
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    model_key = schema_dict[CONF_OLLAMA_MODEL]
+    model_validator = schema.schema[model_key]
+
+    assert isinstance(model_validator, SelectSelector), (
+        "IMAP branch: CONF_OLLAMA_MODEL must be SelectSelector when tags are available"
+    )
+
+
+async def test_model_field_text_fallback_on_connection_error(hass, mock_config_entry):
+    """Test B: stored URL + /api/tags raises OllamaTransientError → CONF_OLLAMA_MODEL is str.
+
+    The form must still render without error (no exception propagates to the user).
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        }
+    )
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            side_effect=OllamaTransientError("connection refused"),
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=None)
+
+    assert result["type"] == "form", "Form must still render when /api/tags is unreachable"
+    assert not result.get("errors"), "No errors must be set when fallback to text field occurs"
+
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    model_key = schema_dict[CONF_OLLAMA_MODEL]
+    model_validator = schema.schema[model_key]
+
+    assert not isinstance(model_validator, SelectSelector), (
+        "CONF_OLLAMA_MODEL must fall back to plain str validator on connection error"
+    )
+
+
+async def test_model_field_text_when_url_empty(hass, mock_config_entry):
+    """Test C: stored URL empty → no fetch attempted, CONF_OLLAMA_MODEL is plain str."""
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_OLLAMA_URL: "",
+            CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        }
+    )
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+        ) as mock_tags,
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=None)
+
+    assert mock_tags.call_count == 0, "async_get_tags must NOT be called when stored URL is empty"
+    assert result["type"] == "form"
+
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    model_key = schema_dict[CONF_OLLAMA_MODEL]
+    model_validator = schema.schema[model_key]
+
+    assert not isinstance(model_validator, SelectSelector), (
+        "CONF_OLLAMA_MODEL must be plain str validator when stored URL is empty"
+    )
+
+
+async def test_model_field_dropdown_includes_stored_model_not_in_tags(hass, mock_config_entry):
+    """Test D: stored model NOT in returned tags → dropdown still includes stored model.
+
+    The currently-configured model must always be selectable, even if it is no
+    longer present in the live /api/tags list (e.g. model was deleted from server).
+    """
+    stored_model = "old-model:7b"
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: stored_model,
+            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        }
+    )
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            # stored_model is NOT in the returned list
+            return_value=["qwen3.5:2b", "llama3.1:8b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=None)
+
+    assert result["type"] == "form"
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    model_key = schema_dict[CONF_OLLAMA_MODEL]
+    model_validator = schema.schema[model_key]
+
+    assert isinstance(model_validator, SelectSelector), (
+        "CONF_OLLAMA_MODEL must still be a SelectSelector"
+    )
+    option_values = [
+        opt if isinstance(opt, str) else opt.get("value", opt)
+        for opt in model_validator.config["options"]
+    ]
+    assert stored_model in option_values, (
+        f"Stored model '{stored_model}' must be included in dropdown options even if not in /api/tags"
+    )
