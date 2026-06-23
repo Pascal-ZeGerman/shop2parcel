@@ -267,6 +267,9 @@ class PollStats:
     stage2_schema_error_total: int = 0
     stage2_conflict_total: int = 0
     stage2_quota_skipped_total: int = 0
+    stage2_cap_skip_total: int = 0
+    stage2_already_added_total: int = 0
+    stage2_transient_error_total: int = 0
 
 
 class Shop2ParcelStore(Store):
@@ -747,6 +750,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         assert self.config_entry is not None
         normalized_tn = job.normalized_tn
+        _LOGGER.debug(
+            "Stage-2: dequeued job tn=%s extractor=%s",
+            normalized_tn,
+            "on" if self._extractor is not None else "off",
+        )
 
         # MRG-05: per-poll POST cap gate (D-09). Checked BEFORE the extractor call so
         # cap-skipped jobs never reach Ollama (avoids wasted inference cost during cap-hit polls).
@@ -764,6 +772,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     title="Shop2Parcel Stage-2 Cap Hit",
                     notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
                 )
+            self._diagnostics.stage2_cap_skip_total += 1
             _LOGGER.debug(
                 "Stage-2 worker: cap hit (%d/%d) — skipping POST for %s; will retry next poll",
                 self._stage2_posts_this_poll,
@@ -817,11 +826,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
                 self._diagnostics.stage2_conflict_total += 1  # DIAG-02
 
+        else:
+            _LOGGER.debug(
+                "Stage-2: extractor not configured — skipping LLM extraction for %s",
+                normalized_tn,
+            )
+
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
             api_key=self.config_entry.data[CONF_API_KEY],
         )
 
+        _LOGGER.debug(
+            "Stage-2: POSTing tn=%s carrier=%s to parcelapp",
+            normalized_tn,
+            merged_shipment.carrier_name,
+        )
         carrier_code = normalize_carrier(merged_shipment.carrier_name)
         try:
             await parcel_client.async_add_delivery(
@@ -842,6 +862,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_enqueued_keys.discard(normalized_tn)
             return
         except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
+            _LOGGER.debug(
+                "Stage-2: tn=%s already known to parcelapp (AlreadyAdded/InvalidTracking)",
+                normalized_tn,
+            )
+            self._diagnostics.stage2_already_added_total += 1
             self._stage2_posts_this_poll += 1
             # Write dedup so next poll does not retry; discard in-flight key.
             self._submitted_tracking_numbers[normalized_tn] = None
@@ -859,6 +884,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
                 str(err)[:100],
             )
+            self._diagnostics.stage2_transient_error_total += 1
             self._stage2_enqueued_keys.discard(normalized_tn)
             return
 
