@@ -82,6 +82,7 @@ class EmailsScannedSensor(DiagnosticSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
         return {
+            "description": "Raw emails returned by Gmail/IMAP before dedup. Includes duplicates from previous polls.",
             "last_poll_returned": d.last_poll_emails_returned,
             "last_poll_skipped_dedup": d.last_poll_emails_skipped_dedup,
             "last_poll_inspected": d.last_poll_emails_scanned,
@@ -113,7 +114,10 @@ class NewEmailsInspectedSensor(DiagnosticSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
-        return {"last_poll_count": d.last_poll_emails_scanned}
+        return {
+            "description": "Emails that passed dedup and were actually read. Excludes duplicates already seen in previous polls.",
+            "last_poll_count": d.last_poll_emails_scanned,
+        }
 
 
 class EmailsMatchedSensor(DiagnosticSensor):
@@ -138,6 +142,7 @@ class EmailsMatchedSensor(DiagnosticSensor):
         d = self.coordinator.diagnostics
         unmatched = max(0, d.last_poll_emails_scanned - d.last_poll_emails_matched)
         return {
+            "description": "Emails that produced usable shipment data. Unmatched emails had no recognisable shipment content.",
             "last_poll_matched": d.last_poll_emails_matched,
             "last_poll_unmatched": unmatched,
             "last_poll_skip_reasons": list(d.last_poll_skip_reasons),
@@ -164,7 +169,10 @@ class TrackingNumbersFoundSensor(DiagnosticSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
-        return {"last_poll_found": list(d.last_poll_found)}
+        return {
+            "description": "Total tracking numbers extracted from matched emails. One email can contain multiple tracking numbers.",
+            "last_poll_found": list(d.last_poll_found),
+        }
 
 
 class KeywordHitsSensor(DiagnosticSensor):
@@ -188,6 +196,7 @@ class KeywordHitsSensor(DiagnosticSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
         return {
+            "description": "Times the fallback regex path matched. A high count relative to Emails Matched suggests the primary parser is missing patterns.",
             "last_poll_hits": d.last_poll_keyword_hits,
             "per_keyword": dict(d.keyword_hits_per_key),
         }
@@ -220,7 +229,10 @@ class ActivityLogSensor(DiagnosticSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
-        return {"recent_events": list(d.scan_events)[-10:]}
+        return {
+            "description": "Cumulative scan event count since last HA restart. See recent_events for the last 10 scan events.",
+            "recent_events": list(d.scan_events)[-10:],
+        }
 
 
 class Stage2Sensor(DiagnosticSensor):
@@ -250,6 +262,7 @@ class Stage2Sensor(DiagnosticSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
         return {
+            "description": "Current items waiting for AI (Ollama) analysis. Zero is normal at rest. See attributes for lifetime counters.",
             "enqueued_total": d.stage2_enqueued_total,
             "succeeded_total": d.stage2_succeeded_total,
             "failed_total": d.stage2_failed_total,
