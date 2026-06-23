@@ -379,3 +379,69 @@ class Stage2ConsecutiveFailuresSensor(DiagnosticSensor):
             "schema_error_total": d.stage2_schema_error_total,
             "failed_total": d.stage2_failed_total,
         }
+
+
+class EmailsSentToLLMSensor(DiagnosticSensor):
+    """sensor.shop2parcel_emails_sent_to_llm — cumulative Ollama async_extract() attempts.
+
+    Incremented before each async_extract() call, regardless of success or failure.
+    Comparing this against EmailsParsedByLLMSensor gives the LLM failure rate directly.
+    """
+
+    _attr_name = "Stage-2 Emails Sent to LLM"
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_emails_sent_to_llm"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.diagnostics.stage2_llm_attempts_total
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        d = self.coordinator.diagnostics
+        failed = d.stage2_llm_attempts_total - d.stage2_llm_calls_total
+        return {
+            "description": "Total emails dispatched to Ollama for extraction since last HA restart. Includes both successes and failures.",
+            "llm_failures": max(0, failed),
+            "cap_skipped_total": d.stage2_cap_skip_total,
+            "quota_skipped_total": d.stage2_quota_skipped_total,
+        }
+
+
+class EmailsParsedByLLMSensor(DiagnosticSensor):
+    """sensor.shop2parcel_emails_parsed_by_llm — emails where Ollama returned a valid result.
+
+    Incremented only when async_extract() returns a Stage2Result without raising.
+    Does NOT require a successful parcelapp POST — it measures LLM output quality only.
+    """
+
+    _attr_name = "Stage-2 Emails Parsed by LLM"
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_emails_parsed_by_llm"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.diagnostics.stage2_llm_calls_total
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        d = self.coordinator.diagnostics
+        attempts = d.stage2_llm_attempts_total
+        parse_rate = round(d.stage2_llm_calls_total / attempts * 100, 1) if attempts else 0.0
+        return {
+            "description": "Emails where Ollama returned a parseable JSON result. Does not require a successful parcelapp POST — measures LLM output quality only.",
+            "parse_success_rate_pct": parse_rate,
+            "attempts_total": attempts,
+        }

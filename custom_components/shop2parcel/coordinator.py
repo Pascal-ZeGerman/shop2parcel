@@ -272,6 +272,7 @@ class PollStats:
     stage2_transient_error_total: int = 0
     # LLM performance counters (populated by _async_process_stage2_job on each successful
     # extractor call; used by OllamaLatencySensor and OllamaParseQualitySensor).
+    stage2_llm_attempts_total: int = 0
     stage2_llm_calls_total: int = 0
     stage2_llm_latency_ms_sum: float = 0.0
     stage2_llm_latency_ms_last: float | None = None
@@ -815,6 +816,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         merged_shipment = job.shipment
 
         if self._extractor is not None:
+            self._diagnostics.stage2_llm_attempts_total += 1
             try:
                 stage2_result = await self._extractor.async_extract(job.html_body, job.shipment)
             except (OllamaTransientError, OllamaSchemaError) as err:  # fmt: skip

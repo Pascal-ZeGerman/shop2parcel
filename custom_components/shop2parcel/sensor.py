@@ -32,7 +32,9 @@ from .coordinator import Shop2ParcelCoordinator
 from .diagnostic_sensor import (
     ActivityLogSensor,
     EmailsMatchedSensor,
+    EmailsParsedByLLMSensor,
     EmailsScannedSensor,
+    EmailsSentToLLMSensor,
     KeywordHitsSensor,
     NewEmailsInspectedSensor,
     OllamaLatencySensor,
@@ -82,6 +84,8 @@ async def async_setup_entry(
             OllamaLatencySensor(coordinator, entry),
             OllamaParseQualitySensor(coordinator, entry),
             Stage2ConsecutiveFailuresSensor(coordinator, entry),
+            EmailsSentToLLMSensor(coordinator, entry),
+            EmailsParsedByLLMSensor(coordinator, entry),
         ]
     )
 
