@@ -270,3 +270,112 @@ class Stage2Sensor(DiagnosticSensor):
             "schema_error_total": d.stage2_schema_error_total,
             "conflict_total": d.stage2_conflict_total,
         }
+
+
+class OllamaLatencySensor(DiagnosticSensor):
+    """sensor.shop2parcel_ollama_latency — average Stage-2 Ollama /api/generate latency (ms).
+
+    native_value: rolling average across all successful LLM calls since last HA restart.
+    Returns None until the first call completes so HA shows 'unavailable' rather than 0.
+    extra_state_attributes: last/min/max per-call latency + total call count.
+    """
+
+    _attr_name = "Stage-2 LLM Latency"
+    _attr_native_unit_of_measurement = "ms"
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_ollama_latency"
+
+    @property
+    def native_value(self) -> float | None:
+        d = self.coordinator.diagnostics
+        if d.stage2_llm_calls_total == 0:
+            return None
+        return round(d.stage2_llm_latency_ms_sum / d.stage2_llm_calls_total, 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        d = self.coordinator.diagnostics
+        return {
+            "description": "Average round-trip time for Ollama /api/generate calls since last HA restart. None until the first Stage-2 call completes.",
+            "last_call_ms": round(d.stage2_llm_latency_ms_last, 1) if d.stage2_llm_latency_ms_last is not None else None,
+            "min_ms": round(d.stage2_llm_latency_ms_min, 1) if d.stage2_llm_latency_ms_min is not None else None,
+            "max_ms": round(d.stage2_llm_latency_ms_max, 1) if d.stage2_llm_latency_ms_max is not None else None,
+            "call_count": d.stage2_llm_calls_total,
+        }
+
+
+class OllamaParseQualitySensor(DiagnosticSensor):
+    """sensor.shop2parcel_ollama_parse_retries — cumulative fence-strip retry count.
+
+    native_value: number of times the 2-pass parser needed the markdown-fence fallback.
+    A non-zero value is not an error — it means the model wrapped its JSON in ```json```
+    blocks, which the parser handles. A high fence_retry_rate_pct (>50 %) suggests
+    switching to a model that outputs cleaner JSON.
+    extra_state_attributes: retry rate %, clean parse count, total call count.
+    """
+
+    _attr_name = "Stage-2 Parse Retries"
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_ollama_parse_retries"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.diagnostics.stage2_fence_retry_total
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        d = self.coordinator.diagnostics
+        calls = d.stage2_llm_calls_total
+        retry_rate = round(d.stage2_fence_retry_total / calls * 100, 1) if calls else 0.0
+        return {
+            "description": "Times the LLM response needed markdown-fence stripping before it could be parsed. A high rate means the model is wrapping JSON in ```json``` blocks.",
+            "fence_retry_rate_pct": retry_rate,
+            "clean_parses": max(0, calls - d.stage2_fence_retry_total),
+            "total_calls": calls,
+        }
+
+
+class Stage2ConsecutiveFailuresSensor(DiagnosticSensor):
+    """sensor.shop2parcel_stage2_consecutive_failures — current failure streak.
+
+    native_value: number of back-to-back Stage-2 failures without a success.
+    Resets to 0 on any successful extraction. HA sends a persistent notification
+    once the streak exceeds the STAGE2_NOTIFY_THRESHOLD constant.
+    extra_state_attributes: lifetime error sub-counters for triage.
+    """
+
+    _attr_name = "Stage-2 Consecutive Failures"
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_stage2_consecutive_failures"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.stage2_consecutive_failures
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        d = self.coordinator.diagnostics
+        return {
+            "description": "Current run of back-to-back Stage-2 failures without a success. Resets to 0 on any successful extraction. Triggers an HA notification after the threshold is reached.",
+            "transient_error_total": d.stage2_transient_error_total,
+            "schema_error_total": d.stage2_schema_error_total,
+            "failed_total": d.stage2_failed_total,
+        }
