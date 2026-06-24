@@ -399,13 +399,14 @@ async def test_stage2_sensor_native_value_reads_qsize_when_queue_active(hass, mo
 async def test_stage2_sensor_extra_state_attributes_contains_exactly_6_keys(
     hass, mock_config_entry
 ):
-    """DIAG-01: Stage2Sensor.extra_state_attributes has exactly 6 keys."""
+    """DIAG-01: Stage2Sensor.extra_state_attributes has exactly 7 keys (6 counters + description)."""
     from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
 
     coordinator = await _setup_integration(hass, mock_config_entry)
     sensor = Stage2Sensor(coordinator, mock_config_entry)
     attrs = sensor.extra_state_attributes
     expected_keys = {
+        "description",
         "enqueued_total",
         "succeeded_total",
         "failed_total",
@@ -434,6 +435,7 @@ async def test_stage2_sensor_extra_state_attributes_reads_pollstats_counters(
     sensor = Stage2Sensor(coordinator, mock_config_entry)
     attrs = sensor.extra_state_attributes
     assert attrs == {
+        "description": "Current items waiting for AI (Ollama) analysis. Zero is normal at rest. See attributes for lifetime counters.",
         "enqueued_total": 5,
         "succeeded_total": 3,
         "failed_total": 1,
