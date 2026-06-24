@@ -749,6 +749,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 job: Stage2Job = await self._stage2_queue.get()
                 normalized_tn = job.normalized_tn
                 try:
+                    # D-07 / IMAP parity: drain runs on the base class — ImapCoordinator
+                    # inherits this worker and therefore gets drain for free (no imap_coordinator.py
+                    # change needed). CancelledError from the drain re-raises below (worker shuts down).
+                    await self._async_drain_pending_posts()
                     await self._async_process_stage2_job(job)
                 except asyncio.CancelledError:
                     self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
