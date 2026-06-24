@@ -839,7 +839,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "pending items until quota resets"
                 )
                 break
-            except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):
+            except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
                 # Treat as success for dedup purposes — fall through to bookkeeping below.
                 _LOGGER.debug(
                     "Stage-2 drain: tn=%s already known to parcelapp (AlreadyAdded/InvalidTracking)",
