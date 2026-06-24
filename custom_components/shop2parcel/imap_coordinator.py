@@ -98,7 +98,6 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         entry = self.config_entry
         if entry is None:
             raise UpdateFailed("config_entry is None — coordinator not properly initialized")
-        imap_client = cast(ImapClient, self._email_client)
 
         self._reset_stage2_poll_counters()  # Phase 20 MRG-05 / D-11: reset per-poll counters
 

@@ -87,6 +87,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
 
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
         """Inner implementation of the poll cycle (called from _async_update_data)."""
+        assert self.config_entry is not None  # guaranteed by _async_update_data None check
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
             self.hass, self.config_entry
