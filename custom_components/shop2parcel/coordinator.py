@@ -68,6 +68,7 @@ from .const import (
     MAX_SUBMITTED_TRACKING_NUMBERS,
     STAGE2_NOTIFY_COOLDOWN_S,
     STAGE2_NOTIFY_THRESHOLD,
+    normalize_tracking_number,
     stage2_cap_notification_id,
     stage2_failing_notification_id,
 )
@@ -397,6 +398,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # _restored_shipments: shipments loaded from store on startup (pre-first-poll).
         self._pending_shipments: dict[str, ShipmentData] = {}
         self._restored_shipments: dict[str, ShipmentData] = {}
+        # Phase 23 D-03 / LD-05: post-deferred merged shipments awaiting POSTing to ParcelApp.
+        # Populated when quota is exhausted and LLM extraction succeeds; drained on next
+        # quota-free poll. Persisted to the 'pending_posts' store key so entries survive
+        # HA restarts (quota may clear between restart and next poll).
+        # NOT reset on _reset_stage2_poll_counters — must survive across polls.
+        self._pending_posts: dict[str, ShipmentData] = {}
         self._store_loaded: bool = False
         # Phase 18 CR-01: sentinel so async_stop_stage2 is safe to call before
         # async_start_stage2 (e.g. Phase 19 worker or a reload race).
@@ -412,6 +419,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         #   this poll — ensures at most one HA notification per poll (D-10 / T-20-03-02).
         self._stage2_posts_this_poll: int = 0
         self._stage2_cap_notified_this_poll: bool = False
+        # Phase 23 AC-8: throttles the quota-skip WARNING to at most one per poll
+        # (mirrors _stage2_cap_notified_this_poll). Reset in _reset_stage2_poll_counters.
+        self._stage2_quota_warned_this_poll: bool = False
         # Phase 21 FAIL-04/05: consecutive-failure streak across polls + notification cooldown timestamp.
         # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
         self._stage2_consecutive_failures: int = 0
@@ -431,6 +441,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         self._stage2_posts_this_poll = 0
         self._stage2_cap_notified_this_poll = False
+        self._stage2_quota_warned_this_poll = False
         if self.config_entry is not None:
             persistent_notification.async_dismiss(
                 self.hass,
@@ -738,6 +749,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 job: Stage2Job = await self._stage2_queue.get()
                 normalized_tn = job.normalized_tn
                 try:
+                    # D-07 / IMAP parity: drain runs on the base class — ImapCoordinator
+                    # inherits this worker and therefore gets drain for free (no imap_coordinator.py
+                    # change needed). CancelledError from the drain re-raises below (worker shuts down).
+                    await self._async_drain_pending_posts()
                     await self._async_process_stage2_job(job)
                 except asyncio.CancelledError:
                     self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
@@ -751,6 +766,113 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         except asyncio.CancelledError:
             _LOGGER.debug("Stage-2 worker cancelled — exiting cleanly")
             raise
+
+    async def _async_drain_pending_posts(self) -> None:
+        """Drain pending posts from prior quota-blocked extraction cycles.
+
+        Runs before each new extraction job to opportunistically flush the backlog
+        when quota/cap conditions allow. Respects MAX_STAGE2_POSTS_PER_POLL cap and
+        _quota_exhausted_until timestamp.
+
+        Guard order:
+          1. Empty _pending_posts → no-op.
+          2. debug_mode True → no-op (debug never accumulates _pending_posts; DBG-03).
+          3. Quota still exhausted → no-op.
+          Then: POSTs each pending item WITHOUT re-invoking the extractor (LD-05 / AC-3).
+
+        IMAP parity (D-07): this method lives on the base class; ImapCoordinator
+        inherits _async_stage2_worker and therefore this drain automatically — no
+        imap_coordinator.py changes needed.
+
+        Error handling mirrors _async_process_stage2_job:
+          - ParcelAppAuthError  → raise ConfigEntryAuthFailed
+          - ParcelAppQuotaError → set _quota_exhausted_until and BREAK (items remain)
+          - AlreadyAdded / InvalidTracking → treat as success (dedup write + remove)
+          - ParcelAppTransientError → continue (item stays for next poll — Pitfall 2)
+        """
+        if not self._pending_posts:
+            return
+        assert self.config_entry is not None
+        debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        if debug_mode:
+            return  # debug mode never accumulates _pending_posts; early exit is safe (Pitfall 1)
+        now = int(_time.time())
+        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+            return  # quota still exhausted; drain blocked until the window resets
+
+        parcel_client = ParcelAppClient(
+            session=async_get_clientsession(self.hass),
+            api_key=self.config_entry.data[CONF_API_KEY],
+        )
+
+        # Iterate a COPY so dict mutation during iteration is safe (RESEARCH constraint).
+        for storage_key, merged_shipment in list(self._pending_posts.items()):
+            # AC-4 / Pitfall 4: shared counter covers drain + new-extraction POSTs this poll.
+            if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
+                break  # cap reached; remaining items wait for next poll
+
+            normalized_tn = normalize_tracking_number(merged_shipment.tracking_number)
+            carrier_code = normalize_carrier(merged_shipment.carrier_name)
+
+            _LOGGER.debug(
+                "Stage-2 drain: POSTing deferred tn=%s carrier=%s to parcelapp",
+                normalized_tn,
+                merged_shipment.carrier_name,
+            )
+
+            try:
+                await parcel_client.async_add_delivery(
+                    tracking_number=merged_shipment.tracking_number,
+                    carrier_code=carrier_code,
+                    description=merged_shipment.order_name or merged_shipment.tracking_number,
+                )
+            except ParcelAppAuthError as err:
+                raise ConfigEntryAuthFailed("parcelapp.net auth error (drain)") from err
+            except ParcelAppQuotaError as err:
+                # Quota re-exhausted mid-drain; set the block and stop draining.
+                # Remaining items stay in _pending_posts for the next quota window.
+                self._quota_exhausted_until = (
+                    err.reset_at if err.reset_at is not None else _next_midnight_utc()
+                )
+                _LOGGER.warning(
+                    "Stage-2 drain: parcelapp quota hit mid-drain — deferring remaining "
+                    "pending items until quota resets"
+                )
+                break
+            except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
+                # Treat as success for dedup purposes — fall through to bookkeeping below.
+                _LOGGER.debug(
+                    "Stage-2 drain: tn=%s already known to parcelapp (AlreadyAdded/InvalidTracking)",
+                    normalized_tn,
+                )
+
+            except ParcelAppTransientError as err:
+                # Leave item in _pending_posts for retry next poll (Pitfall 2).
+                _LOGGER.debug(
+                    "Stage-2 drain: transient error for tn=%s — item stays for retry: %s",
+                    normalized_tn,
+                    str(err)[:100],
+                )
+                continue
+
+            # Success or AlreadyAdded/InvalidTracking: bookkeeping (Pitfall 3: call
+            # _record_stage2_success on drain POSTs too — they are real POSTs).
+            self._stage2_posts_this_poll += 1  # Pitfall 4: shared counter
+            self._record_stage2_success()
+            # Write dedup so next poll does not retry this TN.
+            self._submitted_tracking_numbers[normalized_tn] = None
+            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                self._submitted_tracking_numbers.popitem(last=False)
+            # Pitfall 2: remove ONLY after a successful POST (never before).
+            del self._pending_posts[storage_key]
+            # Pitfall 5: re-snapshot immediately before async_set_updated_data to avoid
+            # stale-base race (S2 bug pattern from Phase 18).
+            self._pending_shipments = {**(self.data or {}), storage_key: merged_shipment}
+            self.async_set_updated_data({**(self.data or {}), storage_key: merged_shipment})
+            _LOGGER.debug("Stage-2 drain: posted deferred tn=%s successfully", normalized_tn)
+
+        # Single save at end of drain loop — Pitfall 2 aligned (save covers all mutations above).
+        await self._async_save_store()
 
     async def _async_process_stage2_job(self, job: Stage2Job) -> None:
         """Process one Stage2Job: extract via Ollama, merge, POST to parcelapp, update state.
@@ -808,22 +930,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
             return  # no extractor, no POST, no dedup write
 
-        # Quota guard: checked BEFORE the extractor call so quota-exhausted jobs never reach
-        # Ollama (avoids wasted inference cost when parcelapp daily quota is exhausted).
-        # This must come AFTER the cap gate (above) but BEFORE the extractor — running Ollama
-        # when quota is exhausted wastes GPU resources and causes items to be silently re-enqueued
-        # each poll cycle (since they're never added to _submitted_tracking_numbers), creating an
-        # infinite loop that makes stage2_enqueued_total grow unboundedly with 0 successes.
-        now = int(_time.time())
-        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
-            _LOGGER.warning(
-                "Stage-2 worker: quota exhausted — skipping %s; will retry after quota reset",
-                normalized_tn,
-            )
-            self._diagnostics.stage2_quota_skipped_total += 1  # DIAG-02
-            self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
-            return  # no extractor, no POST, no dedup write
-
         # MRG-02: default to Stage-1 shipment; replaced by merged result after extraction.
         merged_shipment = job.shipment
 
@@ -864,6 +970,50 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
 
+        # Phase 23 LD-02/D-05: Debug-mode dry-run branch — MUST come before any POST,
+        # dedup write, _pending_posts write, or store save (Pitfall 1 / DBG-03 / T-23-03-02).
+        # Extraction has already run above so dry-run still exercises the real Ollama path.
+        debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        if debug_mode:
+            self._emit_scan_event(
+                message_id=job.message_id,
+                meta=job.meta,
+                outcome="dry_run_suppressed",
+                tracking_number=normalized_tn,
+            )
+            _LOGGER.debug(
+                "[Shop2Parcel DEBUG] Stage-2 dry-run: extracted tn=%s, no POST",
+                normalized_tn,
+            )
+            self._stage2_enqueued_keys.discard(normalized_tn)  # LD-01: allow re-enqueue next poll
+            return  # no POST, no dedup write, no pending_posts write, no store save
+
+        # Phase 23 LD-03/LD-05: Quota guard moved to AFTER extraction+merge so Ollama always
+        # runs for every dequeued job. When quota is exhausted, persist the already-merged
+        # shipment to _pending_posts so the drain (plan 04) can POST it later without
+        # re-invoking Ollama (no wasted GPU on re-runs).
+        now = int(_time.time())
+        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+            self._pending_posts[job.storage_key] = merged_shipment
+            await self._async_save_store()
+            self._diagnostics.stage2_quota_skipped_total += 1  # DIAG-02: "extracted, POST deferred"
+            if not self._stage2_quota_warned_this_poll:
+                # AC-8: throttle WARNING to once per poll; subsequent skips log at DEBUG.
+                self._stage2_quota_warned_this_poll = True
+                _LOGGER.warning(
+                    "Stage-2 worker: parcelapp quota exhausted — extracted tn=%s, POST deferred"
+                    " to _pending_posts; will POST when quota resets",
+                    normalized_tn,
+                )
+            else:
+                _LOGGER.debug(
+                    "Stage-2 worker: parcelapp quota exhausted — extracted tn=%s, POST deferred"
+                    " (warning already emitted this poll)",
+                    normalized_tn,
+                )
+            self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
+            return  # no POST, no dedup write; drain handles the pending item
+
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
             api_key=self.config_entry.data[CONF_API_KEY],
@@ -891,6 +1041,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 "parcelapp.net daily quota exhausted (Stage-2 worker); forwarding paused: %s",
                 str(err)[:100],
             )
+            # Pitfall 2 (RESEARCH): persist merged_shipment so the item is not lost — the
+            # drain will POST it once quota resets without re-running Ollama (LD-05).
+            self._pending_posts[job.storage_key] = merged_shipment
+            await self._async_save_store()
             self._stage2_enqueued_keys.discard(normalized_tn)
             return
         except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
@@ -1020,8 +1174,46 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     err,
                 )
         self._restored_shipments = restored
+        # Phase 23 D-03 / LD-05: hydrate pending_posts — post-deferred merged shipments
+        # that survived an HA restart while ParcelApp quota was exhausted.
+        # Uses stored.get("pending_posts", {}) so v3 stores without this key load cleanly
+        # (backward-compatible additive key — no STORAGE_VERSION bump needed).
+        # Applies the same _SHIPMENT_FIELD_TYPES per-entry validation used for
+        # persisted_shipments above (T-23-02-01 / ASVS V5 input validation).
+        restored_pending: dict[str, ShipmentData] = {}
+        raw_pending = stored.get("pending_posts", {})
+        if not isinstance(raw_pending, dict):
+            _LOGGER.warning(
+                "pending_posts in store is not a dict (type=%s) for entry %s; "
+                "treating as empty — pending posts will be re-queued after next LLM extraction.",
+                type(raw_pending).__name__,
+                self._store.key.removeprefix("shop2parcel."),
+            )
+            raw_pending = {}
+        for storage_key, entry in raw_pending.items():
+            if not isinstance(entry, dict) or not all(
+                k in entry and isinstance(entry[k], t) for k, t in _SHIPMENT_FIELD_TYPES.items()
+            ):
+                _LOGGER.warning("pending_posts entry for %r is invalid — skipping", storage_key)
+                continue
+            try:
+                restored_pending[storage_key] = ShipmentData(
+                    **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
+                    custom_attributes=_safe_custom_attributes(entry),
+                )
+            except TypeError as err:
+                _LOGGER.warning(
+                    "pending_posts entry for %r could not be reconstructed (%s) — skipping",
+                    storage_key,
+                    err,
+                )
+        self._pending_posts = restored_pending
         self._store_loaded = True
-        _LOGGER.debug("Restored %d persisted shipments from store", len(self._restored_shipments))
+        _LOGGER.debug(
+            "Restored %d persisted shipments and %d pending posts from store",
+            len(self._restored_shipments),
+            len(self._pending_posts),
+        )
 
     async def _async_save_store(self) -> None:
         """Schedule a debounced persist of current dedup, quota, and shipment state to Store.
@@ -1047,19 +1239,26 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         snapshot_shipments = {
             msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
         }
+        # Phase 23 D-03 / LD-05: persist post-deferred merged shipments so they survive
+        # HA restarts. asdict() is intentionally outside the try block (loud-failure convention
+        # matching persisted_shipments above — serialization failures must surface immediately).
+        snapshot_pending = {key: asdict(shipment) for key, shipment in self._pending_posts.items()}
         try:
             self._store.async_delay_save(
                 lambda: {
                     "submitted_tracking_numbers": snapshot_tracking,
                     "quota_exhausted_until": snapshot_quota,
                     "persisted_shipments": snapshot_shipments,
+                    "pending_posts": snapshot_pending,
                 },
                 delay=5,
             )
             _LOGGER.debug(
-                "Scheduled debounced save for %d submitted tracking numbers and %d persisted shipments",
+                "Scheduled debounced save for %d submitted tracking numbers, "
+                "%d persisted shipments, and %d pending posts",
                 len(snapshot_tracking),
                 len(snapshot_shipments),
+                len(snapshot_pending),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(

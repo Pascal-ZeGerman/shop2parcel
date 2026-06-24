@@ -1,20 +1,20 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.3
-milestone_name: AI-based Email Analysis
-current_phase: 22
-current_phase_name: README Setup + End-to-End Validation
+milestone: v1.4
+milestone_name: Stage-2 Reliability
+current_phase: 23
 status: complete
-stopped_at: PR #20 CI green — awaiting UAT before v1.3.0 final tag
-last_updated: "2026-06-18T16:30:00.000Z"
-last_activity: 2026-06-18
-last_activity_desc: fixed mypy union-attr + arg-type errors and Python 3.14 lingering task in CI
+stopped_at: "Phase 23 complete on branch feat/v1.4-p23-decouple-stage2-post (11 commits). Stage-2 extract/POST decoupled; debug suppresses POST; quota-deferred items drain without re-extract; WARNING throttled. Gate green (682 pass, ruff/mypy clean); goal-backward VERIFICATION passed 9/9. Ready for deploy to live HA + PR/merge."
+last_updated: "2026-06-24T16:23:17.181Z"
+last_activity: 2026-06-24
+last_activity_desc: Phase 23 complete
 progress:
-  total_phases: 10
-  completed_phases: 8
-  total_plans: 23
-  completed_plans: 29
-  percent: 80
+  total_phases: 1
+  completed_phases: 1
+  total_plans: 4
+  completed_plans: 4
+  percent: 100
+current_phase_name: Decouple Stage-2 LLM Extraction from parcelapp POST + debug POST suppression
 ---
 
 # Project State
@@ -24,20 +24,26 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-05)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** v1.3 shipped — planning next milestone
+**Current focus:** v1.4 Phase 23 — decouple Stage-2 LLM extraction from the parcelapp POST; fix debug-mode POST suppression.
 
 ## Current Position
 
-Phase: 22 — README Setup + End-to-End Validation
-Plan: Complete (2/2)
-Status: Milestone v1.3 SHIPPED — all 8 phases, 23 plans, 37/37 requirements complete
-Last activity: 2026-06-18 — Completed quick task 260618-iro: Fix 10 PR-20 code review issues (I1-I7, S1-S3)
+Phase: 23
+Plan: Not started
+Status: v1.4 opened. Phase 23 is bug-fix-driven: live root-cause found debug_mode + POST-coupled-to-quota causing a quota-skip flood with 0 LLM parses.
+Last activity: 2026-06-24 — Phase 23 complete
+
+## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 23 added (v1.4): Decouple Stage-2 LLM extraction from parcelapp POST + honor debug-mode POST suppression. Backlog ideas renumbered: Custom Extraction Field Persistence → 24, Stage-2 Observability → 25.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 55
+- Total plans completed: 59
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -63,6 +69,7 @@ Last activity: 2026-06-18 — Completed quick task 260618-iro: Fix 10 PR-20 code
 | 20 | 3 | - | - |
 | 22 | 2 | - | - |
 | 21 | 3 | - | - |
+| 23 | 4 | - | - |
 
 **Recent Trend:**
 
@@ -111,6 +118,9 @@ Recent decisions affecting current work:
 - v1.3 Phase 15-03: OllamaClient 2-pass parse pipeline shipped (Pass 1 = normalize + json.loads; Pass 2 = fence-strip + normalize + json.loads on Pass 1 JSONDecodeError only). Missing-`{` from normalize is a hard fail (no Pass 2 retry). NFKC preserves Cyrillic A — Phase 20 carrier-regex pre-POST validation will catch any homoglyph slips on real tracking numbers.
 - v1.3 architecture lock: in-memory queue only (HA-restart-lossy by design); full-window rescan re-discovers un-dedup'd emails — no STORAGE_VERSION bump
 - v1.3 architecture lock: single long-lived worker per coordinator; multi-worker rejected (Ollama serializes per-model + ParcelApp 20/day quota)
+- Phase 23 Wave 2: Quota guard moved post-extraction (LD-03) — Ollama always runs regardless of parcelapp quota; merged_shipment persisted to _pending_posts for drain
+- Phase 23 Wave 2: Debug dry-run branch added after extractor, before quota-defer — no POST, no writes in debug mode (LD-02/DBG-03)
+- Phase 23 Wave 2: ParcelAppQuotaError handler extended to persist merged_shipment to _pending_posts (Pitfall 2 fix — no item loss on 429 during POST)
 - v1.3 architecture lock: drop-newest backpressure on QueueFull (drop-oldest rejected — wastes head-of-queue work, breaks FIFO activity-log ordering)
 - v1.3 quota-burn mitigation set is INSEPARABLE: per-field merge guards + carrier-regex pre-POST validation + `temperature:0` + `MAX_STAGE2_POSTS_PER_POLL` cap + scoped skip-dedup. All five land in Phase 20.
 - v1.3 Phase 15-04: `live_ollama` pytest marker registered in `pyproject.toml`; single opt-in smoke test `tests/api/test_ollama_client_live.py` gated by `OLLAMA_URL` env var (D-10/D-11/D-12/D-13). CI silently skips. Phase 15 complete: 384 tests passing, 1 skipped (the live smoke).
@@ -156,6 +166,8 @@ None — v1.3 roadmap drafted, 37/37 requirements mapped, three NEEDS RESEARCH p
 | 260523-g8u | Reconcile ROADMAP and STATE for Phase 14 (4/4 complete 2026-05-20); audit WR-01..WR-04 — all already shipped on origin/main | 2026-05-23 | n/a (docs only) | [260523-g8u-reconcile-roadmap-and-state-for-phase-14](./quick/260523-g8u-reconcile-roadmap-and-state-for-phase-14/) |
 | 260601-x94 | Fix wrong USPS Informed Delivery sender address in DEFAULT_GMAIL_QUERY | 2026-06-02 | cfb3567 | [260601-x94-fix-wrong-usps-informed-delivery-sender-](./quick/260601-x94-fix-wrong-usps-informed-delivery-sender-/) |
 | 260618-iro | Fix 10 issues from PR 20 code review: I1 (cap notification dismiss), I2 (remove_entry missing dismiss), I3 (drain loop task_done), I4 (cancel-mid-success store flush), I5 (wrong error message in _split_and_coerce), I6 (MRG-04 tracking_number=None invariant), I7 (cap counter includes AlreadyAdded), S1 (BeautifulSoup error handling), S2 (snapshot-before-set_updated_data), S3 (empty URL UX note) | 2026-06-18 | d1b2a09 | [260618-iro-fix-10-issues-from-pr-20-code-review-i1-](./quick/260618-iro-fix-10-issues-from-pr-20-code-review-i1-/) |
+| 260623-d9s | Add description attribute to all 7 diagnostic sensors so users can read what each sensor measures in the HA entity detail panel | 2026-06-23 | a9296fa | [260623-d9s-add-description-attrs-to-diagnostic-sensors](./quick/260623-d9s-add-description-attrs-to-diagnostic-sensors/) |
+| 260623-f2k | Add 3 LLM performance diagnostic sensors: OllamaLatencySensor (avg/last/min/max ms), OllamaParseQualitySensor (fence-strip retry count + rate), Stage2ConsecutiveFailuresSensor (failure streak) | 2026-06-23 | 34385e0 | [260623-f2k-add-llm-performance-diagnostic-sensors](./quick/260623-f2k-add-llm-performance-diagnostic-sensors/) |
 
 ## Deferred Items
 
@@ -202,7 +214,7 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-Last session: 2026-06-18T16:30:00.000Z
+Last session: 2026-06-24T16:13:25.644Z
 Stopped at: PR #20 CI all green — waiting for UAT in live HA before cutting v1.3.0 final tag.
 Next action: Run UAT on HA instance, then cut v1.3.0 final tag and merge PR #20.
 

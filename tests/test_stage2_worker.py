@@ -2111,9 +2111,16 @@ async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_c
             job = _make_job(normalized_tn=f"TN{i:04d}")
             await coord._async_process_stage2_job(job)
 
-        # Simulate quota exhausted — next job is skipped before reaching extractor.
+        # Simulate quota exhausted — next job extracts but POST is deferred (Phase 23
+        # decoupled semantics). A quota-deferred POST is a parcelapp suppression, NOT an
+        # Ollama failure — the failure streak must NOT increment, and dismiss must NOT fire
+        # (no success happened because no actual POST was made).
+        from custom_components.shop2parcel.extractors.types import Stage2Result
+
         ok_extractor = MagicMock()
-        ok_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        ok_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         coord._extractor = ok_extractor
         coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
 
@@ -2121,7 +2128,7 @@ async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_c
         await coord._async_process_stage2_job(quota_job)
 
         assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
-        # No NEW dismiss calls beyond the baseline (quota-skip is NOT a success).
+        # No NEW dismiss calls beyond the baseline (quota-deferred POST is NOT a success).
         assert mock_dismiss.call_count == baseline_dismiss_count
 
 
@@ -2129,13 +2136,18 @@ async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_c
 async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
     hass, mock_stage2_config_entry
 ):
-    """DIAG-02: quota gate increments stage2_quota_skipped_total and never calls extractor.
+    """AC-1 / DIAG-02 (inverted): With quota exhausted the extractor IS called and
+    stage2_quota_skipped_total increments — but no parcelapp POST is attempted.
 
-    Root-cause fix for stage2-queue-consumer-stall: the quota gate must fire BEFORE
-    the extractor so Ollama is not called during quota exhaustion.  This test verifies
-    both the counter increment and that async_extract is never reached.
+    Decoupled semantics (Phase 23): LLM extraction runs regardless of parcelapp quota.
+    The counter now means "extracted, POST deferred" — not "skipped before extractor".
+    The quota guard moved to AFTER extraction+merge so Ollama always runs per job.
+
+    RED until plan 03 lands.
     """
     import time as stdlib_time
+
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -2149,7 +2161,7 @@ async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
             return_value="<html>body</html>",
         ),
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -2157,10 +2169,18 @@ async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
 
-        # Wire extractor with a spy to confirm it is NOT called during quota exhaustion.
+        # Wire extractor with a spy that returns a realistic Stage2Result shape.
         spy_extractor = MagicMock()
-        spy_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        spy_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={},
+                custom={},
+                passes_used=1,
+                latency_ms=5.0,
+            )
+        )
         coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         # Exhaust quota before processing any job.
         coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
@@ -2168,12 +2188,14 @@ async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
         job = _make_job(normalized_tn="TNQUOTA2")
         await coord._async_process_stage2_job(job)
 
-        # Counter must increment (was previously 0 — the invisible stall).
+        # Counter must increment (semantics: "extracted, POST deferred").
         assert coord._diagnostics.stage2_quota_skipped_total == 1
-        # Extractor must NOT be called — quota gate now runs before it.
-        spy_extractor.async_extract.assert_not_called()
-        # Success counter must NOT increment.
+        # Extractor MUST be called — decoupled path: extraction runs despite quota.
+        spy_extractor.async_extract.assert_awaited_once()
+        # Success counter must NOT increment — no POST happened.
         assert coord._diagnostics.stage2_succeeded_total == 0
+        # No parcelapp POST must be attempted.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
 
 
 async def test_fail_05_dismiss_unconditional_even_when_no_prior_notification(
@@ -2688,3 +2710,361 @@ async def test_diag_02_stage2_conflict_total_zero_when_no_conflict(hass, mock_st
         await coord._async_process_stage2_job(job)
 
         assert coord.diagnostics.stage2_conflict_total == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 23 Plan 01 — Wave 0 RED scaffolds
+# AC-1: extractor called despite quota exhausted
+# AC-2: no POST + item in _pending_posts when quota exhausted
+# AC-3: pending item not re-extracted on drain
+# AC-4: drain POSTs pending items when quota freed (cap respected)
+# AC-5: debug mode — extract runs, no POST, no store write, dry_run_suppressed
+# AC-8: quota WARNING throttled to once per poll
+# ---------------------------------------------------------------------------
+
+
+async def test_extractor_called_despite_quota_exhausted(hass, mock_stage2_config_entry):
+    """AC-1: With parcelapp quota exhausted, the extractor is still awaited once.
+
+    Decoupled semantics (Phase 23 LD-03): LLM extraction is independent of parcelapp
+    quota. The extractor must run for every dequeued job; the POST gate fires separately.
+    RED until plan 03 moves the quota guard to after extraction.
+    """
+    import time as stdlib_time
+
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        spy_extractor = MagicMock()
+        spy_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=8.0)
+        )
+        coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        # Quota is exhausted.
+        coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
+
+        job = _make_job(normalized_tn="TNAC1")
+        await coord._async_process_stage2_job(job)
+
+        # AC-1: extractor was called exactly once.
+        spy_extractor.async_extract.assert_awaited_once()
+        # LLM attempts counter incremented.
+        assert coord._diagnostics.stage2_llm_attempts_total == 1
+
+
+async def test_quota_exhausted_no_post_item_in_pending_posts(hass, mock_stage2_config_entry):
+    """AC-2: With quota exhausted, no parcelapp POST is attempted and the merged
+    shipment is recorded as post-pending in coord._pending_posts.
+
+    RED until plan 02 (store schema) and plan 03 (quota gate decoupling) land.
+    """
+    import time as stdlib_time
+
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        spy_extractor = MagicMock()
+        spy_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=8.0)
+        )
+        coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        # Quota is exhausted.
+        coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
+
+        job = _make_job(normalized_tn="TNAC2")
+        await coord._async_process_stage2_job(job)
+
+        # AC-2a: no POST was attempted.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+        # AC-2b: merged shipment recorded as post-pending (durable for next quota window).
+        assert job.storage_key in coord._pending_posts
+
+
+async def test_pending_post_not_re_extracted_on_drain(hass, mock_stage2_config_entry):
+    """AC-3: A quota-blocked item pre-populated in _pending_posts is NOT re-extracted
+    when the drain runs — the already-merged shipment is used directly.
+
+    RED until plan 04 adds _async_drain_pending_posts.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        spy_extractor = MagicMock()
+        spy_extractor.async_extract = AsyncMock()
+        coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        # Pre-populate _pending_posts with an already-merged shipment.
+        merged_shipment = _make_shipment(message_id="msg-pending-1")
+        merged_shipment_updated = ShipmentData(
+            tracking_number="1ZPENDING123",
+            carrier_name="UPS",
+            order_name="#9001",
+            message_id="msg-pending-1",
+            email_date=1700000001,
+        )
+        coord._pending_posts = {"storage_key_1": merged_shipment_updated}
+
+        # Quota is NOT exhausted.
+        coord._quota_exhausted_until = None
+
+        # Trigger drain (added in plan 04 — RED until then).
+        await coord._async_drain_pending_posts()
+
+        # AC-3: extractor was NOT called — drain uses cached merged shipment.
+        spy_extractor.async_extract.assert_not_called()
+        # POST was called for the pending item.
+        mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+        # Item removed from _pending_posts after successful drain.
+        assert "storage_key_1" not in coord._pending_posts
+
+
+async def test_drain_posts_pending_when_quota_freed(hass, mock_stage2_config_entry):
+    """AC-4: When quota frees, _async_drain_pending_posts POSTs pending items
+    up to MAX_STAGE2_POSTS_PER_POLL. Populating >5 items asserts at most 5 POSTs.
+
+    RED until plan 04 adds _async_drain_pending_posts.
+    """
+    import time as stdlib_time
+
+    from custom_components.shop2parcel.const import MAX_STAGE2_POSTS_PER_POLL
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        # Quota freed: set to a past epoch so it is no longer exhausted.
+        coord._quota_exhausted_until = int(stdlib_time.time()) - 1
+
+        # Populate 7 pending items — more than MAX_STAGE2_POSTS_PER_POLL (= 5).
+        for i in range(7):
+            shipment = ShipmentData(
+                tracking_number=f"1ZDRAIN{i:04d}",
+                carrier_name="UPS",
+                order_name=f"#{9000 + i}",
+                message_id=f"msg-drain-{i}",
+                email_date=1700000000 + i,
+            )
+            coord._pending_posts[f"drain_key_{i}"] = shipment
+
+        # Trigger drain (added in plan 04 — RED until then).
+        await coord._async_drain_pending_posts()
+
+        # AC-4: at most MAX_STAGE2_POSTS_PER_POLL POSTs were made.
+        assert (
+            mock_parcel_cls.return_value.async_add_delivery.await_count <= MAX_STAGE2_POSTS_PER_POLL
+        )
+
+
+async def test_debug_mode_extractor_runs_no_post_no_store_write(hass, mock_stage2_config_entry):
+    """AC-5: With debug_mode=True, the extractor IS called but no parcelapp POST is made,
+    no dedup/store entry is written, _pending_posts stays empty, and a dry_run_suppressed
+    scan event is emitted.
+
+    LD-02: Stage-2 POST must follow debug suppression. Extraction still runs so dry-run
+    testing exercises the real extraction path.
+    RED until plan 03 adds the debug-mode early-return after extraction.
+    """
+    import logging
+
+    from custom_components.shop2parcel.const import CONF_DEBUG_MODE
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    # Enable debug mode while preserving the Ollama URL so the extractor stays wired.
+    hass.config_entries.async_update_entry(
+        mock_stage2_config_entry,
+        options={
+            CONF_DEBUG_MODE: True,
+            CONF_OLLAMA_URL: "http://localhost:11434",
+            CONF_OLLAMA_MODEL: "qwen3.5:2b",
+            CONF_OLLAMA_TIMEOUT: 60,
+            CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+            CONF_CUSTOM_FIELDS: [],
+        },
+    )
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        spy_extractor = MagicMock()
+        spy_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=6.0)
+        )
+        coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        job = _make_job(normalized_tn="TNAC5DEBUG")
+        await coord._async_process_stage2_job(job)
+
+        # AC-5a: extractor IS called (dry-run exercises real extraction path).
+        spy_extractor.async_extract.assert_awaited_once()
+        # AC-5b: no parcelapp POST attempted.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+        # AC-5c: a dry_run_suppressed scan event was emitted.
+        dry_run_events = [
+            e for e in coord._diagnostics.scan_events if e.get("outcome") == "dry_run_suppressed"
+        ]
+        assert len(dry_run_events) >= 1, (
+            f"Expected at least 1 dry_run_suppressed event, got: {list(coord._diagnostics.scan_events)}"
+        )
+        # AC-5d: _pending_posts is empty — debug mode never accumulates post-pending items.
+        assert coord._pending_posts == {}
+        # AC-5e: tracking number NOT written to submitted_tracking_numbers (dedup not written).
+        assert job.normalized_tn not in coord._submitted_tracking_numbers
+
+
+async def test_quota_skip_warning_throttled_after_first(hass, mock_stage2_config_entry, caplog):
+    """AC-8: The quota-skip WARNING is emitted at most once per poll when quota is exhausted.
+
+    Processing two jobs with the same exhausted-quota condition should produce exactly one
+    WARNING log record matching the quota-skip phrase. The _stage2_quota_warned_this_poll
+    flag is set to True after the first skip.
+    RED until plan 03 adds the _stage2_quota_warned_this_poll throttle flag.
+    """
+    import logging
+    import time as stdlib_time
+
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        spy_extractor = MagicMock()
+        spy_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=7.0)
+        )
+        coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        # Exhaust quota.
+        coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
+
+        with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
+            # Process two jobs with distinct tracking numbers in the same poll.
+            job1 = _make_job(normalized_tn="TNAC8A")
+            job2 = _make_job(normalized_tn="TNAC8B")
+            await coord._async_process_stage2_job(job1)
+            await coord._async_process_stage2_job(job2)
+
+        # AC-8a: count WARNING records that mention the quota-skip phrase.
+        quota_warn_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "quota" in r.getMessage().lower()
+        ]
+        assert len(quota_warn_records) <= 1, (
+            f"Expected at most 1 quota-skip WARNING, got {len(quota_warn_records)}: "
+            f"{[r.getMessage() for r in quota_warn_records]}"
+        )
+        # AC-8b: throttle flag is set after first skip.
+        assert coord._stage2_quota_warned_this_poll is True
