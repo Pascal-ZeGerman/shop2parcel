@@ -1,14 +1,14 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.3
-milestone_name: AI-based Email Analysis
-current_phase: 22
-current_phase_name: README Setup + End-to-End Validation
-status: complete
-stopped_at: PR #20 CI green — awaiting UAT before v1.3.0 final tag
-last_updated: "2026-06-18T16:30:00.000Z"
-last_activity: 2026-06-18
-last_activity_desc: fixed mypy union-attr + arg-type errors and Python 3.14 lingering task in CI
+milestone: v1.4
+milestone_name: Stage-2 Reliability
+current_phase: 23
+current_phase_name: Decouple Stage-2 LLM Extraction from parcelapp POST + debug POST suppression
+status: planning
+stopped_at: Phase 23 created — entering discuss/plan flow (decouple LLM from POST, fix debug dry-run)
+last_updated: "2026-06-24T00:00:00.000Z"
+last_activity: 2026-06-24
+last_activity_desc: opened Phase 23 (v1.4) after live root-cause of Stage-2 quota-flood (debug_mode + coupled POST)
 progress:
   total_phases: 10
   completed_phases: 8
@@ -24,14 +24,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-05)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** v1.3 shipped — planning next milestone
+**Current focus:** v1.4 Phase 23 — decouple Stage-2 LLM extraction from the parcelapp POST; fix debug-mode POST suppression.
 
 ## Current Position
 
-Phase: 22 — README Setup + End-to-End Validation
-Plan: Complete (2/2)
-Status: Milestone v1.3 SHIPPED — all 8 phases, 23 plans, 37/37 requirements complete
-Last activity: 2026-06-18 — Completed quick task 260618-iro: Fix 10 PR-20 code review issues (I1-I7, S1-S3)
+Phase: 23 — Decouple Stage-2 LLM Extraction from parcelapp POST + debug POST suppression
+Plan: Not yet planned (discuss → plan → execute)
+Status: v1.4 opened. Phase 23 is bug-fix-driven: live root-cause found debug_mode + POST-coupled-to-quota causing a quota-skip flood with 0 LLM parses.
+Last activity: 2026-06-24 — Created Phase 23; reconciled v1.4 roadmap numbering (backlog ideas bumped to 24/25).
+
+## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 23 added (v1.4): Decouple Stage-2 LLM extraction from parcelapp POST + honor debug-mode POST suppression. Backlog ideas renumbered: Custom Extraction Field Persistence → 24, Stage-2 Observability → 25.
 
 ## Performance Metrics
 
@@ -156,6 +162,8 @@ None — v1.3 roadmap drafted, 37/37 requirements mapped, three NEEDS RESEARCH p
 | 260523-g8u | Reconcile ROADMAP and STATE for Phase 14 (4/4 complete 2026-05-20); audit WR-01..WR-04 — all already shipped on origin/main | 2026-05-23 | n/a (docs only) | [260523-g8u-reconcile-roadmap-and-state-for-phase-14](./quick/260523-g8u-reconcile-roadmap-and-state-for-phase-14/) |
 | 260601-x94 | Fix wrong USPS Informed Delivery sender address in DEFAULT_GMAIL_QUERY | 2026-06-02 | cfb3567 | [260601-x94-fix-wrong-usps-informed-delivery-sender-](./quick/260601-x94-fix-wrong-usps-informed-delivery-sender-/) |
 | 260618-iro | Fix 10 issues from PR 20 code review: I1 (cap notification dismiss), I2 (remove_entry missing dismiss), I3 (drain loop task_done), I4 (cancel-mid-success store flush), I5 (wrong error message in _split_and_coerce), I6 (MRG-04 tracking_number=None invariant), I7 (cap counter includes AlreadyAdded), S1 (BeautifulSoup error handling), S2 (snapshot-before-set_updated_data), S3 (empty URL UX note) | 2026-06-18 | d1b2a09 | [260618-iro-fix-10-issues-from-pr-20-code-review-i1-](./quick/260618-iro-fix-10-issues-from-pr-20-code-review-i1-/) |
+| 260623-d9s | Add description attribute to all 7 diagnostic sensors so users can read what each sensor measures in the HA entity detail panel | 2026-06-23 | a9296fa | [260623-d9s-add-description-attrs-to-diagnostic-sensors](./quick/260623-d9s-add-description-attrs-to-diagnostic-sensors/) |
+| 260623-f2k | Add 3 LLM performance diagnostic sensors: OllamaLatencySensor (avg/last/min/max ms), OllamaParseQualitySensor (fence-strip retry count + rate), Stage2ConsecutiveFailuresSensor (failure streak) | 2026-06-23 | 34385e0 | [260623-f2k-add-llm-performance-diagnostic-sensors](./quick/260623-f2k-add-llm-performance-diagnostic-sensors/) |
 
 ## Deferred Items
 
