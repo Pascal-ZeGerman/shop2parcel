@@ -397,6 +397,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # _restored_shipments: shipments loaded from store on startup (pre-first-poll).
         self._pending_shipments: dict[str, ShipmentData] = {}
         self._restored_shipments: dict[str, ShipmentData] = {}
+        # Phase 23 D-03 / LD-05: post-deferred merged shipments awaiting POSTing to ParcelApp.
+        # Populated when quota is exhausted and LLM extraction succeeds; drained on next
+        # quota-free poll. Persisted to the 'pending_posts' store key so entries survive
+        # HA restarts (quota may clear between restart and next poll).
+        # NOT reset on _reset_stage2_poll_counters — must survive across polls.
+        self._pending_posts: dict[str, ShipmentData] = {}
         self._store_loaded: bool = False
         # Phase 18 CR-01: sentinel so async_stop_stage2 is safe to call before
         # async_start_stage2 (e.g. Phase 19 worker or a reload race).
@@ -412,6 +418,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         #   this poll — ensures at most one HA notification per poll (D-10 / T-20-03-02).
         self._stage2_posts_this_poll: int = 0
         self._stage2_cap_notified_this_poll: bool = False
+        # Phase 23 AC-8: throttles the quota-skip WARNING to at most one per poll
+        # (mirrors _stage2_cap_notified_this_poll). Reset in _reset_stage2_poll_counters.
+        self._stage2_quota_warned_this_poll: bool = False
         # Phase 21 FAIL-04/05: consecutive-failure streak across polls + notification cooldown timestamp.
         # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
         self._stage2_consecutive_failures: int = 0
@@ -431,6 +440,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         self._stage2_posts_this_poll = 0
         self._stage2_cap_notified_this_poll = False
+        self._stage2_quota_warned_this_poll = False
         if self.config_entry is not None:
             persistent_notification.async_dismiss(
                 self.hass,
