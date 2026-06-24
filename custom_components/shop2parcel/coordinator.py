@@ -1030,8 +1030,46 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     err,
                 )
         self._restored_shipments = restored
+        # Phase 23 D-03 / LD-05: hydrate pending_posts — post-deferred merged shipments
+        # that survived an HA restart while ParcelApp quota was exhausted.
+        # Uses stored.get("pending_posts", {}) so v3 stores without this key load cleanly
+        # (backward-compatible additive key — no STORAGE_VERSION bump needed).
+        # Applies the same _SHIPMENT_FIELD_TYPES per-entry validation used for
+        # persisted_shipments above (T-23-02-01 / ASVS V5 input validation).
+        restored_pending: dict[str, ShipmentData] = {}
+        raw_pending = stored.get("pending_posts", {})
+        if not isinstance(raw_pending, dict):
+            _LOGGER.warning(
+                "pending_posts in store is not a dict (type=%s) for entry %s; "
+                "treating as empty — pending posts will be re-queued after next LLM extraction.",
+                type(raw_pending).__name__,
+                self._store.key.removeprefix("shop2parcel."),
+            )
+            raw_pending = {}
+        for storage_key, entry in raw_pending.items():
+            if not isinstance(entry, dict) or not all(
+                k in entry and isinstance(entry[k], t) for k, t in _SHIPMENT_FIELD_TYPES.items()
+            ):
+                _LOGGER.warning("pending_posts entry for %r is invalid — skipping", storage_key)
+                continue
+            try:
+                restored_pending[storage_key] = ShipmentData(
+                    **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
+                    custom_attributes=_safe_custom_attributes(entry),
+                )
+            except TypeError as err:
+                _LOGGER.warning(
+                    "pending_posts entry for %r could not be reconstructed (%s) — skipping",
+                    storage_key,
+                    err,
+                )
+        self._pending_posts = restored_pending
         self._store_loaded = True
-        _LOGGER.debug("Restored %d persisted shipments from store", len(self._restored_shipments))
+        _LOGGER.debug(
+            "Restored %d persisted shipments and %d pending posts from store",
+            len(self._restored_shipments),
+            len(self._pending_posts),
+        )
 
     async def _async_save_store(self) -> None:
         """Schedule a debounced persist of current dedup, quota, and shipment state to Store.
@@ -1057,19 +1095,26 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         snapshot_shipments = {
             msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
         }
+        # Phase 23 D-03 / LD-05: persist post-deferred merged shipments so they survive
+        # HA restarts. asdict() is intentionally outside the try block (loud-failure convention
+        # matching persisted_shipments above — serialization failures must surface immediately).
+        snapshot_pending = {key: asdict(shipment) for key, shipment in self._pending_posts.items()}
         try:
             self._store.async_delay_save(
                 lambda: {
                     "submitted_tracking_numbers": snapshot_tracking,
                     "quota_exhausted_until": snapshot_quota,
                     "persisted_shipments": snapshot_shipments,
+                    "pending_posts": snapshot_pending,
                 },
                 delay=5,
             )
             _LOGGER.debug(
-                "Scheduled debounced save for %d submitted tracking numbers and %d persisted shipments",
+                "Scheduled debounced save for %d submitted tracking numbers, "
+                "%d persisted shipments, and %d pending posts",
                 len(snapshot_tracking),
                 len(snapshot_shipments),
+                len(snapshot_pending),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
