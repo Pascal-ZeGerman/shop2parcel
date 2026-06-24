@@ -858,6 +858,24 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
 
+        # Phase 23 LD-02/D-05: Debug-mode dry-run branch — MUST come before any POST,
+        # dedup write, _pending_posts write, or store save (Pitfall 1 / DBG-03 / T-23-03-02).
+        # Extraction has already run above so dry-run still exercises the real Ollama path.
+        debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        if debug_mode:
+            self._emit_scan_event(
+                message_id=job.message_id,
+                meta=job.meta,
+                outcome="dry_run_suppressed",
+                tracking_number=normalized_tn,
+            )
+            _LOGGER.debug(
+                "[Shop2Parcel DEBUG] Stage-2 dry-run: extracted tn=%s, no POST",
+                normalized_tn,
+            )
+            self._stage2_enqueued_keys.discard(normalized_tn)  # LD-01: allow re-enqueue next poll
+            return  # no POST, no dedup write, no pending_posts write, no store save
+
         # Phase 23 LD-03/LD-05: Quota guard moved to AFTER extraction+merge so Ollama always
         # runs for every dequeued job. When quota is exhausted, persist the already-merged
         # shipment to _pending_posts so the drain (plan 04) can POST it later without
