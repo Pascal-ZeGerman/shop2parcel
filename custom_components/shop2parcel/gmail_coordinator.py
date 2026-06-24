@@ -74,6 +74,19 @@ class GmailCoordinator(Shop2ParcelCoordinator):
 
         self._reset_stage2_poll_counters()  # Phase 20 MRG-05 / D-11: reset per-poll counters
 
+        # M6A-01: signal poll-in-progress so EmailProcessingActiveBinarySensor reads on
+        # immediately.  Set OUTSIDE the try so the listener notification is not swallowed
+        # by any exception handler in the body below.  The flag is reset in the finally.
+        self._poll_in_progress = True
+        self.async_update_listeners()
+
+        try:
+            return await self._async_update_data_inner()
+        finally:
+            self._poll_in_progress = False
+
+    async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
+        """Inner implementation of the poll cycle (called from _async_update_data)."""
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
             self.hass, self.config_entry

@@ -422,6 +422,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 23 AC-8: throttles the quota-skip WARNING to at most one per poll
         # (mirrors _stage2_cap_notified_this_poll). Reset in _reset_stage2_poll_counters.
         self._stage2_quota_warned_this_poll: bool = False
+        # M6A-01: poll-in-progress flag — set True at the top of each _async_update_data
+        # call in GmailCoordinator and ImapCoordinator (after _reset_stage2_poll_counters),
+        # then reset to False in the finally block before returning.  Surfaced via the
+        # email_processing_active property.  Never modified inside _async_update_data itself —
+        # only the subclass poll methods touch this flag.
+        self._poll_in_progress: bool = False
         # Phase 21 FAIL-04/05: consecutive-failure streak across polls + notification cooldown timestamp.
         # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
         self._stage2_consecutive_failures: int = 0
@@ -548,6 +554,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def stage2_consecutive_failures(self) -> int:
         """Current run of back-to-back Stage-2 failures; resets to 0 on any success."""
         return self._stage2_consecutive_failures
+
+    @property
+    def email_processing_active(self) -> bool:
+        """True while a poll is fetching/parsing emails OR the Stage-2 queue still has items to drain."""
+        return self._poll_in_progress or self.stage2_queue_depth > 0
+
+    @property
+    def pending_posts_depth(self) -> int:
+        """Count of quota-deferred merged shipments awaiting the ParcelApp POST step (Phase 23 _pending_posts)."""
+        return len(self._pending_posts)
 
     def _emit_scan_event(
         self,
