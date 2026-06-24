@@ -2931,3 +2931,140 @@ async def test_drain_posts_pending_when_quota_freed(hass, mock_stage2_config_ent
         assert (
             mock_parcel_cls.return_value.async_add_delivery.await_count <= MAX_STAGE2_POSTS_PER_POLL
         )
+
+
+async def test_debug_mode_extractor_runs_no_post_no_store_write(hass, mock_stage2_config_entry):
+    """AC-5: With debug_mode=True, the extractor IS called but no parcelapp POST is made,
+    no dedup/store entry is written, _pending_posts stays empty, and a dry_run_suppressed
+    scan event is emitted.
+
+    LD-02: Stage-2 POST must follow debug suppression. Extraction still runs so dry-run
+    testing exercises the real extraction path.
+    RED until plan 03 adds the debug-mode early-return after extraction.
+    """
+    import logging
+
+    from custom_components.shop2parcel.const import CONF_DEBUG_MODE
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    # Enable debug mode while preserving the Ollama URL so the extractor stays wired.
+    hass.config_entries.async_update_entry(
+        mock_stage2_config_entry,
+        options={
+            CONF_DEBUG_MODE: True,
+            CONF_OLLAMA_URL: "http://localhost:11434",
+            CONF_OLLAMA_MODEL: "qwen3.5:2b",
+            CONF_OLLAMA_TIMEOUT: 60,
+            CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+            CONF_CUSTOM_FIELDS: [],
+        },
+    )
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        spy_extractor = MagicMock()
+        spy_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=6.0)
+        )
+        coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        job = _make_job(normalized_tn="TNAC5DEBUG")
+        await coord._async_process_stage2_job(job)
+
+        # AC-5a: extractor IS called (dry-run exercises real extraction path).
+        spy_extractor.async_extract.assert_awaited_once()
+        # AC-5b: no parcelapp POST attempted.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+        # AC-5c: a dry_run_suppressed scan event was emitted.
+        dry_run_events = [
+            e for e in coord._diagnostics.scan_events if e.get("outcome") == "dry_run_suppressed"
+        ]
+        assert len(dry_run_events) >= 1, (
+            f"Expected at least 1 dry_run_suppressed event, got: {list(coord._diagnostics.scan_events)}"
+        )
+        # AC-5d: _pending_posts is empty — debug mode never accumulates post-pending items.
+        assert coord._pending_posts == {}
+        # AC-5e: tracking number NOT written to submitted_tracking_numbers (dedup not written).
+        assert job.normalized_tn not in coord._submitted_tracking_numbers
+
+
+async def test_quota_skip_warning_throttled_after_first(hass, mock_stage2_config_entry, caplog):
+    """AC-8: The quota-skip WARNING is emitted at most once per poll when quota is exhausted.
+
+    Processing two jobs with the same exhausted-quota condition should produce exactly one
+    WARNING log record matching the quota-skip phrase. The _stage2_quota_warned_this_poll
+    flag is set to True after the first skip.
+    RED until plan 03 adds the _stage2_quota_warned_this_poll throttle flag.
+    """
+    import logging
+    import time as stdlib_time
+
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        spy_extractor = MagicMock()
+        spy_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=7.0)
+        )
+        coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        # Exhaust quota.
+        coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
+
+        with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
+            # Process two jobs with distinct tracking numbers in the same poll.
+            job1 = _make_job(normalized_tn="TNAC8A")
+            job2 = _make_job(normalized_tn="TNAC8B")
+            await coord._async_process_stage2_job(job1)
+            await coord._async_process_stage2_job(job2)
+
+        # AC-8a: count WARNING records that mention the quota-skip phrase.
+        quota_warn_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "quota" in r.getMessage().lower()
+        ]
+        assert len(quota_warn_records) <= 1, (
+            f"Expected at most 1 quota-skip WARNING, got {len(quota_warn_records)}: "
+            f"{[r.getMessage() for r in quota_warn_records]}"
+        )
+        # AC-8b: throttle flag is set after first skip.
+        assert coord._stage2_quota_warned_this_poll is True
