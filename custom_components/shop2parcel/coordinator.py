@@ -280,6 +280,18 @@ class PollStats:
     stage2_llm_latency_ms_max: float | None = None
     stage2_fence_retry_total: int = 0
 
+    def record_llm_call(self, latency_ms: float, *, fence_retry: bool) -> None:
+        """Accumulate one successful LLM call into the latency and retry counters."""
+        self.stage2_llm_calls_total += 1
+        self.stage2_llm_latency_ms_sum += latency_ms
+        self.stage2_llm_latency_ms_last = latency_ms
+        if self.stage2_llm_latency_ms_min is None or latency_ms < self.stage2_llm_latency_ms_min:
+            self.stage2_llm_latency_ms_min = latency_ms
+        if self.stage2_llm_latency_ms_max is None or latency_ms > self.stage2_llm_latency_ms_max:
+            self.stage2_llm_latency_ms_max = latency_ms
+        if fence_retry:
+            self.stage2_fence_retry_total += 1
+
 
 class Shop2ParcelStore(Store):
     """HA Store subclass for Shop2Parcel with v1→v2 and v2→v3 migration support.
@@ -827,17 +839,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._stage2_enqueued_keys.discard(normalized_tn)
                 return
 
-            # Record LLM performance metrics for diagnostic sensors.
-            _d = self._diagnostics
-            _d.stage2_llm_calls_total += 1
-            _d.stage2_llm_latency_ms_sum += stage2_result.latency_ms
-            _d.stage2_llm_latency_ms_last = stage2_result.latency_ms
-            if _d.stage2_llm_latency_ms_min is None or stage2_result.latency_ms < _d.stage2_llm_latency_ms_min:
-                _d.stage2_llm_latency_ms_min = stage2_result.latency_ms
-            if _d.stage2_llm_latency_ms_max is None or stage2_result.latency_ms > _d.stage2_llm_latency_ms_max:
-                _d.stage2_llm_latency_ms_max = stage2_result.latency_ms
-            if stage2_result.passes_used == 2:
-                _d.stage2_fence_retry_total += 1
+            self._diagnostics.record_llm_call(
+                stage2_result.latency_ms,
+                fence_retry=stage2_result.passes_used == 2,
+            )
 
             # MRG-02: merge Stage-2 result into Stage-1 shipment.
             merged_shipment, conflicts = merge_llm_authoritative(job.shipment, stage2_result)

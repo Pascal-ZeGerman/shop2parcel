@@ -37,8 +37,16 @@ from .const import DOMAIN
 from .coordinator import Shop2ParcelCoordinator
 
 
+def _r1(v: float | None) -> float | None:
+    return None if v is None else round(v, 1)
+
+
+def _pct(numerator: int | float, denominator: int | float) -> float:
+    return round(numerator / denominator * 100, 1) if denominator else 0.0
+
+
 class DiagnosticSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
-    """Shared base for all 6 diagnostic sensors (D-10, D-11)."""
+    """Shared base for all diagnostic sensors (D-10, D-11)."""
 
     _attr_should_poll = False
     _attr_has_entity_name = True
@@ -46,6 +54,7 @@ class DiagnosticSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
     # D-12: counters reset on HA restart — MEASUREMENT avoids
     # false statistics anomalies on restart (RESEARCH.md A1).
     _attr_state_class = SensorStateClass.MEASUREMENT
+    _unique_id_suffix: str
 
     def __init__(
         self,
@@ -58,21 +67,15 @@ class DiagnosticSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
             identifiers={(DOMAIN, entry.entry_id)},
             name="Shop2Parcel",
         )
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{self._unique_id_suffix}"
 
 
 class EmailsScannedSensor(DiagnosticSensor):
     """sensor.shop2parcel_emails_scanned — raw emails returned by Gmail/IMAP before dedup."""
 
     _attr_name = "Emails Returned"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        # unique_id kept as _emails_scanned to avoid orphaning existing entity registry entry.
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_emails_scanned"
+    # Suffix kept as "emails_scanned" to avoid orphaning existing entity registry entry.
+    _unique_id_suffix = "emails_scanned"
 
     @property
     def native_value(self) -> int:
@@ -98,14 +101,7 @@ class NewEmailsInspectedSensor(DiagnosticSensor):
     """sensor.shop2parcel_new_emails_inspected — emails that passed dedup and were inspected."""
 
     _attr_name = "New Emails Inspected"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_new_emails_inspected"
+    _unique_id_suffix = "new_emails_inspected"
 
     @property
     def native_value(self) -> int:
@@ -124,14 +120,7 @@ class EmailsMatchedSensor(DiagnosticSensor):
     """sensor.shop2parcel_emails_matched — total emails that produced a ShipmentData."""
 
     _attr_name = "Emails Matched"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_emails_matched"
+    _unique_id_suffix = "emails_matched"
 
     @property
     def native_value(self) -> int:
@@ -153,14 +142,7 @@ class TrackingNumbersFoundSensor(DiagnosticSensor):
     """sensor.shop2parcel_tracking_numbers_found — total tracking numbers extracted."""
 
     _attr_name = "Tracking Numbers Found"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_tracking_numbers_found"
+    _unique_id_suffix = "tracking_numbers_found"
 
     @property
     def native_value(self) -> int:
@@ -179,14 +161,7 @@ class KeywordHitsSensor(DiagnosticSensor):
     """sensor.shop2parcel_keyword_hits — cumulative fallback regex hit count."""
 
     _attr_name = "Keyword Hits"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_keyword_hits"
+    _unique_id_suffix = "keyword_hits"
 
     @property
     def native_value(self) -> int:
@@ -213,14 +188,7 @@ class ActivityLogSensor(DiagnosticSensor):
     """
 
     _attr_name = "Activity Log"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_activity_log"
+    _unique_id_suffix = "activity_log"
 
     @property
     def native_value(self) -> int:
@@ -245,14 +213,7 @@ class Stage2Sensor(DiagnosticSensor):
     """
 
     _attr_name = "Stage-2 Queue"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_stage2_queue"
+    _unique_id_suffix = "stage2_queue"
 
     @property
     def native_value(self) -> int:
@@ -282,14 +243,7 @@ class OllamaLatencySensor(DiagnosticSensor):
 
     _attr_name = "Stage-2 LLM Latency"
     _attr_native_unit_of_measurement = "ms"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_ollama_latency"
+    _unique_id_suffix = "ollama_latency"
 
     @property
     def native_value(self) -> float | None:
@@ -303,9 +257,9 @@ class OllamaLatencySensor(DiagnosticSensor):
         d = self.coordinator.diagnostics
         return {
             "description": "Average round-trip time for Ollama /api/generate calls since last HA restart. None until the first Stage-2 call completes.",
-            "last_call_ms": round(d.stage2_llm_latency_ms_last, 1) if d.stage2_llm_latency_ms_last is not None else None,
-            "min_ms": round(d.stage2_llm_latency_ms_min, 1) if d.stage2_llm_latency_ms_min is not None else None,
-            "max_ms": round(d.stage2_llm_latency_ms_max, 1) if d.stage2_llm_latency_ms_max is not None else None,
+            "last_call_ms": _r1(d.stage2_llm_latency_ms_last),
+            "min_ms": _r1(d.stage2_llm_latency_ms_min),
+            "max_ms": _r1(d.stage2_llm_latency_ms_max),
             "call_count": d.stage2_llm_calls_total,
         }
 
@@ -321,14 +275,7 @@ class OllamaParseQualitySensor(DiagnosticSensor):
     """
 
     _attr_name = "Stage-2 Parse Retries"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_ollama_parse_retries"
+    _unique_id_suffix = "ollama_parse_retries"
 
     @property
     def native_value(self) -> int:
@@ -338,10 +285,9 @@ class OllamaParseQualitySensor(DiagnosticSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
         calls = d.stage2_llm_calls_total
-        retry_rate = round(d.stage2_fence_retry_total / calls * 100, 1) if calls else 0.0
         return {
             "description": "Times the LLM response needed markdown-fence stripping before it could be parsed. A high rate means the model is wrapping JSON in ```json``` blocks.",
-            "fence_retry_rate_pct": retry_rate,
+            "fence_retry_rate_pct": _pct(d.stage2_fence_retry_total, calls),
             "clean_parses": max(0, calls - d.stage2_fence_retry_total),
             "total_calls": calls,
         }
@@ -357,14 +303,7 @@ class Stage2ConsecutiveFailuresSensor(DiagnosticSensor):
     """
 
     _attr_name = "Stage-2 Consecutive Failures"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_stage2_consecutive_failures"
+    _unique_id_suffix = "stage2_consecutive_failures"
 
     @property
     def native_value(self) -> int:
@@ -389,14 +328,7 @@ class EmailsSentToLLMSensor(DiagnosticSensor):
     """
 
     _attr_name = "Stage-2 Emails Sent to LLM"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_emails_sent_to_llm"
+    _unique_id_suffix = "emails_sent_to_llm"
 
     @property
     def native_value(self) -> int:
@@ -422,14 +354,7 @@ class EmailsParsedByLLMSensor(DiagnosticSensor):
     """
 
     _attr_name = "Stage-2 Emails Parsed by LLM"
-
-    def __init__(
-        self,
-        coordinator: Shop2ParcelCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_emails_parsed_by_llm"
+    _unique_id_suffix = "emails_parsed_by_llm"
 
     @property
     def native_value(self) -> int:
@@ -438,10 +363,8 @@ class EmailsParsedByLLMSensor(DiagnosticSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
-        attempts = d.stage2_llm_attempts_total
-        parse_rate = round(d.stage2_llm_calls_total / attempts * 100, 1) if attempts else 0.0
         return {
             "description": "Emails where Ollama returned a parseable JSON result. Does not require a successful parcelapp POST — measures LLM output quality only.",
-            "parse_success_rate_pct": parse_rate,
-            "attempts_total": attempts,
+            "parse_success_rate_pct": _pct(d.stage2_llm_calls_total, d.stage2_llm_attempts_total),
+            "attempts_total": d.stage2_llm_attempts_total,
         }
