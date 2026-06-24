@@ -2111,9 +2111,16 @@ async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_c
             job = _make_job(normalized_tn=f"TN{i:04d}")
             await coord._async_process_stage2_job(job)
 
-        # Simulate quota exhausted — next job is skipped before reaching extractor.
+        # Simulate quota exhausted — next job extracts but POST is deferred (Phase 23
+        # decoupled semantics). A quota-deferred POST is a parcelapp suppression, NOT an
+        # Ollama failure — the failure streak must NOT increment, and dismiss must NOT fire
+        # (no success happened because no actual POST was made).
+        from custom_components.shop2parcel.extractors.types import Stage2Result
+
         ok_extractor = MagicMock()
-        ok_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        ok_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         coord._extractor = ok_extractor
         coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
 
@@ -2121,7 +2128,7 @@ async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_c
         await coord._async_process_stage2_job(quota_job)
 
         assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
-        # No NEW dismiss calls beyond the baseline (quota-skip is NOT a success).
+        # No NEW dismiss calls beyond the baseline (quota-deferred POST is NOT a success).
         assert mock_dismiss.call_count == baseline_dismiss_count
 
 
@@ -2129,13 +2136,18 @@ async def test_fail_05_quota_exhausted_skip_is_not_a_success(hass, mock_stage2_c
 async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
     hass, mock_stage2_config_entry
 ):
-    """DIAG-02: quota gate increments stage2_quota_skipped_total and never calls extractor.
+    """AC-1 / DIAG-02 (inverted): With quota exhausted the extractor IS called and
+    stage2_quota_skipped_total increments — but no parcelapp POST is attempted.
 
-    Root-cause fix for stage2-queue-consumer-stall: the quota gate must fire BEFORE
-    the extractor so Ollama is not called during quota exhaustion.  This test verifies
-    both the counter increment and that async_extract is never reached.
+    Decoupled semantics (Phase 23): LLM extraction runs regardless of parcelapp quota.
+    The counter now means "extracted, POST deferred" — not "skipped before extractor".
+    The quota guard moved to AFTER extraction+merge so Ollama always runs per job.
+
+    RED until plan 03 lands.
     """
     import time as stdlib_time
+
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -2149,7 +2161,7 @@ async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
             return_value="<html>body</html>",
         ),
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -2157,10 +2169,18 @@ async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
 
-        # Wire extractor with a spy to confirm it is NOT called during quota exhaustion.
+        # Wire extractor with a spy that returns a realistic Stage2Result shape.
         spy_extractor = MagicMock()
-        spy_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        spy_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={},
+                custom={},
+                passes_used=1,
+                latency_ms=5.0,
+            )
+        )
         coord._extractor = spy_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         # Exhaust quota before processing any job.
         coord._quota_exhausted_until = int(stdlib_time.time()) + 9999
@@ -2168,12 +2188,14 @@ async def test_quota_gate_increments_quota_skipped_total_and_skips_extractor(
         job = _make_job(normalized_tn="TNQUOTA2")
         await coord._async_process_stage2_job(job)
 
-        # Counter must increment (was previously 0 — the invisible stall).
+        # Counter must increment (semantics: "extracted, POST deferred").
         assert coord._diagnostics.stage2_quota_skipped_total == 1
-        # Extractor must NOT be called — quota gate now runs before it.
-        spy_extractor.async_extract.assert_not_called()
-        # Success counter must NOT increment.
+        # Extractor MUST be called — decoupled path: extraction runs despite quota.
+        spy_extractor.async_extract.assert_awaited_once()
+        # Success counter must NOT increment — no POST happened.
         assert coord._diagnostics.stage2_succeeded_total == 0
+        # No parcelapp POST must be attempted.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
 
 
 async def test_fail_05_dismiss_unconditional_even_when_no_prior_notification(
