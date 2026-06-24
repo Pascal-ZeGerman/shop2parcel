@@ -378,3 +378,46 @@ class EmailsParsedByLLMSensor(DiagnosticSensor):
             "parse_success_rate_pct": _pct(d.stage2_llm_calls_total, d.stage2_llm_attempts_total),
             "attempts_total": d.stage2_llm_attempts_total,
         }
+
+
+class PendingPostsSensor(DiagnosticSensor):
+    """sensor.shop2parcel_pending_parcelapp_posts — quota-deferred shipments awaiting POST (M6A-02).
+
+    native_value: count of merged shipments in coordinator._pending_posts that are waiting
+    for the ParcelApp POST step after being deferred due to daily quota exhaustion (Phase 23).
+    Zero is normal at rest.  A non-zero value means the integration has extracted shipments
+    that have NOT yet been forwarded to parcelapp.net — they will drain automatically once
+    the daily quota resets.
+
+    extra_state_attributes: a bounded list of up to 10 pending entries (tracking_number,
+    carrier, order_name) so the recorder payload stays small (T-m6a-01 / recorder 16KB limit).
+    """
+
+    _attr_name = "Pending ParcelApp Posts"
+    _unique_id_suffix = "pending_parcelapp_posts"
+
+    @property
+    def native_value(self) -> int:
+        """Count of quota-deferred shipments awaiting the ParcelApp POST step."""
+        return self.coordinator.pending_posts_depth
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        # Cap to the last 10 entries — mirrors TrackingNumbersFoundSensor recorder-payload
+        # precedent (T-m6a-01 / threat model DoS mitigation).
+        pending_entries = list(self.coordinator._pending_posts.values())[-10:]
+        surfaced = [
+            {
+                "tracking_number": s.tracking_number,
+                "carrier": s.carrier_name,
+                "order_name": s.order_name,
+            }
+            for s in pending_entries
+        ]
+        return {
+            "description": (
+                "Shipments extracted by Stage-2 but deferred due to ParcelApp daily quota "
+                "exhaustion. They will be POSTed automatically once the quota resets."
+            ),
+            "pending_tracking_numbers": surfaced,
+        }

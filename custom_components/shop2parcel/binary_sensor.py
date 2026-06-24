@@ -17,6 +17,7 @@ from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -31,12 +32,17 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Shop2Parcel binary_sensor platform — single static entity.
+    """Set up Shop2Parcel binary_sensor platform — static entities.
 
     Pitfall 4: dict-shaped hass.data after Phase 5 — use ["coordinator"] key.
     """
     coordinator: Shop2ParcelCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities([HasActiveShipmentsBinarySensor(coordinator, entry)])
+    async_add_entities(
+        [
+            HasActiveShipmentsBinarySensor(coordinator, entry),
+            EmailProcessingActiveBinarySensor(coordinator, entry),
+        ]
+    )
 
 
 class HasActiveShipmentsBinarySensor(CoordinatorEntity[Shop2ParcelCoordinator], BinarySensorEntity):
@@ -67,3 +73,37 @@ class HasActiveShipmentsBinarySensor(CoordinatorEntity[Shop2ParcelCoordinator], 
         if self.coordinator.data is None:
             return False
         return len(self.coordinator.data) > 0
+
+
+class EmailProcessingActiveBinarySensor(
+    CoordinatorEntity[Shop2ParcelCoordinator], BinarySensorEntity
+):
+    """True while emails are actively being processed (M6A-01).
+
+    On when a poll is fetching/parsing emails OR the Stage-2 LLM queue still has
+    items waiting/draining. Off at rest.  Diagnostic-category so it groups with
+    the other diagnostic entities in the HA UI rather than appearing alongside
+    the shipment sensors.
+    """
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_name = "Email Processing Active"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_email_processing_active"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="Shop2Parcel",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """True while a poll is running OR the Stage-2 queue is non-empty."""
+        return self.coordinator.email_processing_active

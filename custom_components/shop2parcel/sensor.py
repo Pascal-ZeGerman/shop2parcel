@@ -39,6 +39,7 @@ from .diagnostic_sensor import (
     NewEmailsInspectedSensor,
     OllamaLatencySensor,
     OllamaParseQualitySensor,
+    PendingPostsSensor,
     Stage2ConsecutiveFailuresSensor,
     Stage2Sensor,
     TrackingNumbersFoundSensor,
@@ -86,6 +87,7 @@ async def async_setup_entry(
             Stage2ConsecutiveFailuresSensor(coordinator, entry),
             EmailsSentToLLMSensor(coordinator, entry),
             EmailsParsedByLLMSensor(coordinator, entry),
+            PendingPostsSensor(coordinator, entry),
         ]
     )
 
