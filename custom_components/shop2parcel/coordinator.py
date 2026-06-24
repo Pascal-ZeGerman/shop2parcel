@@ -68,6 +68,7 @@ from .const import (
     MAX_SUBMITTED_TRACKING_NUMBERS,
     STAGE2_NOTIFY_COOLDOWN_S,
     STAGE2_NOTIFY_THRESHOLD,
+    normalize_tracking_number,
     stage2_cap_notification_id,
     stage2_failing_notification_id,
 )
@@ -761,6 +762,113 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         except asyncio.CancelledError:
             _LOGGER.debug("Stage-2 worker cancelled — exiting cleanly")
             raise
+
+    async def _async_drain_pending_posts(self) -> None:
+        """Drain pending posts from prior quota-blocked extraction cycles.
+
+        Runs before each new extraction job to opportunistically flush the backlog
+        when quota/cap conditions allow. Respects MAX_STAGE2_POSTS_PER_POLL cap and
+        _quota_exhausted_until timestamp.
+
+        Guard order:
+          1. Empty _pending_posts → no-op.
+          2. debug_mode True → no-op (debug never accumulates _pending_posts; DBG-03).
+          3. Quota still exhausted → no-op.
+          Then: POSTs each pending item WITHOUT re-invoking the extractor (LD-05 / AC-3).
+
+        IMAP parity (D-07): this method lives on the base class; ImapCoordinator
+        inherits _async_stage2_worker and therefore this drain automatically — no
+        imap_coordinator.py changes needed.
+
+        Error handling mirrors _async_process_stage2_job:
+          - ParcelAppAuthError  → raise ConfigEntryAuthFailed
+          - ParcelAppQuotaError → set _quota_exhausted_until and BREAK (items remain)
+          - AlreadyAdded / InvalidTracking → treat as success (dedup write + remove)
+          - ParcelAppTransientError → continue (item stays for next poll — Pitfall 2)
+        """
+        if not self._pending_posts:
+            return
+        assert self.config_entry is not None
+        debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        if debug_mode:
+            return  # debug mode never accumulates _pending_posts; early exit is safe (Pitfall 1)
+        now = int(_time.time())
+        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+            return  # quota still exhausted; drain blocked until the window resets
+
+        parcel_client = ParcelAppClient(
+            session=async_get_clientsession(self.hass),
+            api_key=self.config_entry.data[CONF_API_KEY],
+        )
+
+        # Iterate a COPY so dict mutation during iteration is safe (RESEARCH constraint).
+        for storage_key, merged_shipment in list(self._pending_posts.items()):
+            # AC-4 / Pitfall 4: shared counter covers drain + new-extraction POSTs this poll.
+            if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
+                break  # cap reached; remaining items wait for next poll
+
+            normalized_tn = normalize_tracking_number(merged_shipment.tracking_number)
+            carrier_code = normalize_carrier(merged_shipment.carrier_name)
+
+            _LOGGER.debug(
+                "Stage-2 drain: POSTing deferred tn=%s carrier=%s to parcelapp",
+                normalized_tn,
+                merged_shipment.carrier_name,
+            )
+
+            try:
+                await parcel_client.async_add_delivery(
+                    tracking_number=merged_shipment.tracking_number,
+                    carrier_code=carrier_code,
+                    description=merged_shipment.order_name or merged_shipment.tracking_number,
+                )
+            except ParcelAppAuthError as err:
+                raise ConfigEntryAuthFailed("parcelapp.net auth error (drain)") from err
+            except ParcelAppQuotaError as err:
+                # Quota re-exhausted mid-drain; set the block and stop draining.
+                # Remaining items stay in _pending_posts for the next quota window.
+                self._quota_exhausted_until = (
+                    err.reset_at if err.reset_at is not None else _next_midnight_utc()
+                )
+                _LOGGER.warning(
+                    "Stage-2 drain: parcelapp quota hit mid-drain — deferring remaining "
+                    "pending items until quota resets"
+                )
+                break
+            except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):
+                # Treat as success for dedup purposes — fall through to bookkeeping below.
+                _LOGGER.debug(
+                    "Stage-2 drain: tn=%s already known to parcelapp (AlreadyAdded/InvalidTracking)",
+                    normalized_tn,
+                )
+
+            except ParcelAppTransientError as err:
+                # Leave item in _pending_posts for retry next poll (Pitfall 2).
+                _LOGGER.debug(
+                    "Stage-2 drain: transient error for tn=%s — item stays for retry: %s",
+                    normalized_tn,
+                    str(err)[:100],
+                )
+                continue
+
+            # Success or AlreadyAdded/InvalidTracking: bookkeeping (Pitfall 3: call
+            # _record_stage2_success on drain POSTs too — they are real POSTs).
+            self._stage2_posts_this_poll += 1  # Pitfall 4: shared counter
+            self._record_stage2_success()
+            # Write dedup so next poll does not retry this TN.
+            self._submitted_tracking_numbers[normalized_tn] = None
+            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+                self._submitted_tracking_numbers.popitem(last=False)
+            # Pitfall 2: remove ONLY after a successful POST (never before).
+            del self._pending_posts[storage_key]
+            # Pitfall 5: re-snapshot immediately before async_set_updated_data to avoid
+            # stale-base race (S2 bug pattern from Phase 18).
+            self._pending_shipments = {**(self.data or {}), storage_key: merged_shipment}
+            self.async_set_updated_data({**(self.data or {}), storage_key: merged_shipment})
+            _LOGGER.debug("Stage-2 drain: posted deferred tn=%s successfully", normalized_tn)
+
+        # Single save at end of drain loop — Pitfall 2 aligned (save covers all mutations above).
+        await self._async_save_store()
 
     async def _async_process_stage2_job(self, job: Stage2Job) -> None:
         """Process one Stage2Job: extract via Ollama, merge, POST to parcelapp, update state.
