@@ -151,9 +151,19 @@ class TrackingNumbersFoundSensor(DiagnosticSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
+        full_list = list(d.last_poll_found)
+        surfaced = [
+            {
+                "tracking_number": entry.get("tracking_number"),
+                "carrier": entry.get("carrier"),
+                "order_name": entry.get("order_name"),
+            }
+            for entry in full_list[-10:]
+        ]
         return {
             "description": "Total tracking numbers extracted from matched emails. One email can contain multiple tracking numbers.",
-            "last_poll_found": list(d.last_poll_found),
+            "last_poll_found": surfaced,
+            "last_poll_found_count": len(full_list),
         }
 
 
