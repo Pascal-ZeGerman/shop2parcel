@@ -3,18 +3,18 @@ gsd_state_version: 1.0
 milestone: v1.4
 milestone_name: Stage-2 Reliability
 current_phase: 23
-current_phase_name: Decouple Stage-2 LLM Extraction from parcelapp POST + debug POST suppression
-status: planning
-stopped_at: Phase 23 created — entering discuss/plan flow (decouple LLM from POST, fix debug dry-run)
-last_updated: "2026-06-24T00:00:00.000Z"
+status: complete
+stopped_at: "Phase 23 complete on branch feat/v1.4-p23-decouple-stage2-post (11 commits). Stage-2 extract/POST decoupled; debug suppresses POST; quota-deferred items drain without re-extract; WARNING throttled. Gate green (682 pass, ruff/mypy clean); goal-backward VERIFICATION passed 9/9. Ready for deploy to live HA + PR/merge."
+last_updated: "2026-06-24T16:23:17.181Z"
 last_activity: 2026-06-24
-last_activity_desc: opened Phase 23 (v1.4) after live root-cause of Stage-2 quota-flood (debug_mode + coupled POST)
+last_activity_desc: Phase 23 complete
 progress:
-  total_phases: 10
-  completed_phases: 8
-  total_plans: 23
-  completed_plans: 29
-  percent: 80
+  total_phases: 1
+  completed_phases: 1
+  total_plans: 4
+  completed_plans: 4
+  percent: 100
+current_phase_name: Decouple Stage-2 LLM Extraction from parcelapp POST + debug POST suppression
 ---
 
 # Project State
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-06-05)
 
 ## Current Position
 
-Phase: 23 — Decouple Stage-2 LLM Extraction from parcelapp POST + debug POST suppression
-Plan: Not yet planned (discuss → plan → execute)
+Phase: 23
+Plan: Not started
 Status: v1.4 opened. Phase 23 is bug-fix-driven: live root-cause found debug_mode + POST-coupled-to-quota causing a quota-skip flood with 0 LLM parses.
-Last activity: 2026-06-24 — Created Phase 23; reconciled v1.4 roadmap numbering (backlog ideas bumped to 24/25).
+Last activity: 2026-06-24 — Phase 23 complete
 
 ## Accumulated Context
 
@@ -43,7 +43,7 @@ Last activity: 2026-06-24 — Created Phase 23; reconciled v1.4 roadmap numberin
 
 **Velocity:**
 
-- Total plans completed: 55
+- Total plans completed: 59
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -69,6 +69,7 @@ Last activity: 2026-06-24 — Created Phase 23; reconciled v1.4 roadmap numberin
 | 20 | 3 | - | - |
 | 22 | 2 | - | - |
 | 21 | 3 | - | - |
+| 23 | 4 | - | - |
 
 **Recent Trend:**
 
@@ -117,6 +118,9 @@ Recent decisions affecting current work:
 - v1.3 Phase 15-03: OllamaClient 2-pass parse pipeline shipped (Pass 1 = normalize + json.loads; Pass 2 = fence-strip + normalize + json.loads on Pass 1 JSONDecodeError only). Missing-`{` from normalize is a hard fail (no Pass 2 retry). NFKC preserves Cyrillic A — Phase 20 carrier-regex pre-POST validation will catch any homoglyph slips on real tracking numbers.
 - v1.3 architecture lock: in-memory queue only (HA-restart-lossy by design); full-window rescan re-discovers un-dedup'd emails — no STORAGE_VERSION bump
 - v1.3 architecture lock: single long-lived worker per coordinator; multi-worker rejected (Ollama serializes per-model + ParcelApp 20/day quota)
+- Phase 23 Wave 2: Quota guard moved post-extraction (LD-03) — Ollama always runs regardless of parcelapp quota; merged_shipment persisted to _pending_posts for drain
+- Phase 23 Wave 2: Debug dry-run branch added after extractor, before quota-defer — no POST, no writes in debug mode (LD-02/DBG-03)
+- Phase 23 Wave 2: ParcelAppQuotaError handler extended to persist merged_shipment to _pending_posts (Pitfall 2 fix — no item loss on 429 during POST)
 - v1.3 architecture lock: drop-newest backpressure on QueueFull (drop-oldest rejected — wastes head-of-queue work, breaks FIFO activity-log ordering)
 - v1.3 quota-burn mitigation set is INSEPARABLE: per-field merge guards + carrier-regex pre-POST validation + `temperature:0` + `MAX_STAGE2_POSTS_PER_POLL` cap + scoped skip-dedup. All five land in Phase 20.
 - v1.3 Phase 15-04: `live_ollama` pytest marker registered in `pyproject.toml`; single opt-in smoke test `tests/api/test_ollama_client_live.py` gated by `OLLAMA_URL` env var (D-10/D-11/D-12/D-13). CI silently skips. Phase 15 complete: 384 tests passing, 1 skipped (the live smoke).
@@ -210,7 +214,7 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-Last session: 2026-06-18T16:30:00.000Z
+Last session: 2026-06-24T16:13:25.644Z
 Stopped at: PR #20 CI all green — waiting for UAT in live HA before cutting v1.3.0 final tag.
 Next action: Run UAT on HA instance, then cut v1.3.0 final tag and merge PR #20.
 
