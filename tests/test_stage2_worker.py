@@ -1161,7 +1161,9 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=MagicMock(latency_ms=100.0, passes_used=1)
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
@@ -1268,7 +1270,9 @@ async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entr
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=MagicMock(latency_ms=100.0, passes_used=1)
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
@@ -1801,7 +1805,9 @@ async def test_fail_04_parcelapp_transient_error_does_not_count_toward_threshold
         await coord._async_load_store()
         # Wire extractor directly — do NOT start the background worker to avoid races.
         mock_extractor = MagicMock()
-        mock_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor.async_extract = AsyncMock(
+            return_value=MagicMock(latency_ms=100.0, passes_used=1)
+        )
         coord._extractor = mock_extractor
 
         for i in range(5):
@@ -1845,7 +1851,9 @@ async def test_fail_04_parcelapp_already_added_does_not_count_toward_threshold(
         await coord._async_load_store()
         # Wire extractor directly — do NOT start the background worker to avoid races.
         mock_extractor = MagicMock()
-        mock_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor.async_extract = AsyncMock(
+            return_value=MagicMock(latency_ms=100.0, passes_used=1)
+        )
         coord._extractor = mock_extractor
 
         for i in range(5):

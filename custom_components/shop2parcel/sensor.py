@@ -32,9 +32,14 @@ from .coordinator import Shop2ParcelCoordinator
 from .diagnostic_sensor import (
     ActivityLogSensor,
     EmailsMatchedSensor,
+    EmailsParsedByLLMSensor,
     EmailsScannedSensor,
+    EmailsSentToLLMSensor,
     KeywordHitsSensor,
     NewEmailsInspectedSensor,
+    OllamaLatencySensor,
+    OllamaParseQualitySensor,
+    Stage2ConsecutiveFailuresSensor,
     Stage2Sensor,
     TrackingNumbersFoundSensor,
 )
@@ -66,6 +71,7 @@ async def async_setup_entry(
     # Phase 11 (ACTLOG-04): ActivityLogSensor added as 6th diagnostic sensor.
     # Phase 21 (DIAG-01): Stage2Sensor added as 7th diagnostic sensor — unconditionally
     #   (no stage2_enabled gate: Pitfall 6). Stage-1-only users see zero values.
+    # LLM performance sensors registered unconditionally; Stage-1-only users see zero/None.
     async_add_entities(
         [
             EmailsScannedSensor(coordinator, entry),
@@ -75,6 +81,11 @@ async def async_setup_entry(
             KeywordHitsSensor(coordinator, entry),
             ActivityLogSensor(coordinator, entry),
             Stage2Sensor(coordinator, entry),
+            OllamaLatencySensor(coordinator, entry),
+            OllamaParseQualitySensor(coordinator, entry),
+            Stage2ConsecutiveFailuresSensor(coordinator, entry),
+            EmailsSentToLLMSensor(coordinator, entry),
+            EmailsParsedByLLMSensor(coordinator, entry),
         ]
     )
 

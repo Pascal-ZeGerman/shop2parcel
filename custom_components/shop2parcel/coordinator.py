@@ -270,6 +270,27 @@ class PollStats:
     stage2_cap_skip_total: int = 0
     stage2_already_added_total: int = 0
     stage2_transient_error_total: int = 0
+    # LLM performance counters (populated by _async_process_stage2_job on each successful
+    # extractor call; used by OllamaLatencySensor and OllamaParseQualitySensor).
+    stage2_llm_attempts_total: int = 0
+    stage2_llm_calls_total: int = 0
+    stage2_llm_latency_ms_sum: float = 0.0
+    stage2_llm_latency_ms_last: float | None = None
+    stage2_llm_latency_ms_min: float | None = None
+    stage2_llm_latency_ms_max: float | None = None
+    stage2_fence_retry_total: int = 0
+
+    def record_llm_call(self, latency_ms: float, *, fence_retry: bool) -> None:
+        """Accumulate one successful LLM call into the latency and retry counters."""
+        self.stage2_llm_calls_total += 1
+        self.stage2_llm_latency_ms_sum += latency_ms
+        self.stage2_llm_latency_ms_last = latency_ms
+        if self.stage2_llm_latency_ms_min is None or latency_ms < self.stage2_llm_latency_ms_min:
+            self.stage2_llm_latency_ms_min = latency_ms
+        if self.stage2_llm_latency_ms_max is None or latency_ms > self.stage2_llm_latency_ms_max:
+            self.stage2_llm_latency_ms_max = latency_ms
+        if fence_retry:
+            self.stage2_fence_retry_total += 1
 
 
 class Shop2ParcelStore(Store):
@@ -511,6 +532,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if self._stage2_queue is None:
             return 0
         return self._stage2_queue.qsize()
+
+    @property
+    def stage2_consecutive_failures(self) -> int:
+        """Current run of back-to-back Stage-2 failures; resets to 0 on any success."""
+        return self._stage2_consecutive_failures
 
     def _emit_scan_event(
         self,
@@ -802,6 +828,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         merged_shipment = job.shipment
 
         if self._extractor is not None:
+            self._diagnostics.stage2_llm_attempts_total += 1
             try:
                 stage2_result = await self._extractor.async_extract(job.html_body, job.shipment)
             except (OllamaTransientError, OllamaSchemaError) as err:  # fmt: skip
@@ -811,6 +838,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._record_stage2_failure(job, err)
                 self._stage2_enqueued_keys.discard(normalized_tn)
                 return
+
+            self._diagnostics.record_llm_call(
+                stage2_result.latency_ms,
+                fence_retry=stage2_result.passes_used == 2,
+            )
 
             # MRG-02: merge Stage-2 result into Stage-1 shipment.
             merged_shipment, conflicts = merge_llm_authoritative(job.shipment, stage2_result)
