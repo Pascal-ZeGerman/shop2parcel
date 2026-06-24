@@ -9,6 +9,7 @@ These tests assume Plan 03 has landed:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.helpers import device_registry as dr
@@ -156,7 +157,12 @@ async def test_emails_scanned_state_after_poll(hass, mock_config_entry):
 
 
 async def test_tracking_numbers_found_attributes_after_poll(hass, mock_config_entry):
-    """DIAG-09: tracking_numbers_found state and last_poll_found attribute after a poll."""
+    """DIAG-09: tracking_numbers_found state and last_poll_found attribute after a poll.
+
+    Compact projection: each surfaced entry has exactly {tracking_number, carrier,
+    order_name}. message_id is NOT surfaced (dropped by the presentation-layer trim).
+    last_poll_found_count holds the true total.
+    """
     coordinator = await _setup_integration(hass, mock_config_entry, with_message=True)
     assert coordinator._diagnostics.tracking_numbers_found_total == 1
     registry = er.async_get(hass)
@@ -170,8 +176,78 @@ async def test_tracking_numbers_found_attributes_after_poll(hass, mock_config_en
     last_poll_found = state.attributes["last_poll_found"]
     assert isinstance(last_poll_found, list)
     assert len(last_poll_found) == 1
-    assert last_poll_found[0]["message_id"] == "msg1"
+    # Compact triple — message_id must NOT be present
+    entry_keys = set(last_poll_found[0].keys())
+    assert entry_keys == {"tracking_number", "carrier", "order_name"}, (
+        f"unexpected keys in surfaced entry: {entry_keys}"
+    )
     assert last_poll_found[0]["tracking_number"] == "1Z999AA10123456784"
+    assert "message_id" not in last_poll_found[0]
+    # True total count is always present
+    assert state.attributes["last_poll_found_count"] == 1
+
+
+async def test_tracking_numbers_found_attributes_bounded_payload(hass, mock_config_entry):
+    """TrackingNumbersFoundSensor.extra_state_attributes is bounded even with 300 fat entries.
+
+    Verifies:
+    - Surfaced list is capped at 10 (not 300).
+    - Every surfaced entry's key set is exactly {tracking_number, carrier, order_name}.
+    - last_poll_found_count reflects the true total (300).
+    - Serialized attributes fit well under the HA recorder 16384-byte limit.
+    """
+    coordinator = await _setup_integration(hass, mock_config_entry)
+
+    # Build 300 fat entries that mirror the real coordinator append shape
+    # (gmail_coordinator.py line 366): tracking_number, carrier, order_name,
+    # message_id, candidates (long list), and spread email_meta keys.
+    fat_candidates = [f"CANDIDATE_TOKEN_{j:04d}_ABCDEFGHIJKLMNOP" for j in range(50)]
+    fat_entries = [
+        {
+            "tracking_number": f"1Z999AA1012345{i:04d}",
+            "carrier": "UPS",
+            "order_name": f"#ORDER{i}",
+            "message_id": f"msg{i}",
+            "candidates": fat_candidates,
+            "subject": f"Your order #ORDER{i} has shipped with tracking 1Z999AA1012345{i:04d}",
+            "from": "no-reply@shopify.com",
+        }
+        for i in range(300)
+    ]
+    coordinator._diagnostics.last_poll_found = fat_entries
+
+    # Refresh entity state
+    coordinator.async_set_updated_data(coordinator.data or {})
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_tracking_numbers_found"
+    entity_entry = next(e for e in entries if e.unique_id == uid)
+    state = hass.states.get(entity_entry.entity_id)
+    assert state is not None
+
+    last_poll_found = state.attributes["last_poll_found"]
+
+    # Must be capped at 10 — not 300
+    assert len(last_poll_found) == 10, (
+        f"expected 10 surfaced entries (capped), got {len(last_poll_found)}"
+    )
+
+    # Every surfaced entry must have exactly the compact triple
+    for surfaced in last_poll_found:
+        assert set(surfaced.keys()) == {"tracking_number", "carrier", "order_name"}, (
+            f"unexpected keys in surfaced entry: {set(surfaced.keys())}"
+        )
+
+    # True total preserved
+    assert state.attributes["last_poll_found_count"] == 300
+
+    # Serialized payload must be well under the HA recorder 16384-byte limit
+    payload_bytes = len(json.dumps(state.attributes).encode("utf-8"))
+    assert payload_bytes < 16384, f"attributes exceed 16384 bytes: {payload_bytes}"
+    # Tighter sanity bound: 10 compact entries should be tiny
+    assert payload_bytes < 8000, f"attributes unexpectedly large: {payload_bytes}"
 
 
 async def test_new_emails_inspected_sensor_registered(hass, mock_config_entry):
