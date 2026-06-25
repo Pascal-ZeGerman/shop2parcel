@@ -18,13 +18,17 @@ Responsibilities:
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 # Phase 5 (CONTEXT.md D-09): platforms now populated.
 # Phase 7 (D-13): diagnostic sensors are co-registered under the "sensor" platform
@@ -34,6 +38,100 @@ from .const import DOMAIN
 # longer needed; dedup is now tracking-number-based (not message-ID-based) and
 # persisted in HA Store, so users never need to manually clear a cache.
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
+
+# Phase 26 Plan 02 (P26-REG-01..03): allowlist of unique_id suffixes that belong
+# to known-good entities.  Any registry entry for this config entry whose suffix
+# is NOT in this set is treated as an orphan from a prior version and removed
+# during async_setup_entry before platform setup runs.
+#
+# Diagnostic sensor suffixes (13) — verbatim from diagnostic_sensor.py
+# _unique_id_suffix class attributes:
+#   EmailsScannedSensor         → emails_scanned
+#   NewEmailsInspectedSensor    → new_emails_inspected
+#   EmailsMatchedSensor         → emails_matched
+#   TrackingNumbersFoundSensor  → tracking_numbers_found
+#   KeywordHitsSensor           → keyword_hits
+#   ActivityLogSensor           → activity_log
+#   Stage2Sensor                → stage2_queue
+#   OllamaLatencySensor         → ollama_latency
+#   OllamaParseQualitySensor    → ollama_parse_retries
+#   Stage2ConsecutiveFailuresSensor → stage2_consecutive_failures
+#   EmailsSentToLLMSensor       → emails_sent_to_llm
+#   EmailsParsedByLLMSensor     → emails_parsed_by_llm
+#   PendingPostsSensor          → pending_parcelapp_posts
+#
+# Binary sensor suffix (1) — from binary_sensor.py:
+#   EmailProcessingActiveBinarySensor → email_processing_active
+#
+# New operational suffixes (4) — introduced in Phase 26 Plan 03:
+#   ShipmentsForwardedSensor    → shipments_forwarded
+#   LastForwardedSensor         → last_forwarded
+#   ParcelAppQuotaSensor        → parcelapp_quota
+#   ProblemBinarySensor         → problem
+#
+# NOTE: has_active_shipments is intentionally absent — it is an orphan to sweep.
+# NOTE: per-message suffixes (e.g. msgABC123) are not in the allowlist — orphans.
+KNOWN_GOOD_UID_SUFFIXES: frozenset[str] = frozenset(
+    {
+        # 13 diagnostic sensor suffixes
+        "emails_scanned",
+        "new_emails_inspected",
+        "emails_matched",
+        "tracking_numbers_found",
+        "keyword_hits",
+        "activity_log",
+        "stage2_queue",
+        "ollama_latency",
+        "ollama_parse_retries",
+        "stage2_consecutive_failures",
+        "emails_sent_to_llm",
+        "emails_parsed_by_llm",
+        "pending_parcelapp_posts",
+        # 1 binary sensor suffix
+        "email_processing_active",
+        # 4 new operational suffixes (Phase 26 Plan 03)
+        "shipments_forwarded",
+        "last_forwarded",
+        "parcelapp_quota",
+        "problem",
+    }
+)
+
+
+def _sweep_orphaned_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove orphaned entity registry entries left by prior integration versions.
+
+    Phase 26 migration (P26-REG-01..03): HA does NOT auto-remove entities when
+    their producing code disappears (RESEARCH.md primary challenge).  This sweep
+    runs BEFORE async_forward_entry_setups (RESEARCH.md Pitfall 2) so the
+    registry is clean before new entities register.
+
+    Security domain (T-26-03): allowlist (positive) approach — only entries with
+    a non-allowlisted suffix AND the correct {DOMAIN}_{entry_id}_ prefix are
+    removed.  Entries outside this config entry / prefix are never touched.
+
+    Two-pass pattern (T-26-04): collect entity_ids first, then remove — avoids
+    mutating the iterable while iterating (RESEARCH.md anti-pattern).
+    """
+    registry = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    prefix = f"{DOMAIN}_{entry.entry_id}_"
+    to_remove: list[str] = []
+    for reg_entry in entries:
+        uid = reg_entry.unique_id
+        if not uid.startswith(prefix):
+            # Not ours — leave untouched (cross-entry safety)
+            continue
+        suffix = uid[len(prefix) :]
+        if suffix not in KNOWN_GOOD_UID_SUFFIXES:
+            to_remove.append(reg_entry.entity_id)
+            _LOGGER.info(
+                "Phase 26 migration: removing orphaned entity %s (uid=%s)",
+                reg_entry.entity_id,
+                uid,
+            )
+    for entity_id in to_remove:
+        registry.async_remove(entity_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -64,6 +162,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         coordinator = GmailCoordinator(hass, entry)
     await coordinator._async_load_store()
+    # Phase 26 Plan 02 (P26-REG-01..03): sweep orphaned entity registry entries
+    # (shipment_* per-message uids + has_active_shipments) left by prior versions.
+    # MUST run after _async_load_store (store hydrated) and BEFORE
+    # async_forward_entry_setups (RESEARCH.md Pitfall 2 — sweep before platform
+    # setup so new entities register into a clean registry).
+    _sweep_orphaned_entities(hass, entry)
     # Phase 17 D-05: derive stage2_enabled before first poll.
     # bool() coerces any non-empty URL string to True without exposing the URL value.
     # Empty string fallback prevents AttributeError on v1.2 entries with no ollama_url key.
