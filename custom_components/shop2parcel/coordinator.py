@@ -932,12 +932,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 merged_shipment.carrier_name,
             )
 
+            # Phase 26 RESEARCH Pitfall 6: posted_2xx flag distinguishes genuine 2xx from
+            # AlreadyAdded/InvalidTracking fall-through. _record_forward ONLY fires on 2xx.
+            posted_2xx = False
             try:
                 await parcel_client.async_add_delivery(
                     tracking_number=merged_shipment.tracking_number,
                     carrier_code=carrier_code,
                     description=merged_shipment.order_name or merged_shipment.tracking_number,
                 )
+                posted_2xx = True  # genuine 2xx response — gate for _record_forward
             except ParcelAppAuthError as err:
                 raise ConfigEntryAuthFailed("parcelapp.net auth error (drain)") from err
             except ParcelAppQuotaError as err:
@@ -953,6 +957,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 break
             except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
                 # Treat as success for dedup purposes — fall through to bookkeeping below.
+                # posted_2xx stays False: AlreadyAdded/InvalidTracking do NOT consume quota
+                # and do NOT represent forwarding a new shipment (RESEARCH Pitfall 6 / T-26-02).
                 _LOGGER.debug(
                     "Stage-2 drain: tn=%s already known to parcelapp (AlreadyAdded/InvalidTracking)",
                     normalized_tn,
@@ -971,6 +977,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # _record_stage2_success on drain POSTs too — they are real POSTs).
             self._stage2_posts_this_poll += 1  # Pitfall 4: shared counter
             self._record_stage2_success()
+            if posted_2xx:
+                self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
             # Write dedup so next poll does not retry this TN.
             self._submitted_tracking_numbers[normalized_tn] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
@@ -1189,6 +1197,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Success path (mirrors gmail_coordinator.py lines 513-526).
         self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
         self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
+        self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
         self._submitted_tracking_numbers[normalized_tn] = None
         if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
             self._submitted_tracking_numbers.popitem(last=False)

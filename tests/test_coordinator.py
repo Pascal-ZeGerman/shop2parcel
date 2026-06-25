@@ -3969,7 +3969,9 @@ async def test_used_today_resets_on_date_rollover(hass, mock_config_entry):
 
     assert coord._used_today == 0, "used_today must reset to 0 on stale date"
     # _used_today_date must now match today's UTC date
-    from datetime import UTC, datetime as _dt
+    from datetime import UTC
+    from datetime import datetime as _dt
+
     assert coord._used_today_date == _dt.now(UTC).strftime("%Y-%m-%d"), (
         "_used_today_date must be updated to today's UTC date after reset"
     )
@@ -3977,7 +3979,9 @@ async def test_used_today_resets_on_date_rollover(hass, mock_config_entry):
     # Second call same day — must NOT reset (stays at current value)
     coord._used_today = 2
     coord._maybe_reset_used_today()
-    assert coord._used_today == 2, "_maybe_reset_used_today must be no-op when date has not rolled over"
+    assert coord._used_today == 2, (
+        "_maybe_reset_used_today must be no-op when date has not rolled over"
+    )
 
 
 async def test_record_forward_skips_already_added(hass, mock_config_entry):
@@ -4041,25 +4045,25 @@ async def test_total_forwarded_increments_on_gmail_post(hass, mock_config_entry)
         mock_gmail_cls.return_value.async_get_message = AsyncMock(
             return_value={"internalDate": "1700000000000", "payload": {}}
         )
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
-            _make_shipment("msg1")
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
         # First poll: async_add_delivery succeeds (2xx)
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         await coord._async_update_data()
 
-    assert coord.total_forwarded == 1, (
-        "total_forwarded must be 1 after one successful gmail POST"
-    )
+    assert coord.total_forwarded == 1, "total_forwarded must be 1 after one successful gmail POST"
     assert coord.used_today == 1, "used_today must be 1 after one successful gmail POST"
-    assert coord.last_forwarded_ts is not None, "last_forwarded_ts must be set after successful POST"
+    assert coord.last_forwarded_ts is not None, (
+        "last_forwarded_ts must be set after successful POST"
+    )
 
     # Second poll: same TN now raises AlreadyAdded — counter must NOT increment
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls2,
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls2,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
+        ) as mock_parcel_cls2,
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls2,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2,
         patch(
@@ -4097,16 +4101,13 @@ async def test_total_forwarded_increments_on_gmail_post(hass, mock_config_entry)
         mock_parcel_cls2.return_value.async_add_delivery = AsyncMock(
             side_effect=ParcelAppAlreadyAddedError("already added")
         )
-        # Attach to the same coordinator (keeps counter state)
-        coord._email_client = mock_gmail_cls2.return_value
-        # Rebuild with fresh patches pointing at the same coord
         coord2 = GmailCoordinator(hass, mock_config_entry)
-        # Copy counter state to new coordinator instance
+        await coord2._async_load_store()
+        # Copy counter state to new coordinator instance AFTER load (load resets to 0)
         coord2._total_forwarded = coord._total_forwarded
         coord2._used_today = coord._used_today
         coord2._used_today_date = coord._used_today_date
         coord2._last_forwarded_ts = coord._last_forwarded_ts
-        await coord2._async_load_store()
         await coord2._async_update_data()
 
     assert coord2.total_forwarded == 1, (
@@ -4144,9 +4145,7 @@ async def test_total_forwarded_increments_on_imap_post(hass, mock_imap_config_en
         await coord._async_load_store()
         await coord._async_update_data()
 
-    assert coord.total_forwarded == 1, (
-        "total_forwarded must be 1 after one successful IMAP POST"
-    )
+    assert coord.total_forwarded == 1, "total_forwarded must be 1 after one successful IMAP POST"
     assert coord.used_today == 1, "used_today must be 1 after one successful IMAP POST"
     assert coord.last_forwarded_ts is not None
 
@@ -4172,18 +4171,20 @@ async def test_total_forwarded_increments_on_imap_post(hass, mock_imap_config_en
         mock_store_cls2.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls2.return_value.async_delay_save = MagicMock()
         mock_imap_cls2.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg2])
-        mock_parser_cls2.return_value.parse.return_value = _make_parse_result(already_added_shipment)
+        mock_parser_cls2.return_value.parse.return_value = _make_parse_result(
+            already_added_shipment
+        )
         mock_parcel_cls2.return_value.async_add_delivery = AsyncMock(
             side_effect=ParcelAppAlreadyAddedError("already added")
         )
 
         coord2 = ImapCoordinator(hass, mock_imap_config_entry)
-        # Copy counter state to new coordinator
+        await coord2._async_load_store()
+        # Copy counter state to new coordinator AFTER load (load resets to 0)
         coord2._total_forwarded = coord._total_forwarded
         coord2._used_today = coord._used_today
         coord2._used_today_date = coord._used_today_date
         coord2._last_forwarded_ts = coord._last_forwarded_ts
-        await coord2._async_load_store()
         await coord2._async_update_data()
 
     assert coord2.total_forwarded == 1, (
@@ -4191,15 +4192,13 @@ async def test_total_forwarded_increments_on_imap_post(hass, mock_imap_config_en
     )
 
 
-async def test_total_forwarded_increments_on_drain_post(hass, mock_stage2_config_entry):
+async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry):
     """P26-CNT-01 (site 4): drain 2xx success increments total_forwarded.
 
     AlreadyAdded fall-through in drain must NOT increment (2xx-gated by posted_2xx flag).
     Wave 0 RED: fails until _record_forward is called with 2xx gate in _async_drain_pending_posts.
     """
-    from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
-
-    mock_stage2_config_entry.add_to_hass(hass)
+    mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -4216,7 +4215,7 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_stage2_config
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
 
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
 
         # Seed one pending post
@@ -4233,9 +4232,7 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_stage2_config
 
         await coord._async_drain_pending_posts()
 
-    assert coord.total_forwarded == 1, (
-        "total_forwarded must be 1 after one successful drain POST"
-    )
+    assert coord.total_forwarded == 1, "total_forwarded must be 1 after one successful drain POST"
     assert coord.last_forwarded_ts is not None, "last_forwarded_ts must be set after drain POST"
 
     # Now test AlreadyAdded in drain: counter must NOT increment
@@ -4255,13 +4252,13 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_stage2_config
         mock_store_cls2.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls2.return_value.async_delay_save = MagicMock()
 
-        coord3 = GmailCoordinator(hass, mock_stage2_config_entry)
-        # Copy counter state
+        coord3 = GmailCoordinator(hass, mock_config_entry)
+        await coord3._async_load_store()
+        # Copy counter state AFTER load (load resets to 0)
         coord3._total_forwarded = coord._total_forwarded
         coord3._used_today = coord._used_today
         coord3._used_today_date = coord._used_today_date
         coord3._last_forwarded_ts = coord._last_forwarded_ts
-        await coord3._async_load_store()
 
         already_added_drain = ShipmentData(
             tracking_number="DRAIN_ALREADY_002",

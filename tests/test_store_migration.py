@@ -1020,9 +1020,7 @@ async def test_phase26_counters_persist_across_restart(
     assert captured_payload.get("last_forwarded_ts") == 1700000000, (
         "_async_save_store must persist last_forwarded_ts"
     )
-    assert captured_payload.get("used_today") == 3, (
-        "_async_save_store must persist used_today"
-    )
+    assert captured_payload.get("used_today") == 3, "_async_save_store must persist used_today"
     assert captured_payload.get("used_today_date") == "2026-06-24", (
         "_async_save_store must persist used_today_date"
     )

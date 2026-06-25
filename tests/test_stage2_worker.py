@@ -3080,8 +3080,8 @@ async def test_total_forwarded_increments_on_stage2_post(hass, mock_stage2_confi
 
     Wave 0 RED: fails until _record_forward() is called in _async_process_stage2_job success path.
     """
-    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError
     from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -3096,7 +3096,6 @@ async def test_total_forwarded_increments_on_stage2_post(hass, mock_stage2_confi
         ),
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
@@ -3104,30 +3103,27 @@ async def test_total_forwarded_increments_on_stage2_post(hass, mock_stage2_confi
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
 
-        # Set up extractor mock to return a valid shipment
+        # Set up extractor mock to return a Stage2Result (coordinator reads latency_ms/passes_used)
         stage2_shipment = _make_shipment("msg-stage2-1")
-        stage2_shipment_updated = ShipmentData(
-            tracking_number="STAGE2_TN_001",
-            carrier_name="UPS",
-            order_name="#9901",
-            message_id="msg-stage2-1",
-            email_date=1700000010,
+        stage2_result = Stage2Result(
+            locked={"tracking_number": "STAGE2_TN_001", "carrier_name": "UPS"},
+            custom={},
+            passes_used=1,
+            latency_ms=12.0,
         )
         mock_extractor = MagicMock()
-        mock_extractor.async_extract = AsyncMock(return_value=stage2_shipment_updated)
+        mock_extractor.async_extract = AsyncMock(return_value=stage2_result)
         coord._extractor = mock_extractor
 
         # async_add_delivery succeeds (2xx)
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         job = _make_job(normalized_tn="STAGE2_TN_001")
-        # Set up job with raw shipment in coordinator.data
+        # Set up coordinator.data so merge_llm_authoritative has Stage-1 shipment to merge
         coord.async_set_updated_data({"msg-stage2-1": stage2_shipment})
 
         await coord._async_process_stage2_job(job)
 
-    assert coord.total_forwarded == 1, (
-        "total_forwarded must be 1 after one successful Stage-2 POST"
-    )
+    assert coord.total_forwarded == 1, "total_forwarded must be 1 after one successful Stage-2 POST"
     assert coord.used_today == 1, "used_today must be 1 after one successful Stage-2 POST"
     assert coord.last_forwarded_ts is not None, "last_forwarded_ts must be set after Stage-2 POST"
