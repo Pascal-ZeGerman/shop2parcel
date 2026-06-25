@@ -927,6 +927,7 @@ async def test_cleanup_entity_registry_noop_for_phase26(hass, mock_config_entry)
         )
 
         from homeassistant.helpers import entity_registry as er
+
         registry = er.async_get(hass)
         with patch.object(registry, "async_remove") as mock_remove:
             await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))

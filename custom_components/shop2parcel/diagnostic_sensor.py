@@ -425,18 +425,20 @@ class PendingPostsSensor(DiagnosticSensor):
 
 # Single source of truth for all diagnostic sensor uid suffixes.
 # __init__.py imports this to build KNOWN_GOOD_UID_SUFFIXES without duplication.
-DIAGNOSTIC_SENSOR_UID_SUFFIXES: frozenset[str] = frozenset({
-    EmailsScannedSensor._unique_id_suffix,
-    NewEmailsInspectedSensor._unique_id_suffix,
-    EmailsMatchedSensor._unique_id_suffix,
-    TrackingNumbersFoundSensor._unique_id_suffix,
-    KeywordHitsSensor._unique_id_suffix,
-    ActivityLogSensor._unique_id_suffix,
-    Stage2Sensor._unique_id_suffix,
-    OllamaLatencySensor._unique_id_suffix,
-    OllamaParseQualitySensor._unique_id_suffix,
-    Stage2ConsecutiveFailuresSensor._unique_id_suffix,
-    EmailsSentToLLMSensor._unique_id_suffix,
-    EmailsParsedByLLMSensor._unique_id_suffix,
-    PendingPostsSensor._unique_id_suffix,
-})
+DIAGNOSTIC_SENSOR_UID_SUFFIXES: frozenset[str] = frozenset(
+    {
+        EmailsScannedSensor._unique_id_suffix,
+        NewEmailsInspectedSensor._unique_id_suffix,
+        EmailsMatchedSensor._unique_id_suffix,
+        TrackingNumbersFoundSensor._unique_id_suffix,
+        KeywordHitsSensor._unique_id_suffix,
+        ActivityLogSensor._unique_id_suffix,
+        Stage2Sensor._unique_id_suffix,
+        OllamaLatencySensor._unique_id_suffix,
+        OllamaParseQualitySensor._unique_id_suffix,
+        Stage2ConsecutiveFailuresSensor._unique_id_suffix,
+        EmailsSentToLLMSensor._unique_id_suffix,
+        EmailsParsedByLLMSensor._unique_id_suffix,
+        PendingPostsSensor._unique_id_suffix,
+    }
+)
