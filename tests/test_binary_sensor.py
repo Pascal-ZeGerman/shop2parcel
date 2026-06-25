@@ -85,6 +85,34 @@ async def test_problem_sensor_on_quota_exhausted(hass, mock_config_entry):
     assert sensor.is_on is False
 
 
+async def test_problem_sensor_on_pending_posts_backlog(hass, mock_config_entry):
+    """P26-ENT-04 (finding 1): ProblemBinarySensor.is_on True when a pending-posts
+    backlog exists, even with 0 failures and quota not exhausted.
+
+    Regression: is_on previously implemented only 2 of the 3 documented conditions
+    (failure-streak, quota), silently omitting pending_posts_depth > 0 — so a stuck
+    un-forwarded backlog read as healthy (Problem: off).
+    """
+    from custom_components.shop2parcel.binary_sensor import ProblemBinarySensor
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    sensor = ProblemBinarySensor(coordinator, mock_config_entry)
+
+    # No failures, quota healthy, but a quota-deferred shipment is stuck pending.
+    coordinator._stage2_consecutive_failures = 0
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_posts = {"msg1": _make_shipment("msg1", "1Z-PENDING")}
+    assert coordinator.pending_posts_depth == 1
+    assert sensor.is_on is True, (
+        "Problem sensor must be ON when an un-forwarded pending-posts backlog exists "
+        "(3rd documented condition: pending_posts_depth > 0)."
+    )
+
+    # Drain the backlog → back to healthy.
+    coordinator._pending_posts = {}
+    assert sensor.is_on is False
+
+
 async def test_has_active_shipments_not_registered(hass, mock_config_entry):
     """P26-REMOVE-02: No entity with suffix 'has_active_shipments' after setup.
     The 'problem' and 'email_processing_active' binary sensors must exist.
