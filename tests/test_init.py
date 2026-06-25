@@ -374,3 +374,163 @@ async def test_stage2_v12_entry_no_ollama_url_loads_without_exception(hass, mock
         # Must not raise
         result = await hass.config_entries.async_setup(mock_config_entry.entry_id)
     assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 26 Plan 02: Migration sweep tests (P26-REG-01..03)
+# ---------------------------------------------------------------------------
+
+
+async def test_migration_sweep_removes_shipment_entities(hass, mock_config_entry):
+    """P26-REG-01: Orphaned shipment_* entities are removed from registry during setup.
+
+    Pre-seed an entity with a per-message uid (shop2parcel_{entry_id}_msgABC123) under
+    the config entry. After async_setup_entry, that entity must no longer exist in the
+    entity registry — the _sweep_orphaned_entities migration removed it.
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    mock_config_entry.add_to_hass(hass)
+    entry_id = mock_config_entry.entry_id
+    from custom_components.shop2parcel.const import DOMAIN
+
+    # Pre-seed an orphaned per-message shipment entity
+    registry = er.async_get(hass)
+    orphan = registry.async_get_or_create(
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_msgABC123",
+        config_entry=mock_config_entry,
+    )
+    assert registry.async_get(orphan.entity_id) is not None, "Pre-condition: entity seeded"
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        result = await hass.config_entries.async_setup(entry_id)
+
+    assert result is True
+    # The orphaned entity must be gone after setup
+    assert registry.async_get(orphan.entity_id) is None, (
+        "Orphaned shipment_* entity must be removed by migration sweep"
+    )
+
+
+async def test_migration_sweep_removes_has_active_shipments(hass, mock_config_entry):
+    """P26-REG-02: has_active_shipments entity is removed from registry during setup.
+
+    Pre-seed shop2parcel_{entry_id}_has_active_shipments under the config entry.
+    After async_setup_entry the entity must be gone — it is intentionally absent
+    from KNOWN_GOOD_UID_SUFFIXES (the binary sensor will be replaced in Plan 03).
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    mock_config_entry.add_to_hass(hass)
+    entry_id = mock_config_entry.entry_id
+    from custom_components.shop2parcel.const import DOMAIN
+
+    registry = er.async_get(hass)
+    orphan = registry.async_get_or_create(
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_has_active_shipments",
+        config_entry=mock_config_entry,
+    )
+    assert registry.async_get(orphan.entity_id) is not None, "Pre-condition: entity seeded"
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        result = await hass.config_entries.async_setup(entry_id)
+
+    assert result is True
+    assert registry.async_get(orphan.entity_id) is None, (
+        "has_active_shipments entity must be removed by migration sweep"
+    )
+
+
+async def test_migration_sweep_preserves_allowlisted_entities(hass, mock_config_entry):
+    """P26-REG-03: Allowlisted entities (diagnostic + operational) survive the sweep.
+
+    Pre-seed:
+      - sensor with diagnostic suffix emails_scanned
+      - binary_sensor with suffix email_processing_active
+      - sensor with new operational suffix shipments_forwarded
+
+    All three must still exist in the entity registry after async_setup_entry.
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    mock_config_entry.add_to_hass(hass)
+    entry_id = mock_config_entry.entry_id
+    from custom_components.shop2parcel.const import DOMAIN
+
+    registry = er.async_get(hass)
+    diag_entity = registry.async_get_or_create(
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_emails_scanned",
+        config_entry=mock_config_entry,
+    )
+    proc_entity = registry.async_get_or_create(
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_email_processing_active",
+        config_entry=mock_config_entry,
+    )
+    fwd_entity = registry.async_get_or_create(
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_shipments_forwarded",
+        config_entry=mock_config_entry,
+    )
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        result = await hass.config_entries.async_setup(entry_id)
+
+    assert result is True
+    # All three allowlisted entities must survive the sweep
+    assert registry.async_get(diag_entity.entity_id) is not None, (
+        "emails_scanned (diagnostic) must be preserved"
+    )
+    assert registry.async_get(proc_entity.entity_id) is not None, (
+        "email_processing_active must be preserved"
+    )
+    assert registry.async_get(fwd_entity.entity_id) is not None, (
+        "shipments_forwarded (new operational) must be preserved"
+    )
