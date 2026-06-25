@@ -122,9 +122,7 @@ async def test_parcelapp_quota_sensor_estimate(hass, mock_config_entry):
     coordinator.async_set_updated_data(coordinator.data or {})
     await hass.async_block_till_done()
     state = hass.states.get(entry.entity_id)
-    assert state.state == "0", (
-        f"Expected clamped value 0 when used_today=25; got {state.state}"
-    )
+    assert state.state == "0", f"Expected clamped value 0 when used_today=25; got {state.state}"
 
 
 async def test_no_shipment_sensor_registered(hass, mock_config_entry):
@@ -165,7 +163,7 @@ async def test_no_shipment_sensor_registered(hass, mock_config_entry):
     unknown_suffixes = []
     for e in entries:
         if e.unique_id.startswith(prefix):
-            suffix = e.unique_id[len(prefix):]
+            suffix = e.unique_id[len(prefix) :]
             if suffix not in known_suffixes:
                 unknown_suffixes.append(suffix)
     assert unknown_suffixes == [], (
@@ -204,8 +202,6 @@ async def test_parcelapp_post_never_includes_custom_field_keys(hass, mock_config
     mocks parcel_client.async_add_delivery, calls _async_process_stage2_job, and asserts
     that only tracking_number, carrier_code, description reach parcelapp.net.
     """
-    from unittest.mock import AsyncMock, MagicMock, patch
-
     from custom_components.shop2parcel.coordinator import Stage2Job
     from custom_components.shop2parcel.extractors.types import Stage2Result
 

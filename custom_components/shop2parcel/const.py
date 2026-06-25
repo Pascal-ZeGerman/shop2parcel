@@ -165,3 +165,8 @@ CONF_CUSTOM_FIELDS = "custom_fields"  # list[dict]: {"name": str, "description":
 CONF_STAGE2_ENABLED = "stage2_enabled"
 CONF_FIELD_NAME = "field_name"  # str, used in add/remove options steps
 CONF_FIELD_DESCRIPTION = "field_description"  # str | None
+
+# Phase 26 Plan 03 (P26-ENT-03): ParcelApp daily POST quota limit.
+# Advisory only until a real 429 is seen (the coordinator then tracks actual quota).
+# ParcelAppQuotaSensor uses this constant to estimate remaining quota.
+PARCELAPP_DAILY_LIMIT: int = 20
