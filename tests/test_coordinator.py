@@ -3945,3 +3945,59 @@ def test_extract_imap_email_meta_returns_defaults_on_parse_error():
     ):
         result = _extract_imap_email_meta(b"raw bytes")
     assert result == {"subject": "", "from": "", "date": "", "snippet": ""}
+
+
+# -------- Phase 26: counter state helpers --------------------------------
+
+
+async def test_used_today_resets_on_date_rollover(hass, mock_config_entry):
+    """P26-CNT-03: _maybe_reset_used_today resets _used_today=0 on stale date; no-op same day.
+
+    Wave 0 RED: fails until _maybe_reset_used_today and _used_today_date are added to coordinator.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+
+    # Seed stale values
+    coord._used_today = 5
+    coord._used_today_date = "2000-01-01"  # stale date — guaranteed to differ from today
+
+    coord._maybe_reset_used_today()
+
+    assert coord._used_today == 0, "used_today must reset to 0 on stale date"
+    # _used_today_date must now match today's UTC date
+    from datetime import UTC, datetime as _dt
+    assert coord._used_today_date == _dt.now(UTC).strftime("%Y-%m-%d"), (
+        "_used_today_date must be updated to today's UTC date after reset"
+    )
+
+    # Second call same day — must NOT reset (stays at current value)
+    coord._used_today = 2
+    coord._maybe_reset_used_today()
+    assert coord._used_today == 2, "_maybe_reset_used_today must be no-op when date has not rolled over"
+
+
+async def test_record_forward_skips_already_added(hass, mock_config_entry):
+    """P26-CNT: _record_forward increments counters exactly N times when called N times.
+
+    Wave 0 RED: fails until _record_forward is added to coordinator.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+
+    assert coord.total_forwarded == 0
+    assert coord.last_forwarded_ts is None
+
+    coord._record_forward()
+    assert coord.total_forwarded == 1
+    assert coord.last_forwarded_ts is not None
+    assert isinstance(coord.last_forwarded_ts, int)
+
+    coord._record_forward()
+    assert coord.total_forwarded == 2, "_record_forward must increment by exactly 1 on each call"
