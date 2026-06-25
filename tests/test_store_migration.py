@@ -991,7 +991,7 @@ async def test_phase26_counters_persist_across_restart(
     _async_load_store and _async_save_store.
     """
     mock_config_entry.add_to_hass(hass)
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
 
         # Capture the lambda payload written by async_delay_save
@@ -1028,7 +1028,7 @@ async def test_phase26_counters_persist_across_restart(
     )
 
     # Now simulate a fresh coordinator loading from the saved store
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2:
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2:
         mock_store_cls2.return_value.async_load = AsyncMock(return_value=captured_payload)
         mock_store_cls2.return_value.async_delay_save = MagicMock()
         coord2 = GmailCoordinator(hass, mock_config_entry)

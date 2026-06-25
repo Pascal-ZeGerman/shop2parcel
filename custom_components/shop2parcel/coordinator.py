@@ -174,6 +174,16 @@ def _next_midnight_utc() -> int:
     )
 
 
+def _today_utc_str() -> str:
+    """Return today's UTC date as 'YYYY-MM-DD' string.
+
+    Used for UTC date-rollover check in _maybe_reset_used_today.
+    UTC has no DST so the rollover is always at exactly 00:00 UTC.
+    (Phase 26 RESEARCH Pitfall 3 — always use UTC, not local time.)
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
 def _sanitise_parser_error(err: BaseException) -> str:
     """Return a safe, HTML-stripped, 100-char slice of a parser exception message.
 
@@ -404,6 +414,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # HA restarts (quota may clear between restart and next poll).
         # NOT reset on _reset_stage2_poll_counters — must survive across polls.
         self._pending_posts: dict[str, ShipmentData] = {}
+        # Phase 26: operational-health persisted counters.
+        # Persisted across HA restarts via additive store keys (no STORAGE_VERSION bump).
+        # Incremented only on genuine 2xx POST-success via _record_forward().
+        # _used_today_date holds the UTC date string when _used_today was last reset.
+        self._total_forwarded: int = 0
+        self._last_forwarded_ts: int | None = None
+        self._used_today: int = 0
+        self._used_today_date: str = ""
         self._store_loaded: bool = False
         # Phase 18 CR-01: sentinel so async_stop_stage2 is safe to call before
         # async_start_stage2 (e.g. Phase 19 worker or a reload race).
@@ -453,6 +471,38 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self.hass,
                 notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
             )
+
+    def _maybe_reset_used_today(self) -> None:
+        """Reset used_today to 0 on UTC date rollover.
+
+        Called at the start of _record_forward and from the used_today property read
+        path so the ParcelApp Quota sensor always reflects the current day's count.
+        UTC has no DST — rollover is deterministic at 00:00 UTC.
+        (Phase 26 RESEARCH Pattern 5 / Pitfall 3.)
+        """
+        today = _today_utc_str()
+        if self._used_today_date != today:
+            self._used_today = 0
+            self._used_today_date = today
+
+    def _record_forward(self) -> None:
+        """Record one genuine 2xx POST success to ParcelApp.
+
+        Increments total_forwarded, used_today (with UTC date-rollover reset),
+        and updates last_forwarded_ts to the current epoch second.
+
+        MUST be called ONLY on the genuine 2xx success path — never on
+        ParcelAppAlreadyAddedError or ParcelAppInvalidTrackingError, which do NOT
+        consume ParcelApp quota and do NOT represent forwarding a new shipment.
+        (Phase 26 RESEARCH Pitfall 1 / Pitfall 6 / STRIDE T-26-02.)
+
+        Does NOT call _async_save_store; the existing save at each call site handles
+        persistence so we avoid an extra debounce scheduling.
+        """
+        self._maybe_reset_used_today()
+        self._total_forwarded += 1
+        self._last_forwarded_ts = int(_time.time())
+        self._used_today += 1
 
     def _record_stage2_failure(self, job: Stage2Job, err: Exception) -> None:
         """Centralize loud-surface side effects for a Stage-2 Ollama or worker-outer failure.
@@ -564,6 +614,52 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def pending_posts_depth(self) -> int:
         """Count of quota-deferred merged shipments awaiting the ParcelApp POST step (Phase 23 _pending_posts)."""
         return len(self._pending_posts)
+
+    # Phase 26: public read-only properties for operational-health entities.
+    # Entities must NEVER access private attributes directly (RESEARCH Pitfall 4).
+
+    @property
+    def total_forwarded(self) -> int:
+        """Lifetime count of genuine 2xx POSTs to ParcelApp; persisted across restarts."""
+        return self._total_forwarded
+
+    @property
+    def last_forwarded_ts(self) -> int | None:
+        """Unix epoch of the most recent successful POST; None before the first forwarding."""
+        return self._last_forwarded_ts
+
+    @property
+    def used_today(self) -> int:
+        """Estimated ParcelApp POSTs made today (UTC day); auto-resets on UTC date rollover.
+
+        Calls _maybe_reset_used_today() on each read so the ParcelApp Quota sensor
+        never shows a stale prior-day count even if no forwarding has happened today
+        yet. (Phase 26 RESEARCH Pattern 5.)
+        """
+        self._maybe_reset_used_today()
+        return self._used_today
+
+    @property
+    def currently_tracked_count(self) -> int:
+        """Count of live in-memory shipments from the current session (len(coordinator.data)).
+
+        Resets on HA restart (since coordinator.data rehydrates from persisted_shipments
+        on next poll). Use as 'currently active shipments' — not a lifetime total.
+        (Phase 26 RESEARCH Open Question 1 resolution / Assumption A4.)
+        """
+        return len(self.data or {})
+
+    @property
+    def quota_is_exhausted(self) -> bool:
+        """True when ParcelApp quota is exhausted and the cooldown window has not yet elapsed.
+
+        Public accessor so entities never read the private _quota_exhausted_until attribute.
+        (Phase 26 RESEARCH Pitfall 4 / STRIDE T-26-02.)
+        """
+        return (
+            self._quota_exhausted_until is not None
+            and int(_time.time()) < self._quota_exhausted_until
+        )
 
     def _emit_scan_event(
         self,
@@ -1224,6 +1320,31 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     err,
                 )
         self._pending_posts = restored_pending
+        # Phase 26: hydrate operational-health counters with type-guarded defaults.
+        # Additive keys — no STORAGE_VERSION bump (same pattern as pending_posts above).
+        # ASVS V5 / T-26-01: non-int values reset to 0/None with WARNING to prevent counter
+        # inflation from corrupt or hand-edited store data.
+        raw_tf = stored.get("total_forwarded", 0)
+        if isinstance(raw_tf, int):
+            self._total_forwarded = raw_tf
+        else:
+            _LOGGER.warning(
+                "total_forwarded in store is not an int (type=%s); resetting to 0",
+                type(raw_tf).__name__,
+            )
+            self._total_forwarded = 0
+        lf = stored.get("last_forwarded_ts")
+        self._last_forwarded_ts = lf if isinstance(lf, int) else None
+        raw_ut = stored.get("used_today", 0)
+        if isinstance(raw_ut, int):
+            self._used_today = raw_ut
+        else:
+            _LOGGER.warning(
+                "used_today in store is not an int (type=%s); resetting to 0",
+                type(raw_ut).__name__,
+            )
+            self._used_today = 0
+        self._used_today_date = str(stored.get("used_today_date", ""))
         self._store_loaded = True
         _LOGGER.debug(
             "Restored %d persisted shipments and %d pending posts from store",
@@ -1259,6 +1380,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # HA restarts. asdict() is intentionally outside the try block (loud-failure convention
         # matching persisted_shipments above — serialization failures must surface immediately).
         snapshot_pending = {key: asdict(shipment) for key, shipment in self._pending_posts.items()}
+        # Phase 26: snapshot counter state before the lambda so the debounced fire captures
+        # stable values (matches snapshot_tracking/snapshot_quota convention above).
+        snapshot_total_forwarded = self._total_forwarded
+        snapshot_last_forwarded_ts = self._last_forwarded_ts
+        snapshot_used_today = self._used_today
+        snapshot_used_today_date = self._used_today_date
         try:
             self._store.async_delay_save(
                 lambda: {
@@ -1266,6 +1393,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     "quota_exhausted_until": snapshot_quota,
                     "persisted_shipments": snapshot_shipments,
                     "pending_posts": snapshot_pending,
+                    # Phase 26: operational-health counters (additive keys — no STORAGE_VERSION bump).
+                    "total_forwarded": snapshot_total_forwarded,
+                    "last_forwarded_ts": snapshot_last_forwarded_ts,
+                    "used_today": snapshot_used_today,
+                    "used_today_date": snapshot_used_today_date,
                 },
                 delay=5,
             )
