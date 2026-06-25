@@ -3127,3 +3127,44 @@ async def test_total_forwarded_increments_on_stage2_post(hass, mock_stage2_confi
     assert coord.total_forwarded == 1, "total_forwarded must be 1 after one successful Stage-2 POST"
     assert coord.used_today == 1, "used_today must be 1 after one successful Stage-2 POST"
     assert coord.last_forwarded_ts is not None, "last_forwarded_ts must be set after Stage-2 POST"
+
+
+async def test_record_stage2_failure_notifies_listeners(hass, mock_stage2_config_entry):
+    """Finding 2: _record_stage2_failure must refresh entities.
+
+    When the consecutive-failure streak crosses STAGE2_NOTIFY_THRESHOLD inside the
+    background worker (not during a poll), ProblemBinarySensor.is_on flips True but
+    nothing re-evaluated the entity state — the Problem indicator lagged by up to a
+    full poll interval. The helper must call async_update_listeners().
+    """
+    from custom_components.shop2parcel.const import STAGE2_NOTIFY_THRESHOLD
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+
+        job = Stage2Job(
+            storage_key="k",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="m",
+            meta={"subject": "s", "from": "f"},
+        )
+        with patch.object(coord, "async_update_listeners") as mock_notify:
+            for _ in range(STAGE2_NOTIFY_THRESHOLD):
+                coord._record_stage2_failure(job, RuntimeError("boom"))
+
+        assert coord.stage2_consecutive_failures >= STAGE2_NOTIFY_THRESHOLD
+        assert mock_notify.called, (
+            "Problem sensor won't refresh: _record_stage2_failure must notify listeners "
+            "when the streak crosses the threshold in the background worker."
+        )

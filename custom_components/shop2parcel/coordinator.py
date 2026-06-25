@@ -566,6 +566,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # Update cooldown timestamp to gate re-fires (D-09).
             self._stage2_last_notify_ts = _time.time()
 
+        # Finding 2: this runs in the background Stage-2 worker, outside any poll's
+        # listener dispatch. Push the updated streak to subscribers so ProblemBinarySensor
+        # re-evaluates immediately when it crosses STAGE2_NOTIFY_THRESHOLD, instead of
+        # lagging by a full poll interval. (Recovery is already surfaced via the success
+        # path's async_set_updated_data.) async_update_listeners is a sync callback — safe
+        # to call from the worker coroutine.
+        self.async_update_listeners()
+
     def _record_stage2_success(self) -> None:
         """Centralize loud-surface side effects for a Stage-2 successful POST.
 
