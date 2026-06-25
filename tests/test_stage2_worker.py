@@ -3068,3 +3068,66 @@ async def test_quota_skip_warning_throttled_after_first(hass, mock_stage2_config
         )
         # AC-8b: throttle flag is set after first skip.
         assert coord._stage2_quota_warned_this_poll is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 26 Plan 01 Task 2: _record_forward wired at Stage-2 POST success
+# ---------------------------------------------------------------------------
+
+
+async def test_total_forwarded_increments_on_stage2_post(hass, mock_stage2_config_entry):
+    """P26-CNT-02 (site 3): Stage-2 worker 2xx success increments total_forwarded/used_today.
+
+    Wave 0 RED: fails until _record_forward() is called in _async_process_stage2_job success path.
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError
+    from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        # Set up extractor mock to return a valid shipment
+        stage2_shipment = _make_shipment("msg-stage2-1")
+        stage2_shipment_updated = ShipmentData(
+            tracking_number="STAGE2_TN_001",
+            carrier_name="UPS",
+            order_name="#9901",
+            message_id="msg-stage2-1",
+            email_date=1700000010,
+        )
+        mock_extractor = MagicMock()
+        mock_extractor.async_extract = AsyncMock(return_value=stage2_shipment_updated)
+        coord._extractor = mock_extractor
+
+        # async_add_delivery succeeds (2xx)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        job = _make_job(normalized_tn="STAGE2_TN_001")
+        # Set up job with raw shipment in coordinator.data
+        coord.async_set_updated_data({"msg-stage2-1": stage2_shipment})
+
+        await coord._async_process_stage2_job(job)
+
+    assert coord.total_forwarded == 1, (
+        "total_forwarded must be 1 after one successful Stage-2 POST"
+    )
+    assert coord.used_today == 1, "used_today must be 1 after one successful Stage-2 POST"
+    assert coord.last_forwarded_ts is not None, "last_forwarded_ts must be set after Stage-2 POST"
