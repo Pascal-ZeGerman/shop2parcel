@@ -1,10 +1,9 @@
-"""Tests for Shop2Parcel sensor.py — Phase 5 ShipmentSensor entity.
+"""Tests for Shop2Parcel sensor.py — Phase 26 Plan 03 operational-health sensors.
 
-Wave 0 scaffolds: sensor.py does not yet exist, so the import line below will
-ImportError until Plan 02 lands. That is intentional — these tests fail until
-the sensor platform is implemented.
+Wave 0 scaffolds: new operational sensors do not yet exist, so these tests will
+fail until the sensor platform is updated (ShipmentSensor removed, new sensors added).
 
-Coverage: ENTT-01, ENTT-02, ENTT-04, ENTT-05, ENTT-06.
+Coverage: P26-ENT-01, P26-ENT-02, P26-ENT-03, P26-REMOVE-01.
 """
 
 from __future__ import annotations
@@ -28,8 +27,133 @@ def _make_shipment(message_id: str, tracking: str, order: str = "#1234") -> Ship
     )
 
 
-async def test_sensor_created_for_each_shipment(hass, mock_config_entry):
-    """ENTT-01: One sensor.shop2parcel_* entity per coordinator.data entry."""
+# ---------------------------------------------------------------------------
+# Phase 26 Plan 03: operational sensor tests
+# ---------------------------------------------------------------------------
+
+
+async def test_shipments_forwarded_sensor_initial_state(hass, mock_config_entry):
+    """P26-ENT-01: ShipmentsForwardedSensor registers with TOTAL_INCREASING, initial value 0."""
+    from homeassistant.components.sensor import SensorStateClass
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_shipments_forwarded"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, (
+        f"ShipmentsForwardedSensor {uid!r} not found in entity registry. "
+        f"Found: {[e.unique_id for e in entries]}"
+    )
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state == "0"
+    # state_class must be TOTAL_INCREASING
+    assert state.attributes.get("state_class") == SensorStateClass.TOTAL_INCREASING
+    # currently_tracked attribute must exist
+    assert "currently_tracked" in state.attributes
+
+
+async def test_last_forwarded_sensor_none_until_first_post(hass, mock_config_entry):
+    """P26-ENT-02: LastForwardedSensor returns None before first forward; datetime after."""
+    from datetime import UTC, datetime
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_last_forwarded"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, (
+        f"LastForwardedSensor {uid!r} not found in entity registry. "
+        f"Found: {[e.unique_id for e in entries]}"
+    )
+    # Before first forward, state should be 'unknown' or 'unavailable'
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state in ("unknown", "unavailable")
+
+    # Simulate first forward by setting coordinator._last_forwarded_ts
+    test_epoch = 1750000000
+    coordinator._last_forwarded_ts = test_epoch
+    coordinator.async_set_updated_data(coordinator.data or {})
+    await hass.async_block_till_done()
+
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    # HA stores datetime sensors as ISO8601 strings
+    expected_dt = datetime.fromtimestamp(test_epoch, tz=UTC)
+    assert state.state != "unknown"
+    assert state.state != "unavailable"
+    # The state should match the expected datetime; compare as datetime
+    parsed = datetime.fromisoformat(state.state.replace("Z", "+00:00"))
+    assert parsed == expected_dt
+
+
+async def test_parcelapp_quota_sensor_estimate(hass, mock_config_entry):
+    """P26-ENT-03: ParcelAppQuotaSensor shows max(0, 20-used_today); attributes include daily_limit/used_today/exhausted."""
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_parcelapp_quota"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, (
+        f"ParcelAppQuotaSensor {uid!r} not found in entity registry. "
+        f"Found: {[e.unique_id for e in entries]}"
+    )
+
+    # Initial state: used_today=0, quota=20
+    state = hass.states.get(entry.entity_id)
+    assert state is not None
+    assert state.state == "20"
+    assert state.attributes.get("daily_limit") == 20
+    assert state.attributes.get("used_today") == 0
+    assert "exhausted" in state.attributes
+
+    # Simulate used_today=3
+    coordinator._used_today = 3
+    coordinator.async_set_updated_data(coordinator.data or {})
+    await hass.async_block_till_done()
+    state = hass.states.get(entry.entity_id)
+    assert state.state == "17"
+    assert state.attributes.get("used_today") == 3
+
+    # Simulate over-limit: used_today=25 -> native_value clamped to 0
+    coordinator._used_today = 25
+    coordinator.async_set_updated_data(coordinator.data or {})
+    await hass.async_block_till_done()
+    state = hass.states.get(entry.entity_id)
+    assert state.state == "0", (
+        f"Expected clamped value 0 when used_today=25; got {state.state}"
+    )
+
+
+async def test_no_shipment_sensor_registered(hass, mock_config_entry):
+    """P26-REMOVE-01: After setup with coordinator.data containing two shipments,
+    NO per-shipment sensor entity registers — only diagnostic + 3 operational sensors."""
+    # Known operational/diagnostic suffixes that should exist
+    known_suffixes = {
+        # 13 diagnostic
+        "emails_scanned",
+        "new_emails_inspected",
+        "emails_matched",
+        "tracking_numbers_found",
+        "keyword_hits",
+        "activity_log",
+        "stage2_queue",
+        "ollama_latency",
+        "ollama_parse_retries",
+        "stage2_consecutive_failures",
+        "emails_sent_to_llm",
+        "emails_parsed_by_llm",
+        "pending_parcelapp_posts",
+        # 3 operational sensors
+        "shipments_forwarded",
+        "last_forwarded",
+        "parcelapp_quota",
+        # 2 binary sensors (diagnostic + operational)
+        "email_processing_active",
+        "problem",
+    }
     data = {
         "msg_a": _make_shipment("msg_a", "1Z999AA10123456784"),
         "msg_b": _make_shipment("msg_b", "1Z999AA10123456785", order="#1235"),
@@ -37,58 +161,29 @@ async def test_sensor_created_for_each_shipment(hass, mock_config_entry):
     await _setup_with_data(hass, mock_config_entry, data)
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    sensor_unique_ids = {e.unique_id for e in entries if e.entity_id.startswith("sensor.")}
-    assert f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a" in sensor_unique_ids
-    assert f"{DOMAIN}_{mock_config_entry.entry_id}_msg_b" in sensor_unique_ids
-
-
-async def test_sensor_attributes(hass, mock_config_entry):
-    """ENTT-02 / D-03: Attributes contain order_name, tracking_number, carrier, email_date."""
-    data = {"msg_a": _make_shipment("msg_a", "1Z999AA10123456784")}
-    await _setup_with_data(hass, mock_config_entry, data)
-    registry = er.async_get(hass)
-    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    sensor_entry = next(
-        e for e in entries if e.unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a"
+    prefix = f"{DOMAIN}_{mock_config_entry.entry_id}_"
+    unknown_suffixes = []
+    for e in entries:
+        if e.unique_id.startswith(prefix):
+            suffix = e.unique_id[len(prefix):]
+            if suffix not in known_suffixes:
+                unknown_suffixes.append(suffix)
+    assert unknown_suffixes == [], (
+        f"Found per-shipment or unknown sensor suffixes: {unknown_suffixes}. "
+        "ShipmentSensor must not register after Phase 26 Plan 03."
     )
-    state = hass.states.get(sensor_entry.entity_id)
-    assert state is not None
-    assert state.attributes.get("order_name") == "#1234"
-    assert state.attributes.get("tracking_number") == "1Z999AA10123456784"
-    assert state.attributes.get("carrier") == "UPS"
-    assert state.attributes.get("email_date") == 1745452800
 
 
-async def test_sensor_native_value_is_in_transit(hass, mock_config_entry):
-    """D-01: Sensor state is the static literal 'in_transit'."""
-    data = {"msg_a": _make_shipment("msg_a", "1Z999AA10123456784")}
-    await _setup_with_data(hass, mock_config_entry, data)
-    registry = er.async_get(hass)
-    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    sensor_entry = next(
-        e for e in entries if e.unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a"
-    )
-    state = hass.states.get(sensor_entry.entity_id)
-    assert state is not None
-    assert state.state == "in_transit"
-
-
-async def test_sensor_unique_id_stable(hass, mock_config_entry):
-    """ENTT-04 / D-05: unique_id format is f'{DOMAIN}_{entry_id}_{message_id}'."""
-    data = {"msg_a": _make_shipment("msg_a", "1Z999AA10123456784")}
-    await _setup_with_data(hass, mock_config_entry, data)
-    registry = er.async_get(hass)
-    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    expected_uid = f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a"
-    assert any(e.unique_id == expected_uid for e in entries)
+# ---------------------------------------------------------------------------
+# Phase 5 tests retained — not ShipmentSensor-specific
+# ---------------------------------------------------------------------------
 
 
 async def test_device_grouping(hass, mock_config_entry):
-    """ENTT-06 / D-06: All entities share DeviceInfo identifiers={(DOMAIN, entry_id)}."""
+    """D-06: All entities share DeviceInfo identifiers={(DOMAIN, entry_id)}."""
     from homeassistant.helpers import device_registry as dr
 
-    data = {"msg_a": _make_shipment("msg_a", "1Z999AA10123456784")}
-    await _setup_with_data(hass, mock_config_entry, data)
+    await _setup_with_data(hass, mock_config_entry, {})
     device_reg = dr.async_get(hass)
     devices = [
         d
@@ -96,121 +191,10 @@ async def test_device_grouping(hass, mock_config_entry):
         if (DOMAIN, mock_config_entry.entry_id) in d.identifiers
     ]
     assert len(devices) == 1, f"Expected exactly one Shop2Parcel device, found {len(devices)}"
-    # Both sensor and binary_sensor must attach to this device
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
     device_ids = {e.device_id for e in entries if e.device_id is not None}
     assert devices[0].id in device_ids
-
-
-async def test_cleanup_removes_entity(hass, mock_config_entry):
-    """ENTT-05: After async_cleanup_delivered drops a key, entity is removed from registry.
-
-    Seeds coordinator.data with one shipment, mocks parcelapp GET to return status_code=0
-    for that tracking_number, calls async_cleanup_delivered, asserts the registry entry
-    is gone (not just unavailable).
-    """
-    from datetime import datetime, timezone
-
-    data = {"msg_a": _make_shipment("msg_a", "1Z999AA10123456784")}
-    coordinator = await _setup_with_data(hass, mock_config_entry, data)
-    registry = er.async_get(hass)
-    pre_entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    pre_uids = {e.unique_id for e in pre_entries}
-    assert f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a" in pre_uids
-
-    fake_client = MagicMock()
-    fake_client.async_get_deliveries = AsyncMock(
-        return_value=[
-            {"tracking_number": "1Z999AA10123456784", "status_code": 0},
-        ]
-    )
-    with patch(
-        "custom_components.shop2parcel.coordinator.ParcelAppClient",
-        return_value=fake_client,
-    ):
-        await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
-    await hass.async_block_till_done()
-
-    post_entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    post_uids = {e.unique_id for e in post_entries}
-    assert f"{DOMAIN}_{mock_config_entry.entry_id}_msg_a" not in post_uids
-    assert "msg_a" not in coordinator.data
-
-
-# ---------------------------------------------------------------------------
-# FLD-03 sensor attribute tests (Phase 21 Plan 01)
-# ---------------------------------------------------------------------------
-
-
-async def test_shipment_sensor_extra_state_attributes_spreads_custom_attributes(
-    hass, mock_config_entry
-):
-    """FLD-03: ShipmentSensor.extra_state_attributes includes custom_attributes keys."""
-    data = {
-        "msg_ca": ShipmentData(
-            tracking_number="1Z999AA10123456784",
-            carrier_name="UPS",
-            order_name="#1234",
-            message_id="msg_ca",
-            email_date=1745452800,
-            custom_attributes={"estimated_delivery": "2026-06-20", "weight": "1kg"},
-        )
-    }
-    await _setup_with_data(hass, mock_config_entry, data)
-    from homeassistant.helpers import entity_registry as er
-
-    registry = er.async_get(hass)
-    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    sensor_entry = next(
-        e for e in entries if e.unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_msg_ca"
-    )
-    state = hass.states.get(sensor_entry.entity_id)
-    assert state is not None
-    attrs = state.attributes
-    # Fixed keys must be present
-    assert "order_name" in attrs
-    assert "tracking_number" in attrs
-    assert "carrier" in attrs
-    assert "email_date" in attrs
-    # Custom attributes spread in
-    assert attrs.get("estimated_delivery") == "2026-06-20", (
-        "custom_attributes key 'estimated_delivery' must appear in extra_state_attributes"
-    )
-    assert attrs.get("weight") == "1kg", (
-        "custom_attributes key 'weight' must appear in extra_state_attributes"
-    )
-
-
-async def test_shipment_sensor_extra_state_attributes_empty_custom_attributes_returns_only_fixed_keys(
-    hass, mock_config_entry
-):
-    """FLD-03: Empty custom_attributes returns exactly the 4 fixed keys."""
-    data = {
-        "msg_empty": ShipmentData(
-            tracking_number="1Z999AA10123456784",
-            carrier_name="UPS",
-            order_name="#1234",
-            message_id="msg_empty",
-            email_date=1745452800,
-            custom_attributes={},
-        )
-    }
-    await _setup_with_data(hass, mock_config_entry, data)
-    from homeassistant.helpers import entity_registry as er
-
-    registry = er.async_get(hass)
-    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    sensor_entry = next(
-        e for e in entries if e.unique_id == f"{DOMAIN}_{mock_config_entry.entry_id}_msg_empty"
-    )
-    state = hass.states.get(sensor_entry.entity_id)
-    assert state is not None
-    # HA adds "friendly_name" to attributes automatically; filter that out
-    sensor_attrs = {k: v for k, v in state.attributes.items() if k != "friendly_name"}
-    assert set(sensor_attrs.keys()) == {"order_name", "tracking_number", "carrier", "email_date"}, (
-        f"With empty custom_attributes, only 4 fixed keys expected; got {set(sensor_attrs.keys())}"
-    )
 
 
 async def test_parcelapp_post_never_includes_custom_field_keys(hass, mock_config_entry):
@@ -227,7 +211,6 @@ async def test_parcelapp_post_never_includes_custom_field_keys(hass, mock_config
 
     coordinator = await _setup_with_data(hass, mock_config_entry, {})
 
-    # Simulate a stage2 job with a shipment that has a custom field
     shipment = ShipmentData(
         tracking_number="1Z999AA10123456784",
         carrier_name="UPS",
@@ -244,7 +227,6 @@ async def test_parcelapp_post_never_includes_custom_field_keys(hass, mock_config
         meta={"subject": "Your order has shipped", "from": "no-reply@shopify.com"},
     )
 
-    # Stage-2 extractor returns custom field
     stage2_result = Stage2Result(
         locked={
             "tracking_number": "1Z999AA10123456784",
@@ -265,7 +247,6 @@ async def test_parcelapp_post_never_includes_custom_field_keys(hass, mock_config
         mock_extractor.async_extract = AsyncMock(return_value=stage2_result)
         mock_parcel_cls.return_value.async_add_delivery = mock_add_delivery
 
-        # Initialize per-poll counters
         coordinator._stage2_posts_this_poll = 0
         coordinator._stage2_cap_notified_this_poll = False
         coordinator._stage2_enqueued_keys = set()
@@ -279,34 +260,4 @@ async def test_parcelapp_post_never_includes_custom_field_keys(hass, mock_config
     )
     assert "estimated_delivery" not in call_kwargs, (
         "Custom field 'estimated_delivery' must NOT reach async_add_delivery (FLD-03 POST guard)"
-    )
-
-
-async def test_sensor_appears_when_data_gains_entry(hass, mock_config_entry):
-    """ENTT-01 / Phase 6 D-01 gap fill: sensor entity registered AFTER coordinator.data
-    gains a new message_id key mid-run.
-
-    Existing tests (test_sensor_created_for_each_shipment) pre-seed data BEFORE setup.
-    This test sets up with EMPTY data, then dispatches a coordinator update with a new
-    key and asserts the listener registered a new sensor entity.
-    """
-    coordinator = await _setup_with_data(hass, mock_config_entry, {})
-
-    registry = er.async_get(hass)
-    new_uid = f"{DOMAIN}_{mock_config_entry.entry_id}_msg_new"
-
-    # Pre-condition: no sensor entity for "msg_new" yet
-    pre_entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    pre_sensor_uids = {e.unique_id for e in pre_entries if e.entity_id.startswith("sensor.")}
-    assert new_uid not in pre_sensor_uids
-
-    # Dispatch coordinator update with a NEW shipment
-    coordinator.async_set_updated_data({"msg_new": _make_shipment("msg_new", "1Z999AA10123456784")})
-    await hass.async_block_till_done()
-
-    # Post-condition: sensor.shop2parcel_*_msg_new is now registered
-    post_entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    post_sensor_uids = {e.unique_id for e in post_entries if e.entity_id.startswith("sensor.")}
-    assert new_uid in post_sensor_uids, (
-        f"Expected {new_uid} in entity registry after coordinator update; found {post_sensor_uids}"
     )

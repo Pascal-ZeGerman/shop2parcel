@@ -1,20 +1,22 @@
-"""Tests for Shop2Parcel binary_sensor.py.
+"""Tests for Shop2Parcel binary_sensor.py — Phase 26 Plan 03.
 
 Coverage:
-- Phase 5 ENTT-03: HasActiveShipmentsBinarySensor (D-07: is_on = len(coordinator.data) > 0).
+- P26-ENT-04: ProblemBinarySensor (PROBLEM device class; three-condition is_on).
+- P26-REMOVE-02: HasActiveShipmentsBinarySensor is no longer registered.
 - M6A-01: EmailProcessingActiveBinarySensor (DIAGNOSTIC category; reads email_processing_active).
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 
 from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.binary_sensor import EmailProcessingActiveBinarySensor
-from custom_components.shop2parcel.const import DOMAIN
+from custom_components.shop2parcel.const import DOMAIN, STAGE2_NOTIFY_THRESHOLD
 from tests.conftest import setup_coordinator_with_data as _setup_with_data
 
 
@@ -28,47 +30,87 @@ def _make_shipment(message_id: str, tracking: str) -> ShipmentData:
     )
 
 
-async def test_binary_sensor_on_when_data_non_empty(hass, mock_config_entry):
-    """ENTT-03 / D-07: is_on True when at least one shipment in coordinator.data."""
-    data = {"msg_a": _make_shipment("msg_a", "1Z999AA10123456784")}
-    await _setup_with_data(hass, mock_config_entry, data)
-    registry = er.async_get(hass)
-    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    bs_uid = f"{DOMAIN}_{mock_config_entry.entry_id}_has_active_shipments"
-    bs_entry = next(
-        (e for e in entries if e.unique_id == bs_uid),
-        None,
-    )
-    assert bs_entry is not None, (
-        f"Binary sensor {bs_uid!r} not found in entity registry. "
-        f"Found: {[e.unique_id for e in entries]}"
-    )
-    state = hass.states.get(bs_entry.entity_id)
-    assert state is not None
-    assert state.state == "on"
+# ---------------------------------------------------------------------------
+# Phase 26 Plan 03: ProblemBinarySensor tests
+# ---------------------------------------------------------------------------
 
 
-async def test_binary_sensor_off_when_data_empty(hass, mock_config_entry):
-    """ENTT-03 / D-07: is_on False when coordinator.data is empty."""
+async def test_problem_sensor_on_failure_streak(hass, mock_config_entry):
+    """P26-ENT-04: ProblemBinarySensor.is_on True when stage2_consecutive_failures >= threshold."""
+    from custom_components.shop2parcel.binary_sensor import ProblemBinarySensor
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    sensor = ProblemBinarySensor(coordinator, mock_config_entry)
+
+    # At rest: 0 failures, quota not exhausted, no pending posts -> off
+    coordinator._stage2_consecutive_failures = 0
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_posts = {}
+    assert sensor.is_on is False
+
+    # 2 failures (below threshold) + no quota/pending issues -> still off
+    coordinator._stage2_consecutive_failures = STAGE2_NOTIFY_THRESHOLD - 1
+    assert sensor.is_on is False
+
+    # 3 failures (at threshold) -> on
+    coordinator._stage2_consecutive_failures = STAGE2_NOTIFY_THRESHOLD
+    assert sensor.is_on is True
+
+    # More than threshold -> still on
+    coordinator._stage2_consecutive_failures = STAGE2_NOTIFY_THRESHOLD + 5
+    assert sensor.is_on is True
+
+
+async def test_problem_sensor_on_quota_exhausted(hass, mock_config_entry):
+    """P26-ENT-04: ProblemBinarySensor.is_on True when quota_is_exhausted, even with 0 failures."""
+    from custom_components.shop2parcel.binary_sensor import ProblemBinarySensor
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    sensor = ProblemBinarySensor(coordinator, mock_config_entry)
+
+    # 0 consecutive failures, no pending posts
+    coordinator._stage2_consecutive_failures = 0
+    coordinator._pending_posts = {}
+
+    # quota not exhausted -> off
+    coordinator._quota_exhausted_until = None
+    assert sensor.is_on is False
+
+    # quota exhausted (future epoch) -> on
+    coordinator._quota_exhausted_until = int(time.time()) + 3600
+    assert sensor.is_on is True
+
+    # quota window elapsed (past epoch) -> off (quota_is_exhausted returns False)
+    coordinator._quota_exhausted_until = int(time.time()) - 1
+    assert sensor.is_on is False
+
+
+async def test_has_active_shipments_not_registered(hass, mock_config_entry):
+    """P26-REMOVE-02: No entity with suffix 'has_active_shipments' after setup.
+    The 'problem' and 'email_processing_active' binary sensors must exist.
+    """
     await _setup_with_data(hass, mock_config_entry, {})
     registry = er.async_get(hass)
     entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
-    bs_uid = f"{DOMAIN}_{mock_config_entry.entry_id}_has_active_shipments"
-    bs_entry = next(
-        (e for e in entries if e.unique_id == bs_uid),
-        None,
+
+    uid_has_active = f"{DOMAIN}_{mock_config_entry.entry_id}_has_active_shipments"
+    uid_problem = f"{DOMAIN}_{mock_config_entry.entry_id}_problem"
+    uid_email_active = f"{DOMAIN}_{mock_config_entry.entry_id}_email_processing_active"
+
+    uids = {e.unique_id for e in entries}
+    assert uid_has_active not in uids, (
+        f"HasActiveShipmentsBinarySensor {uid_has_active!r} must NOT be registered after Phase 26 Plan 03."
     )
-    assert bs_entry is not None, (
-        f"Binary sensor {bs_uid!r} not found in entity registry. "
-        f"Found: {[e.unique_id for e in entries]}"
+    assert uid_problem in uids, (
+        f"ProblemBinarySensor {uid_problem!r} must be registered. Found: {sorted(uids)}"
     )
-    state = hass.states.get(bs_entry.entity_id)
-    assert state is not None
-    assert state.state == "off"
+    assert uid_email_active in uids, (
+        f"EmailProcessingActiveBinarySensor {uid_email_active!r} must be registered."
+    )
 
 
 # ---------------------------------------------------------------------------
-# M6A-01: EmailProcessingActiveBinarySensor tests
+# M6A-01: EmailProcessingActiveBinarySensor tests (retained)
 # ---------------------------------------------------------------------------
 
 
