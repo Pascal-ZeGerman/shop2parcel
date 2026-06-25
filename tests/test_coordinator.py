@@ -887,6 +887,55 @@ async def test_cleanup_removes_delivered_from_data(hass, mock_config_entry):
     assert "msg_b" in coordinator.data
 
 
+async def test_cleanup_entity_registry_noop_for_phase26(hass, mock_config_entry):
+    """Entity-registry removal loop is a no-op for Phase 26 installs.
+
+    _sweep_orphaned_entities (run at async_setup_entry) already removed all
+    per-message uid entries before the first async_cleanup_delivered fires.
+    The loop targets uids of the form {DOMAIN}_{entry_id}_{msg_id}; since no
+    such entries exist in the registry after the Phase 26 migration sweep,
+    async_remove must never be called even when a delivered shipment is removed
+    from coordinator.data.
+    """
+    mock_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(
+        return_value=[{"tracking_number": "TRACK_A", "status_code": 0}]
+    )
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+
+        # Seed coordinator.data with a delivered shipment (no registry entry for it — Phase 26)
+        coordinator.async_set_updated_data(
+            {"msg_a": ShipmentData("TRACK_A", "UPS", "#1", "msg_a", 1)}
+        )
+
+        from homeassistant.helpers import entity_registry as er
+        registry = er.async_get(hass)
+        with patch.object(registry, "async_remove") as mock_remove:
+            await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+            mock_remove.assert_not_called()
+
+    # Data was still cleaned up even though registry removal was a no-op
+    assert "msg_a" not in coordinator.data
+
+
 async def test_cleanup_uses_filter_mode_recent(hass, mock_config_entry):
     """RESEARCH.md Pitfall 6: must call GET with filter_mode='recent' (NOT 'active')."""
     mock_config_entry.add_to_hass(hass)

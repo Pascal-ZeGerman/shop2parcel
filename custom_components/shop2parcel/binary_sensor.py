@@ -86,7 +86,6 @@ class ProblemBinarySensor(CoordinatorEntity[Shop2ParcelCoordinator], BinarySenso
         return (
             self.coordinator.stage2_consecutive_failures >= STAGE2_NOTIFY_THRESHOLD
             or self.coordinator.quota_is_exhausted
-            or self.coordinator.pending_posts_depth > 0
         )
 
 

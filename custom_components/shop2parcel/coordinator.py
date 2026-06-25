@@ -615,6 +615,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """Count of quota-deferred merged shipments awaiting the ParcelApp POST step (Phase 23 _pending_posts)."""
         return len(self._pending_posts)
 
+    @property
+    def pending_posts_entries(self) -> list[ShipmentData]:
+        """Public read-only view of quota-deferred shipments (values of _pending_posts)."""
+        return list(self._pending_posts.values())
+
     # Phase 26: public read-only properties for operational-health entities.
     # Entities must NEVER access private attributes directly (RESEARCH Pitfall 4).
 

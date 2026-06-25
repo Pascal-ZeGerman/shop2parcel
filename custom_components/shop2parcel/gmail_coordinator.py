@@ -74,16 +74,18 @@ class GmailCoordinator(Shop2ParcelCoordinator):
 
         self._reset_stage2_poll_counters()  # Phase 20 MRG-05 / D-11: reset per-poll counters
 
-        # M6A-01: signal poll-in-progress so EmailProcessingActiveBinarySensor reads on
-        # immediately.  Set OUTSIDE the try so the listener notification is not swallowed
-        # by any exception handler in the body below.  The flag is reset in the finally.
+        # M6A-01: signal poll-in-progress so EmailProcessingActiveBinarySensor reads on.
+        # async_update_listeners() is called inside the try so that:
+        #  - a listener exception still resets the flag via finally (fixes leaked True state)
+        #  - the finally call guarantees notification after flag reset even when HA's base
+        #    class short-circuits its own listener dispatch on consecutive failures.
         self._poll_in_progress = True
-        self.async_update_listeners()
-
         try:
+            self.async_update_listeners()
             return await self._async_update_data_inner()
         finally:
             self._poll_in_progress = False
+            self.async_update_listeners()
 
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
         """Inner implementation of the poll cycle (called from _async_update_data)."""

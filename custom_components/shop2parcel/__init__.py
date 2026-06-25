@@ -27,6 +27,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN
+from .diagnostic_sensor import DIAGNOSTIC_SENSOR_UID_SUFFIXES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,52 +45,18 @@ PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 # is NOT in this set is treated as an orphan from a prior version and removed
 # during async_setup_entry before platform setup runs.
 #
-# Diagnostic sensor suffixes (13) — verbatim from diagnostic_sensor.py
-# _unique_id_suffix class attributes:
-#   EmailsScannedSensor         → emails_scanned
-#   NewEmailsInspectedSensor    → new_emails_inspected
-#   EmailsMatchedSensor         → emails_matched
-#   TrackingNumbersFoundSensor  → tracking_numbers_found
-#   KeywordHitsSensor           → keyword_hits
-#   ActivityLogSensor           → activity_log
-#   Stage2Sensor                → stage2_queue
-#   OllamaLatencySensor         → ollama_latency
-#   OllamaParseQualitySensor    → ollama_parse_retries
-#   Stage2ConsecutiveFailuresSensor → stage2_consecutive_failures
-#   EmailsSentToLLMSensor       → emails_sent_to_llm
-#   EmailsParsedByLLMSensor     → emails_parsed_by_llm
-#   PendingPostsSensor          → pending_parcelapp_posts
-#
-# Binary sensor suffix (1) — from binary_sensor.py:
-#   EmailProcessingActiveBinarySensor → email_processing_active
-#
-# New operational suffixes (4) — introduced in Phase 26 Plan 03:
-#   ShipmentsForwardedSensor    → shipments_forwarded
-#   LastForwardedSensor         → last_forwarded
-#   ParcelAppQuotaSensor        → parcelapp_quota
-#   ProblemBinarySensor         → problem
+# Diagnostic sensor suffixes are derived from diagnostic_sensor.DIAGNOSTIC_SENSOR_UID_SUFFIXES
+# (single source of truth — class attributes, not string literals).
+# Adding a new DiagnosticSensor subclass and its suffix there automatically extends
+# this allowlist; forgetting to update diagnostic_sensor.py means the entity gets swept.
 #
 # NOTE: has_active_shipments is intentionally absent — it is an orphan to sweep.
 # NOTE: per-message suffixes (e.g. msgABC123) are not in the allowlist — orphans.
-KNOWN_GOOD_UID_SUFFIXES: frozenset[str] = frozenset(
+KNOWN_GOOD_UID_SUFFIXES: frozenset[str] = DIAGNOSTIC_SENSOR_UID_SUFFIXES | frozenset(
     {
-        # 13 diagnostic sensor suffixes
-        "emails_scanned",
-        "new_emails_inspected",
-        "emails_matched",
-        "tracking_numbers_found",
-        "keyword_hits",
-        "activity_log",
-        "stage2_queue",
-        "ollama_latency",
-        "ollama_parse_retries",
-        "stage2_consecutive_failures",
-        "emails_sent_to_llm",
-        "emails_parsed_by_llm",
-        "pending_parcelapp_posts",
         # 1 binary sensor suffix
         "email_processing_active",
-        # 4 new operational suffixes (Phase 26 Plan 03)
+        # 4 operational sensor suffixes (Phase 26 Plan 03)
         "shipments_forwarded",
         "last_forwarded",
         "parcelapp_quota",

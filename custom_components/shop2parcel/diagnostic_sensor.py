@@ -405,7 +405,7 @@ class PendingPostsSensor(DiagnosticSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         # Cap to the last 10 entries — mirrors TrackingNumbersFoundSensor recorder-payload
         # precedent (T-m6a-01 / threat model DoS mitigation).
-        pending_entries = list(self.coordinator._pending_posts.values())[-10:]
+        pending_entries = self.coordinator.pending_posts_entries[-10:]
         surfaced = [
             {
                 "tracking_number": s.tracking_number,
@@ -421,3 +421,22 @@ class PendingPostsSensor(DiagnosticSensor):
             ),
             "pending_tracking_numbers": surfaced,
         }
+
+
+# Single source of truth for all diagnostic sensor uid suffixes.
+# __init__.py imports this to build KNOWN_GOOD_UID_SUFFIXES without duplication.
+DIAGNOSTIC_SENSOR_UID_SUFFIXES: frozenset[str] = frozenset({
+    EmailsScannedSensor._unique_id_suffix,
+    NewEmailsInspectedSensor._unique_id_suffix,
+    EmailsMatchedSensor._unique_id_suffix,
+    TrackingNumbersFoundSensor._unique_id_suffix,
+    KeywordHitsSensor._unique_id_suffix,
+    ActivityLogSensor._unique_id_suffix,
+    Stage2Sensor._unique_id_suffix,
+    OllamaLatencySensor._unique_id_suffix,
+    OllamaParseQualitySensor._unique_id_suffix,
+    Stage2ConsecutiveFailuresSensor._unique_id_suffix,
+    EmailsSentToLLMSensor._unique_id_suffix,
+    EmailsParsedByLLMSensor._unique_id_suffix,
+    PendingPostsSensor._unique_id_suffix,
+})
