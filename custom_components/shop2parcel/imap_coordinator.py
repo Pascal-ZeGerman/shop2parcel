@@ -105,8 +105,8 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         # reads on for the duration of the poll, then flip it off afterwards — without the
         # redundant double/triple dispatch the old try/finally produced.
         self._poll_in_progress = True
-        self.async_update_listeners()  # turn the sensor ON at poll start
         try:
+            self.async_update_listeners()  # turn the sensor ON at poll start
             result = await self._async_update_data_inner()
         except BaseException:
             # Failure path: HA's base _async_refresh may re-raise (e.g. ConfigEntryAuthFailed)

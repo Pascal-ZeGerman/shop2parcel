@@ -4721,3 +4721,41 @@ async def test_forward_counter_persisted_immediately(hass, mock_config_entry):
     assert captured.get("total_forwarded") == 1, "immediate save must carry total_forwarded"
     assert captured.get("used_today") == 1, "immediate save must carry used_today"
     assert captured.get("last_forwarded_ts") is not None, "immediate save must carry the timestamp"
+
+
+async def test_gmail_poll_start_notify_failure_resets_flag(hass, mock_config_entry):
+    """Finding 8: if the start-of-poll listener dispatch raises, _poll_in_progress must
+    still reset (no leaked True) and the original error must surface unmasked.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        with patch.object(coord, "async_update_listeners", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                await coord._async_update_data()
+
+    assert coord._poll_in_progress is False, (
+        "a start-notify failure must not leak _poll_in_progress=True"
+    )
+
+
+async def test_imap_poll_start_notify_failure_resets_flag(hass, mock_imap_config_entry):
+    """Finding 8 (IMAP parity): start-notify failure must reset the poll-in-progress flag."""
+    mock_imap_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+
+        with patch.object(coord, "async_update_listeners", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                await coord._async_update_data()
+
+    assert coord._poll_in_progress is False, (
+        "a start-notify failure must not leak _poll_in_progress=True"
+    )
