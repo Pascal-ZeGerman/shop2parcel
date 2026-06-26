@@ -184,6 +184,16 @@ def _today_utc_str() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+def _valid_nonneg_int(value: object) -> bool:
+    """True only for a genuine non-negative int.
+
+    Excludes bool (an int subclass — `isinstance(True, int)` is True) and negatives,
+    so corrupt or hand-edited operational counters in the store cannot inflate state
+    (T-26-01). Used to guard total_forwarded / used_today / last_forwarded_ts on load.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _sanitise_parser_error(err: BaseException) -> str:
     """Return a safe, HTML-stripped, 100-char slice of a parser exception message.
 
@@ -1347,22 +1357,34 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # ASVS V5 / T-26-01: non-int values reset to 0/None with WARNING to prevent counter
         # inflation from corrupt or hand-edited store data.
         raw_tf = stored.get("total_forwarded", 0)
-        if isinstance(raw_tf, int):
+        if _valid_nonneg_int(raw_tf):
             self._total_forwarded = raw_tf
         else:
             _LOGGER.warning(
-                "total_forwarded in store is not an int (type=%s); resetting to 0",
+                "total_forwarded in store is not a non-negative int (type=%s); resetting to 0",
                 type(raw_tf).__name__,
             )
             self._total_forwarded = 0
-        lf = stored.get("last_forwarded_ts")
-        self._last_forwarded_ts = lf if isinstance(lf, int) else None
+        # last_forwarded_ts is optional (None before the first forward). A missing key
+        # is normal; a present-but-corrupt value is surfaced with a WARNING, symmetric
+        # with the counters above (previously coerced to None silently — finding 4).
+        raw_lf = stored.get("last_forwarded_ts")
+        if raw_lf is None:
+            self._last_forwarded_ts = None
+        elif _valid_nonneg_int(raw_lf):
+            self._last_forwarded_ts = raw_lf
+        else:
+            _LOGGER.warning(
+                "last_forwarded_ts in store is not a non-negative int (type=%s); resetting to None",
+                type(raw_lf).__name__,
+            )
+            self._last_forwarded_ts = None
         raw_ut = stored.get("used_today", 0)
-        if isinstance(raw_ut, int):
+        if _valid_nonneg_int(raw_ut):
             self._used_today = raw_ut
         else:
             _LOGGER.warning(
-                "used_today in store is not an int (type=%s); resetting to 0",
+                "used_today in store is not a non-negative int (type=%s); resetting to 0",
                 type(raw_ut).__name__,
             )
             self._used_today = 0

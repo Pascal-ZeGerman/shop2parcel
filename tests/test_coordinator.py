@@ -4328,3 +4328,82 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry)
     assert coord3.total_forwarded == 1, (
         "total_forwarded must NOT increment on drain AlreadyAdded (stays at 1)"
     )
+
+
+async def test_load_store_rejects_corrupt_operational_counters(hass, mock_config_entry, caplog):
+    """Finding 4: hydration guard must reject negative/bool counters and warn on a
+    corrupt last_forwarded_ts.
+
+    The guard claims to prevent 'counter inflation from corrupt or hand-edited store
+    data' (T-26-01) but isinstance(x, int) accepts negatives AND bool (an int
+    subclass). A negative used_today made ParcelAppQuotaSensor advertise MORE than the
+    daily limit. last_forwarded_ts silently coerced bad data to None with no warning.
+    """
+    mock_config_entry.add_to_hass(hass)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "total_forwarded": -5,
+                "used_today": -3,
+                "used_today_date": today,  # avoid the property's rollover reset masking the guard
+                "last_forwarded_ts": "not-an-int",
+            }
+        )
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        with caplog.at_level(logging.WARNING):
+            await coord._async_load_store()
+
+    # Negative counters rejected → reset to 0 (not persisted as negatives).
+    assert coord._total_forwarded == 0, "negative total_forwarded must reset to 0"
+    assert coord._used_today == 0, "negative used_today must reset to 0"
+    # Corrupt timestamp rejected → None, WITH a warning (symmetric with the counters).
+    assert coord._last_forwarded_ts is None
+    assert "last_forwarded_ts" in caplog.text, (
+        "a corrupt last_forwarded_ts must be surfaced with a WARNING, not swallowed silently"
+    )
+
+
+async def test_load_store_rejects_bool_counters(hass, mock_config_entry):
+    """Finding 4: bool is an int subclass — True must not slip through as used_today=1."""
+    mock_config_entry.add_to_hass(hass)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "total_forwarded": True,
+                "used_today": True,
+                "used_today_date": today,
+                "last_forwarded_ts": False,
+            }
+        )
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert coord._total_forwarded == 0
+    assert coord._used_today == 0
+    assert coord._last_forwarded_ts is None
+
+
+async def test_load_store_accepts_valid_counters(hass, mock_config_entry):
+    """Finding 4: legitimate non-negative ints still hydrate unchanged."""
+    mock_config_entry.add_to_hass(hass)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "total_forwarded": 42,
+                "used_today": 7,
+                "used_today_date": today,
+                "last_forwarded_ts": 1700000000,
+            }
+        )
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert coord._total_forwarded == 42
+    assert coord._used_today == 7
+    assert coord._last_forwarded_ts == 1700000000
