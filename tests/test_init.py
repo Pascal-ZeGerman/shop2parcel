@@ -523,3 +523,37 @@ async def test_migration_sweep_preserves_allowlisted_entities(hass, mock_config_
     assert registry.async_get(fwd_entity.entity_id) is not None, (
         "shipments_forwarded (new operational) must be preserved"
     )
+
+
+def test_operational_uid_suffixes_derived_from_entity_classes():
+    """Finding 9: operational uid suffixes in KNOWN_GOOD_UID_SUFFIXES must come from the
+    entity classes' _unique_id_suffix attribute (single source of truth), not hardcoded
+    literals. Otherwise renaming a suffix on the class without also editing __init__.py
+    makes _sweep_orphaned_entities delete the freshly-registered entity on every restart.
+    """
+    from custom_components.shop2parcel import KNOWN_GOOD_UID_SUFFIXES
+    from custom_components.shop2parcel.binary_sensor import (
+        EmailProcessingActiveBinarySensor,
+        ProblemBinarySensor,
+    )
+    from custom_components.shop2parcel.sensor import (
+        LastForwardedSensor,
+        ParcelAppQuotaSensor,
+        ShipmentsForwardedSensor,
+    )
+
+    operational_classes = [
+        ProblemBinarySensor,
+        EmailProcessingActiveBinarySensor,
+        ShipmentsForwardedSensor,
+        LastForwardedSensor,
+        ParcelAppQuotaSensor,
+    ]
+    for cls in operational_classes:
+        assert hasattr(cls, "_unique_id_suffix"), (
+            f"{cls.__name__} must expose _unique_id_suffix (single source of truth)"
+        )
+        assert cls._unique_id_suffix in KNOWN_GOOD_UID_SUFFIXES, (
+            f"{cls.__name__}._unique_id_suffix={cls._unique_id_suffix} must be in the sweep "
+            "allowlist — derived from the class, not a drifting literal"
+        )

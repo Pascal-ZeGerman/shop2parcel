@@ -26,8 +26,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 
+from .binary_sensor import OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES
 from .const import DOMAIN
 from .diagnostic_sensor import DIAGNOSTIC_SENSOR_UID_SUFFIXES
+from .sensor import OPERATIONAL_SENSOR_UID_SUFFIXES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,23 +47,20 @@ PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 # is NOT in this set is treated as an orphan from a prior version and removed
 # during async_setup_entry before platform setup runs.
 #
-# Diagnostic sensor suffixes are derived from diagnostic_sensor.DIAGNOSTIC_SENSOR_UID_SUFFIXES
-# (single source of truth — class attributes, not string literals).
-# Adding a new DiagnosticSensor subclass and its suffix there automatically extends
-# this allowlist; forgetting to update diagnostic_sensor.py means the entity gets swept.
+# All suffixes are derived from the entity classes' _unique_id_suffix attributes —
+# the single source of truth (finding 9). DIAGNOSTIC_SENSOR_UID_SUFFIXES (diagnostic
+# sensors), OPERATIONAL_SENSOR_UID_SUFFIXES (sensor.py), and
+# OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES (binary_sensor.py) each build from the classes
+# they cover, so renaming a suffix on a class automatically updates this allowlist.
+# No string literals here — that duplication previously risked the sweep deleting a
+# freshly-registered entity whose class suffix had drifted from a hardcoded copy.
 #
 # NOTE: has_active_shipments is intentionally absent — it is an orphan to sweep.
 # NOTE: per-message suffixes (e.g. msgABC123) are not in the allowlist — orphans.
-KNOWN_GOOD_UID_SUFFIXES: frozenset[str] = DIAGNOSTIC_SENSOR_UID_SUFFIXES | frozenset(
-    {
-        # 1 binary sensor suffix
-        "email_processing_active",
-        # 4 operational sensor suffixes (Phase 26 Plan 03)
-        "shipments_forwarded",
-        "last_forwarded",
-        "parcelapp_quota",
-        "problem",
-    }
+KNOWN_GOOD_UID_SUFFIXES: frozenset[str] = (
+    DIAGNOSTIC_SENSOR_UID_SUFFIXES
+    | OPERATIONAL_SENSOR_UID_SUFFIXES
+    | OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES
 )
 
 

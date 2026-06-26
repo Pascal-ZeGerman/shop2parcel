@@ -105,6 +105,7 @@ class ShipmentsForwardedSensor(CoordinatorEntity[Shop2ParcelCoordinator], Sensor
     _attr_has_entity_name = True
     _attr_name = "Shipments Forwarded"
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _unique_id_suffix = "shipments_forwarded"  # single source of truth (finding 9)
 
     def __init__(
         self,
@@ -112,7 +113,7 @@ class ShipmentsForwardedSensor(CoordinatorEntity[Shop2ParcelCoordinator], Sensor
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_shipments_forwarded"
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{self._unique_id_suffix}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name="Shop2Parcel",
@@ -143,6 +144,7 @@ class LastForwardedSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntit
     _attr_has_entity_name = True
     _attr_name = "Last Forwarded"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _unique_id_suffix = "last_forwarded"  # single source of truth (finding 9)
 
     def __init__(
         self,
@@ -150,7 +152,7 @@ class LastForwardedSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntit
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_last_forwarded"
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{self._unique_id_suffix}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name="Shop2Parcel",
@@ -180,6 +182,7 @@ class ParcelAppQuotaSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEnti
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_name = "ParcelApp Quota"
+    _unique_id_suffix = "parcelapp_quota"  # single source of truth (finding 9)
 
     def __init__(
         self,
@@ -187,7 +190,7 @@ class ParcelAppQuotaSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEnti
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_parcelapp_quota"
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{self._unique_id_suffix}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name="Shop2Parcel",
@@ -207,3 +210,14 @@ class ParcelAppQuotaSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEnti
             "exhausted": self.coordinator.quota_is_exhausted,
             "description": ("estimate from our own count; authoritative only once a 429 is seen"),
         }
+
+
+# Single source of truth for operational sensor uid suffixes (finding 9).
+# __init__.py imports this to build KNOWN_GOOD_UID_SUFFIXES without duplication.
+OPERATIONAL_SENSOR_UID_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ShipmentsForwardedSensor._unique_id_suffix,
+        LastForwardedSensor._unique_id_suffix,
+        ParcelAppQuotaSensor._unique_id_suffix,
+    }
+)
