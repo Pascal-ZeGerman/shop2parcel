@@ -494,6 +494,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if self._used_today_date != today:
             self._used_today = 0
             self._used_today_date = today
+            # Finding 5: persist the rollover so a restart before the next forward does
+            # not restore yesterday's count. Fires only on an actual rollover (at most
+            # once per UTC day); _persist_state is await-free so it is safe here even
+            # when reached via the synchronous used_today property read path.
+            self._persist_state()
 
     def _record_forward(self) -> None:
         """Record one genuine 2xx POST success to ParcelApp.
@@ -1397,6 +1402,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         )
 
     async def _async_save_store(self) -> None:
+        """Schedule a debounced persist of dedup, quota, and shipment state to Store.
+
+        Thin async wrapper over the sync _persist_state() so the existing awaited
+        call sites keep working unchanged. The body is await-free (async_delay_save
+        only schedules), so _persist_state can also be invoked from sync contexts
+        such as a property read — see _maybe_reset_used_today (finding 5).
+        """
+        self._persist_state()
+
+    def _persist_state(self) -> None:
         """Schedule a debounced persist of current dedup, quota, and shipment state to Store.
 
         Uses async_delay_save (W1/P13-WR-06) so rapid per-message saves within

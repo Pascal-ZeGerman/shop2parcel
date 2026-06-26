@@ -4407,3 +4407,51 @@ async def test_load_store_accepts_valid_counters(hass, mock_config_entry):
     assert coord._total_forwarded == 42
     assert coord._used_today == 7
     assert coord._last_forwarded_ts == 1700000000
+
+
+async def test_used_today_rollover_persists_to_store(hass, mock_config_entry):
+    """Finding 5: a UTC date-rollover reset of used_today must be persisted.
+
+    _maybe_reset_used_today zeroed used_today/used_today_date in memory on rollover but
+    never scheduled a save. An HA restart after midnight UTC but before the first
+    forward restored yesterday's count, so the ParcelApp Quota sensor briefly
+    under-reported remaining quota. The reset must schedule a debounced persist.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        # Seed yesterday's state, then clear the save spy.
+        coord._used_today = 7
+        coord._used_today_date = "2000-01-01"  # definitely not today (UTC)
+        coord._store.async_delay_save.reset_mock()
+
+        # Reading the property triggers the UTC rollover reset.
+        assert coord.used_today == 0
+        assert coord._used_today_date == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert coord._store.async_delay_save.called, (
+            "used_today rollover reset must schedule a store save so it survives restart"
+        )
+
+
+async def test_used_today_no_rollover_does_not_persist(hass, mock_config_entry):
+    """Finding 5: reads WITHOUT a rollover must not schedule redundant saves."""
+    mock_config_entry.add_to_hass(hass)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        coord._used_today = 3
+        coord._used_today_date = today
+        coord._store.async_delay_save.reset_mock()
+
+        assert coord.used_today == 3
+        assert not coord._store.async_delay_save.called, (
+            "a same-day used_today read must not schedule a save (no rollover happened)"
+        )
