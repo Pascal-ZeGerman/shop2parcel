@@ -4657,6 +4657,11 @@ async def test_midnight_refresh_resets_used_today(hass, mock_config_entry):
         await coord._async_load_store()
         coord.enable_operational_timers()
         assert coord._midnight_unsub is not None, "enable must schedule the midnight timer"
+        # enable scheduled a real next-midnight timer. We drive _on_midnight directly below
+        # (not via an actual HA fire, which would fire+remove the timer first), so cancel the
+        # scheduled one now — otherwise _on_midnight nulls _midnight_unsub before rescheduling
+        # and the original timer leaks past teardown.
+        coord._cancel_operational_timers()
 
         coord._used_today = 9
         coord._used_today_date = "2000-01-01"  # stale prior day
