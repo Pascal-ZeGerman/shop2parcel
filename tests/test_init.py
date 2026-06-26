@@ -557,3 +557,32 @@ def test_operational_uid_suffixes_derived_from_entity_classes():
             f"{cls.__name__}._unique_id_suffix={cls._unique_id_suffix} must be in the sweep "
             "allowlist — derived from the class, not a drifting literal"
         )
+
+
+async def test_sweep_warns_on_has_active_shipments_removal(hass, mock_config_entry, caplog):
+    """Finding 11: removing the deprecated has_active_shipments entity must emit a WARNING
+    pointing users to the replacement, so automations referencing it leave a log
+    breadcrumb instead of breaking silently.
+    """
+    import logging
+
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.shop2parcel import _sweep_orphaned_entities
+    from custom_components.shop2parcel.const import DOMAIN
+
+    mock_config_entry.add_to_hass(hass)
+    entry_id = mock_config_entry.entry_id
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_has_active_shipments",
+        config_entry=mock_config_entry,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        _sweep_orphaned_entities(hass, mock_config_entry)
+
+    assert "has_active_shipments" in caplog.text, "removal must be surfaced at WARNING level"
+    assert "Shipments Forwarded" in caplog.text, "the warning must name the replacement entity"

@@ -63,6 +63,12 @@ KNOWN_GOOD_UID_SUFFIXES: frozenset[str] = (
     | OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES
 )
 
+# Suffix of the binary sensor removed in Phase 26 (P26-REMOVE-02). It was part of the
+# public entity surface before removal, so its sweep is logged at WARNING (not INFO) with
+# migration guidance — otherwise a user's automation/dashboard referencing it would break
+# silently (finding 11).
+_REMOVED_HAS_ACTIVE_SHIPMENTS_SUFFIX = "has_active_shipments"
+
 
 def _sweep_orphaned_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove orphaned entity registry entries left by prior integration versions.
@@ -91,11 +97,24 @@ def _sweep_orphaned_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
         suffix = uid[len(prefix) :]
         if suffix not in KNOWN_GOOD_UID_SUFFIXES:
             to_remove.append(reg_entry.entity_id)
-            _LOGGER.info(
-                "Phase 26 migration: removing orphaned entity %s (uid=%s)",
-                reg_entry.entity_id,
-                uid,
-            )
+            if suffix == _REMOVED_HAS_ACTIVE_SHIPMENTS_SUFFIX:
+                # Finding 11: this was a documented entity before Phase 26, so warn (not
+                # info) and point at the replacement — a user whose automations or
+                # dashboards reference it gets a log breadcrumb rather than silent breakage.
+                _LOGGER.warning(
+                    "Removing deprecated entity %s (uid=%s): the 'Has Active Shipments' "
+                    "binary sensor was removed in Phase 26. Update any automations or "
+                    "dashboards to use the 'Shipments Forwarded' sensor "
+                    "(its 'currently_tracked' attribute) instead.",
+                    reg_entry.entity_id,
+                    uid,
+                )
+            else:
+                _LOGGER.info(
+                    "Phase 26 migration: removing orphaned entity %s (uid=%s)",
+                    reg_entry.entity_id,
+                    uid,
+                )
     for entity_id in to_remove:
         registry.async_remove(entity_id)
 
