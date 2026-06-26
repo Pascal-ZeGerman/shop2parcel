@@ -1123,7 +1123,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             _LOGGER.debug("Stage-2 drain: posted deferred tn=%s successfully", normalized_tn)
 
         # Single save at end of drain loop — Pitfall 2 aligned (save covers all mutations above).
-        await self._async_save_store()
+        # immediate=True: drained items include genuine forwards, so persist durably (finding 12).
+        await self._async_save_store(immediate=True)
 
     async def _async_process_stage2_job(self, job: Stage2Job) -> None:
         """Process one Stage2Job: extract via Ollama, merge, POST to parcelapp, update state.
@@ -1339,7 +1340,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Guard: self.data is None before the first coordinator refresh; use empty dict as base.
         # MRG-02: persist and surface the merged shipment so sensors reflect merged state.
         self._pending_shipments = {**(self.data or {}), job.storage_key: merged_shipment}
-        await self._async_save_store()  # D-05: per-job save immediately
+        await self._async_save_store(immediate=True)  # D-05 / finding 12: durable per-job forward
         # Re-snapshot self.data immediately before publish to avoid stale-base race (S2).
         self.async_set_updated_data({**(self.data or {}), job.storage_key: merged_shipment})
         _LOGGER.debug("Stage-2 worker: posted %s successfully", normalized_tn)
@@ -1505,75 +1506,91 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             len(self._pending_posts),
         )
 
-    async def _async_save_store(self) -> None:
-        """Schedule a debounced persist of dedup, quota, and shipment state to Store.
+    async def _async_save_store(self, *, immediate: bool = False) -> None:
+        """Persist dedup, quota, shipment, and operational-counter state to Store.
 
-        Thin async wrapper over the sync _persist_state() so the existing awaited
-        call sites keep working unchanged. The body is await-free (async_delay_save
-        only schedules), so _persist_state can also be invoked from sync contexts
-        such as a property read — see _maybe_reset_used_today (finding 5).
+        Default (immediate=False): schedule a debounced write via the sync _persist_state()
+        — rapid per-message saves within a poll coalesce into one disk write. The existing
+        awaited call sites keep working unchanged.
+
+        immediate=True: write synchronously via Store.async_save, bypassing the 5s debounce,
+        so the forward counters survive an HA crash within the debounce window (finding 12).
+        Forwards are capped at ~20/day, so the extra immediate writes are negligible.
         """
-        self._persist_state()
+        if immediate:
+            await self._async_save_store_now()
+        else:
+            self._persist_state()
+
+    def _store_snapshot(self) -> dict:
+        """Build the full persisted-state dict from current in-memory state.
+
+        asdict() runs here (before any try block at the call site) so a serialization
+        failure surfaces immediately (loud-failure convention) rather than producing a
+        stale snapshot. Shared by the debounced (_persist_state) and immediate
+        (_async_save_store_now) write paths so the two can never drift.
+        """
+        return {
+            "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
+            "quota_exhausted_until": self._quota_exhausted_until,
+            "persisted_shipments": {
+                msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
+            },
+            # Phase 23 D-03 / LD-05: persist post-deferred merged shipments so they survive restarts.
+            "pending_posts": {
+                key: asdict(shipment) for key, shipment in self._pending_posts.items()
+            },
+            # Phase 26: operational-health counters (additive keys — no STORAGE_VERSION bump).
+            "total_forwarded": self._total_forwarded,
+            "last_forwarded_ts": self._last_forwarded_ts,
+            "used_today": self._used_today,
+            "used_today_date": self._used_today_date,
+        }
 
     def _persist_state(self) -> None:
-        """Schedule a debounced persist of current dedup, quota, and shipment state to Store.
+        """Schedule a debounced persist of current state to Store.
 
         Uses async_delay_save (W1/P13-WR-06) so rapid per-message saves within
         a single poll are coalesced into one write. async_delay_save is
         synchronous — it schedules the write; it does NOT write immediately.
 
-        The lambda captures _pending_shipments by reference; callers MUST assign
-        self._pending_shipments before calling this method — the 5-second debounce
-        means the value at fire-time is what gets stored.
-
-        The try/except guards against AttributeError (uninitialized store/hass) and
-        other unexpected scheduling failures; actual write errors surface in HA logs
-        when the delayed timer fires.
-
-        asdict() calls are intentionally outside the try block so a serialization
-        failure raises immediately (loud failure) rather than being silently swallowed
-        and producing a stale snapshot at the next debounce fire.
+        The snapshot is built BEFORE the lambda (stable values) — callers MUST assign
+        self._pending_shipments before calling this method. The try/except guards against
+        AttributeError (uninitialized store/hass) and other scheduling failures; actual
+        write errors surface in HA logs when the delayed timer fires.
         """
-        snapshot_tracking = list(self._submitted_tracking_numbers.keys())
-        snapshot_quota = self._quota_exhausted_until
-        snapshot_shipments = {
-            msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
-        }
-        # Phase 23 D-03 / LD-05: persist post-deferred merged shipments so they survive
-        # HA restarts. asdict() is intentionally outside the try block (loud-failure convention
-        # matching persisted_shipments above — serialization failures must surface immediately).
-        snapshot_pending = {key: asdict(shipment) for key, shipment in self._pending_posts.items()}
-        # Phase 26: snapshot counter state before the lambda so the debounced fire captures
-        # stable values (matches snapshot_tracking/snapshot_quota convention above).
-        snapshot_total_forwarded = self._total_forwarded
-        snapshot_last_forwarded_ts = self._last_forwarded_ts
-        snapshot_used_today = self._used_today
-        snapshot_used_today_date = self._used_today_date
+        snapshot = self._store_snapshot()  # asdict() outside try → loud serialization failure
         try:
-            self._store.async_delay_save(
-                lambda: {
-                    "submitted_tracking_numbers": snapshot_tracking,
-                    "quota_exhausted_until": snapshot_quota,
-                    "persisted_shipments": snapshot_shipments,
-                    "pending_posts": snapshot_pending,
-                    # Phase 26: operational-health counters (additive keys — no STORAGE_VERSION bump).
-                    "total_forwarded": snapshot_total_forwarded,
-                    "last_forwarded_ts": snapshot_last_forwarded_ts,
-                    "used_today": snapshot_used_today,
-                    "used_today_date": snapshot_used_today_date,
-                },
-                delay=5,
-            )
+            self._store.async_delay_save(lambda: snapshot, delay=5)
             _LOGGER.debug(
                 "Scheduled debounced save for %d submitted tracking numbers, "
                 "%d persisted shipments, and %d pending posts",
-                len(snapshot_tracking),
-                len(snapshot_shipments),
-                len(snapshot_pending),
+                len(snapshot["submitted_tracking_numbers"]),
+                len(snapshot["persisted_shipments"]),
+                len(snapshot["pending_posts"]),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
                 "Failed to schedule dedup state save — dedup may re-submit on next restart: %s",
+                err,
+                exc_info=True,
+            )
+
+    async def _async_save_store_now(self) -> None:
+        """Persist current state immediately (no debounce) so forward counters survive a
+        crash within the 5s debounce window (finding 12).
+
+        asdict() runs in _store_snapshot() before the try (loud-failure convention); the
+        write itself is guarded so a transient Store failure logs rather than crashing the
+        poll (the next debounced/immediate save will retry).
+        """
+        snapshot = self._store_snapshot()
+        try:
+            await self._store.async_save(snapshot)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Failed to persist forward state immediately — counters may revert on a "
+                "crash before the next save: %s",
                 err,
                 exc_info=True,
             )

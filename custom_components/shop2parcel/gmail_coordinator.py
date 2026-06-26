@@ -546,7 +546,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
                 current_data[storage_key] = shipment
                 self._pending_shipments = current_data
-                await self._async_save_store()
+                await self._async_save_store(immediate=True)  # finding 12: durable forward
                 self._emit_scan_event(
                     message_id=f"gmail:{msg_id}",
                     meta=email_meta,

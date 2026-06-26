@@ -291,10 +291,11 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
 
 
 async def test_store_saved_after_post(hass, mock_config_entry):
-    """FWRD-03: Store.async_delay_save scheduled immediately after each successful POST.
+    """FWRD-03 / finding 12: forward counters persisted IMMEDIATELY after each successful POST.
 
-    W1/P13-WR-06: saves are now debounced via async_delay_save (synchronous schedule).
-    Two distinct shipments → at least 2 schedule calls.
+    Post-forward saves now write durably via Store.async_save (not the 5s debounce) so a
+    crash in the debounce window can't lose the count. Two distinct shipments → at least 2
+    immediate writes.
     """
     mock_config_entry.add_to_hass(hass)
     with (
@@ -318,8 +319,9 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        save_mock = MagicMock()
-        mock_store_cls.return_value.async_delay_save = save_mock
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        save_mock = AsyncMock()  # immediate durable write path (finding 12)
+        mock_store_cls.return_value.async_save = save_mock
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
             return_value=([{"id": "msg1"}, {"id": "msg2"}], "q after:0")
         )
@@ -349,8 +351,8 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         await coord._async_update_data()
-        # W1: debounced save scheduled after each POST — at least 2 schedule calls.
-        assert save_mock.call_count >= 2
+        # finding 12: immediate durable write after each POST — at least 2 writes.
+        assert save_mock.await_count >= 2
 
 
 # -------- FWRD-04: quota handling ---------------------------------------
@@ -4669,3 +4671,53 @@ async def test_midnight_refresh_resets_used_today(hass, mock_config_entry):
         assert coord._midnight_unsub is not None, "midnight timer must reschedule itself"
 
         coord._cancel_operational_timers()
+
+
+async def test_forward_counter_persisted_immediately(hass, mock_config_entry):
+    """Finding 12: the immediate post-forward save carries the incremented counters, so an
+    HA crash before the 5s debounce fire cannot lose them.
+    """
+    mock_config_entry.add_to_hass(hass)
+    captured: dict = {}
+
+    async def _capture(data):
+        captured.update(data)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html/>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock(side_effect=_capture)
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    assert captured.get("total_forwarded") == 1, "immediate save must carry total_forwarded"
+    assert captured.get("used_today") == 1, "immediate save must carry used_today"
+    assert captured.get("last_forwarded_ts") is not None, "immediate save must carry the timestamp"
