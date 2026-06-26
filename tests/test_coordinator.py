@@ -4572,3 +4572,100 @@ async def test_imap_poll_dispatches_off_on_failure(hass, mock_imap_config_entry)
 
     assert coord._poll_in_progress is False
     assert mock_notify.called, "IMAP failure path must dispatch so the sensor flips OFF"
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: time-boundary refresh timers
+# ---------------------------------------------------------------------------
+
+
+async def test_arm_quota_expiry_timer_gated_by_enable(hass, mock_config_entry):
+    """Finding 3: arming is a no-op until enable_operational_timers().
+
+    This gate is what keeps the many bare-coordinator tests that assign
+    _quota_exhausted_until directly from leaking real (lingering) timers.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+
+        # Disabled (bare coordinator): arming does nothing even with a future window.
+        coord._quota_exhausted_until = int(time_module.time()) + 3600
+        coord._arm_quota_expiry_timer()
+        assert coord._quota_expiry_unsub is None
+
+        # Enabled: a future window schedules a timer; clearing the window cancels it.
+        coord.enable_operational_timers()
+        coord._quota_exhausted_until = int(time_module.time()) + 3600
+        coord._arm_quota_expiry_timer()
+        assert coord._quota_expiry_unsub is not None
+        coord._quota_exhausted_until = None
+        coord._arm_quota_expiry_timer()
+        assert coord._quota_expiry_unsub is None
+
+        coord._cancel_operational_timers()
+
+
+async def test_quota_expiry_timer_fires_and_refreshes(hass, mock_config_entry):
+    """Finding 3: when the quota window elapses, the timer clears the stale block and
+    dispatches to listeners so ProblemBinarySensor / ParcelAppQuotaSensor refresh
+    without waiting for the next poll.
+    """
+    import homeassistant.util.dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        coord.enable_operational_timers()
+
+        coord._quota_exhausted_until = int(time_module.time()) + 30
+        coord._arm_quota_expiry_timer()
+        assert coord.quota_is_exhausted is True
+        assert coord._quota_expiry_unsub is not None
+
+        notified = []
+        with patch.object(coord, "async_update_listeners", side_effect=lambda: notified.append(1)):
+            async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+            await hass.async_block_till_done()
+
+        assert coord._quota_exhausted_until is None, "expiry timer must clear the stale window"
+        assert coord.quota_is_exhausted is False
+        assert notified, "expiry timer must dispatch so the Problem/Quota entities refresh"
+
+        coord._cancel_operational_timers()
+
+
+async def test_midnight_refresh_resets_used_today(hass, mock_config_entry):
+    """Finding 3: the UTC-midnight timer forces the used_today rollover reset and
+    dispatches to listeners, then reschedules itself for the next midnight.
+    """
+    import homeassistant.util.dt as dt_util
+
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        coord.enable_operational_timers()
+        assert coord._midnight_unsub is not None, "enable must schedule the midnight timer"
+
+        coord._used_today = 9
+        coord._used_today_date = "2000-01-01"  # stale prior day
+
+        notified = []
+        with patch.object(coord, "async_update_listeners", side_effect=lambda: notified.append(1)):
+            coord._on_midnight(dt_util.utcnow())  # direct call avoids the self-reschedule fire loop
+
+        assert coord._used_today == 0, "midnight refresh must reset used_today"
+        assert coord._used_today_date == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert notified, "midnight refresh must dispatch so the Quota sensor updates"
+        assert coord._midnight_unsub is not None, "midnight timer must reschedule itself"
+
+        coord._cancel_operational_timers()

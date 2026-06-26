@@ -409,6 +409,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     self._quota_exhausted_until = (
                         err.reset_at if err.reset_at is not None else _next_midnight_utc()
                     )
+                    self._arm_quota_expiry_timer()  # finding 3: refresh entities at expiry
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     _LOGGER.warning(
@@ -535,6 +536,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             and int(time.time()) >= self._quota_exhausted_until
         ):
             self._quota_exhausted_until = None
+            self._arm_quota_expiry_timer()  # finding 3: cancel the now-obsolete expiry timer
             await self._async_save_store()
 
         if not debug_mode:

@@ -30,10 +30,11 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -460,6 +461,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
         self._stage2_consecutive_failures: int = 0
         self._stage2_last_notify_ts: float | None = None
+        # Finding 3: time-boundary refresh timers for the should_poll=False operational
+        # entities. quota_is_exhausted / used_today flip by the passage of time (no event),
+        # so without these the Problem + Quota sensors stay stale until the next poll.
+        # Gated by _operational_timers_enabled (set True only from async_setup_entry via
+        # enable_operational_timers) so bare-coordinator unit tests that assign
+        # _quota_exhausted_until directly never schedule real (lingering) timers.
+        self._operational_timers_enabled: bool = False
+        self._quota_expiry_unsub: CALLBACK_TYPE | None = None
+        self._midnight_unsub: CALLBACK_TYPE | None = None
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
@@ -688,6 +698,99 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._quota_exhausted_until is not None
             and int(_time.time()) < self._quota_exhausted_until
         )
+
+    # ------------------------------------------------------------------
+    # Finding 3: time-boundary refresh timers
+    # ------------------------------------------------------------------
+
+    def enable_operational_timers(self) -> None:
+        """Enable the time-boundary refresh timers (finding 3).
+
+        Called once from async_setup_entry after the first refresh. Gated behind a flag
+        so unit tests that construct the coordinator bare (and poke _quota_exhausted_until
+        directly) never schedule real timers — only a fully set-up entry arms them. Arms
+        the quota-expiry timer (in case store hydration loaded a still-future window) and
+        the daily UTC-midnight used_today refresh. Pair with _cancel_operational_timers
+        registered via entry.async_on_unload.
+        """
+        self._operational_timers_enabled = True
+        self._arm_quota_expiry_timer()
+        self._schedule_midnight_refresh()
+
+    def _cancel_operational_timers(self) -> None:
+        """Cancel both refresh timers (registered via entry.async_on_unload).
+
+        Idempotent — safe on every teardown path (clean unload, exception, HA shutdown).
+        """
+        if self._quota_expiry_unsub is not None:
+            self._quota_expiry_unsub()
+            self._quota_expiry_unsub = None
+        if self._midnight_unsub is not None:
+            self._midnight_unsub()
+            self._midnight_unsub = None
+
+    def _arm_quota_expiry_timer(self) -> None:
+        """(Re)schedule the one-shot timer that refreshes entities when the ParcelApp
+        quota window expires (finding 3).
+
+        Called after every _quota_exhausted_until mutation in the poll/drain paths.
+        No-op unless operational timers are enabled, so direct attribute assignment in
+        tests never leaks a timer. Always cancels any prior quota timer first; schedules
+        a new one only when _quota_exhausted_until is still in the future (a past value
+        is already reported as not-exhausted, and the poll-time clear persists it).
+        """
+        if self._quota_expiry_unsub is not None:
+            self._quota_expiry_unsub()
+            self._quota_expiry_unsub = None
+        if not self._operational_timers_enabled:
+            return
+        until = self._quota_exhausted_until
+        if until is None or until <= int(_time.time()):
+            return
+        self._quota_expiry_unsub = async_track_point_in_time(
+            self.hass, self._on_quota_expiry, datetime.fromtimestamp(until, tz=UTC)
+        )
+
+    @callback
+    def _on_quota_expiry(self, _now: datetime) -> None:
+        """Quota window elapsed: clear the stale block, persist, and refresh entities.
+
+        The timer is re-armed on every _quota_exhausted_until change (set or clear), so
+        when it fires it always corresponds to the current window — clear unconditionally.
+        Clearing in memory makes quota_is_exhausted read False immediately; persisting it
+        means the cleared state survives a restart (mirrors the poll-time stale-quota clear).
+        """
+        self._quota_expiry_unsub = None
+        if self._quota_exhausted_until is not None:
+            self._quota_exhausted_until = None
+            self._persist_state()
+        self.async_update_listeners()
+
+    def _schedule_midnight_refresh(self) -> None:
+        """(Re)schedule the one-shot timer at the next 00:00 UTC that refreshes used_today
+        (finding 3).
+
+        used_today auto-resets on UTC date rollover but only when the property is read;
+        with should_poll=False nothing reads it at midnight, so the Quota sensor can show
+        the prior day's count until the next poll. No-op unless operational timers are
+        enabled. Reschedules itself each midnight.
+        """
+        if self._midnight_unsub is not None:
+            self._midnight_unsub()
+            self._midnight_unsub = None
+        if not self._operational_timers_enabled:
+            return
+        self._midnight_unsub = async_track_point_in_time(
+            self.hass, self._on_midnight, datetime.fromtimestamp(_next_midnight_utc(), tz=UTC)
+        )
+
+    @callback
+    def _on_midnight(self, _now: datetime) -> None:
+        """UTC midnight: force the used_today rollover reset, refresh entities, reschedule."""
+        self._midnight_unsub = None
+        self._maybe_reset_used_today()
+        self.async_update_listeners()
+        self._schedule_midnight_refresh()
 
     def _emit_scan_event(
         self,
@@ -978,6 +1081,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._quota_exhausted_until = (
                     err.reset_at if err.reset_at is not None else _next_midnight_utc()
                 )
+                self._arm_quota_expiry_timer()  # finding 3: refresh entities when it expires
                 _LOGGER.warning(
                     "Stage-2 drain: parcelapp quota hit mid-drain — deferring remaining "
                     "pending items until quota resets"
@@ -1185,6 +1289,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._quota_exhausted_until = (
                 err.reset_at if err.reset_at is not None else _next_midnight_utc()
             )
+            self._arm_quota_expiry_timer()  # finding 3: refresh entities when it expires
             _LOGGER.warning(
                 "parcelapp.net daily quota exhausted (Stage-2 worker); forwarding paused: %s",
                 str(err)[:100],
