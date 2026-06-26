@@ -98,9 +98,37 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         entry = self.config_entry
         if entry is None:
             raise UpdateFailed("config_entry is None — coordinator not properly initialized")
-        imap_client = cast(ImapClient, self._email_client)
 
         self._reset_stage2_poll_counters()  # Phase 20 MRG-05 / D-11: reset per-poll counters
+
+        # M6A-01 / finding 7: signal poll-in-progress so EmailProcessingActiveBinarySensor
+        # reads on for the duration of the poll, then flip it off afterwards — without the
+        # redundant double/triple dispatch the old try/finally produced.
+        self._poll_in_progress = True
+        try:
+            self.async_update_listeners()  # turn the sensor ON at poll start
+            result = await self._async_update_data_inner()
+        except BaseException:
+            # Failure path: HA's base _async_refresh may re-raise (e.g. ConfigEntryAuthFailed)
+            # before dispatching its own listener round, so reset the flag and notify here so
+            # the sensor still flips OFF. Guard the dispatch so a listener error never masks
+            # the original poll exception.
+            self._poll_in_progress = False
+            try:
+                self.async_update_listeners()
+            except Exception:  # noqa: BLE001 — never mask the poll exception with a listener error
+                _LOGGER.debug("listener dispatch raised during poll-failure unwind", exc_info=True)
+            raise
+        # Success path: HA's base coordinator dispatches listeners after we return, so just
+        # reset the flag here — no redundant dispatch (finding 7).
+        self._poll_in_progress = False
+        return result
+
+    async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
+        """Inner implementation of the IMAP poll cycle (called from _async_update_data)."""
+        entry = self.config_entry
+        assert entry is not None  # guaranteed by _async_update_data
+        imap_client = cast(ImapClient, self._email_client)
 
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
@@ -381,6 +409,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     self._quota_exhausted_until = (
                         err.reset_at if err.reset_at is not None else _next_midnight_utc()
                     )
+                    self._arm_quota_expiry_timer()  # finding 3: refresh entities at expiry
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     _LOGGER.warning(
@@ -457,9 +486,10 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 self._submitted_tracking_numbers[normalized] = None
                 if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                     self._submitted_tracking_numbers.popitem(last=False)
+                self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
                 current_data[storage_key] = shipment
                 self._pending_shipments = current_data
-                await self._async_save_store()
+                await self._async_save_store(immediate=True)  # finding 12: durable forward
                 self._emit_scan_event(
                     message_id=f"imap:{uid_str}",
                     meta=imap_meta,
@@ -506,6 +536,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             and int(time.time()) >= self._quota_exhausted_until
         ):
             self._quota_exhausted_until = None
+            self._arm_quota_expiry_timer()  # finding 3: cancel the now-obsolete expiry timer
             await self._async_save_store()
 
         if not debug_mode:

@@ -374,3 +374,215 @@ async def test_stage2_v12_entry_no_ollama_url_loads_without_exception(hass, mock
         # Must not raise
         result = await hass.config_entries.async_setup(mock_config_entry.entry_id)
     assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 26 Plan 02: Migration sweep tests (P26-REG-01..03)
+# ---------------------------------------------------------------------------
+
+
+async def test_migration_sweep_removes_shipment_entities(hass, mock_config_entry):
+    """P26-REG-01: Orphaned shipment_* entities are removed from registry during setup.
+
+    Pre-seed an entity with a per-message uid (shop2parcel_{entry_id}_msgABC123) under
+    the config entry. After async_setup_entry, that entity must no longer exist in the
+    entity registry — the _sweep_orphaned_entities migration removed it.
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    mock_config_entry.add_to_hass(hass)
+    entry_id = mock_config_entry.entry_id
+    from custom_components.shop2parcel.const import DOMAIN
+
+    # Pre-seed an orphaned per-message shipment entity
+    registry = er.async_get(hass)
+    orphan = registry.async_get_or_create(
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_msgABC123",
+        config_entry=mock_config_entry,
+    )
+    assert registry.async_get(orphan.entity_id) is not None, "Pre-condition: entity seeded"
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        result = await hass.config_entries.async_setup(entry_id)
+
+    assert result is True
+    # The orphaned entity must be gone after setup
+    assert registry.async_get(orphan.entity_id) is None, (
+        "Orphaned shipment_* entity must be removed by migration sweep"
+    )
+
+
+async def test_migration_sweep_removes_has_active_shipments(hass, mock_config_entry):
+    """P26-REG-02: has_active_shipments entity is removed by _sweep_orphaned_entities.
+
+    Tests the sweep function directly to confirm has_active_shipments is absent from
+    KNOWN_GOOD_UID_SUFFIXES and is collected for removal.  The full async_setup_entry
+    path is not used here because binary_sensor.py still contains HasActiveShipmentsBinarySensor
+    which re-registers the entity during platform setup — that class is removed in Plan 03.
+    Direct sweep testing is the correct approach for Plan 02.
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    mock_config_entry.add_to_hass(hass)
+    entry_id = mock_config_entry.entry_id
+    from custom_components.shop2parcel import _sweep_orphaned_entities
+    from custom_components.shop2parcel.const import DOMAIN
+
+    registry = er.async_get(hass)
+    orphan = registry.async_get_or_create(
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_has_active_shipments",
+        config_entry=mock_config_entry,
+    )
+    assert registry.async_get(orphan.entity_id) is not None, "Pre-condition: entity seeded"
+
+    # Call the sweep function directly — bypasses binary_sensor platform re-registration
+    _sweep_orphaned_entities(hass, mock_config_entry)
+
+    assert registry.async_get(orphan.entity_id) is None, (
+        "has_active_shipments entity must be removed by _sweep_orphaned_entities"
+    )
+
+
+async def test_migration_sweep_preserves_allowlisted_entities(hass, mock_config_entry):
+    """P26-REG-03: Allowlisted entities (diagnostic + operational) survive the sweep.
+
+    Pre-seed:
+      - sensor with diagnostic suffix emails_scanned
+      - binary_sensor with suffix email_processing_active
+      - sensor with new operational suffix shipments_forwarded
+
+    All three must still exist in the entity registry after async_setup_entry.
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    mock_config_entry.add_to_hass(hass)
+    entry_id = mock_config_entry.entry_id
+    from custom_components.shop2parcel.const import DOMAIN
+
+    registry = er.async_get(hass)
+    diag_entity = registry.async_get_or_create(
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_emails_scanned",
+        config_entry=mock_config_entry,
+    )
+    proc_entity = registry.async_get_or_create(
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_email_processing_active",
+        config_entry=mock_config_entry,
+    )
+    fwd_entity = registry.async_get_or_create(
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_shipments_forwarded",
+        config_entry=mock_config_entry,
+    )
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        result = await hass.config_entries.async_setup(entry_id)
+
+    assert result is True
+    # All three allowlisted entities must survive the sweep
+    assert registry.async_get(diag_entity.entity_id) is not None, (
+        "emails_scanned (diagnostic) must be preserved"
+    )
+    assert registry.async_get(proc_entity.entity_id) is not None, (
+        "email_processing_active must be preserved"
+    )
+    assert registry.async_get(fwd_entity.entity_id) is not None, (
+        "shipments_forwarded (new operational) must be preserved"
+    )
+
+
+def test_operational_uid_suffixes_derived_from_entity_classes():
+    """Finding 9: operational uid suffixes in KNOWN_GOOD_UID_SUFFIXES must come from the
+    entity classes' _unique_id_suffix attribute (single source of truth), not hardcoded
+    literals. Otherwise renaming a suffix on the class without also editing __init__.py
+    makes _sweep_orphaned_entities delete the freshly-registered entity on every restart.
+    """
+    from custom_components.shop2parcel import KNOWN_GOOD_UID_SUFFIXES
+    from custom_components.shop2parcel.binary_sensor import (
+        EmailProcessingActiveBinarySensor,
+        ProblemBinarySensor,
+    )
+    from custom_components.shop2parcel.sensor import (
+        LastForwardedSensor,
+        ParcelAppQuotaSensor,
+        ShipmentsForwardedSensor,
+    )
+
+    operational_classes = [
+        ProblemBinarySensor,
+        EmailProcessingActiveBinarySensor,
+        ShipmentsForwardedSensor,
+        LastForwardedSensor,
+        ParcelAppQuotaSensor,
+    ]
+    for cls in operational_classes:
+        assert hasattr(cls, "_unique_id_suffix"), (
+            f"{cls.__name__} must expose _unique_id_suffix (single source of truth)"
+        )
+        assert cls._unique_id_suffix in KNOWN_GOOD_UID_SUFFIXES, (
+            f"{cls.__name__}._unique_id_suffix={cls._unique_id_suffix} must be in the sweep "
+            "allowlist — derived from the class, not a drifting literal"
+        )
+
+
+async def test_sweep_warns_on_has_active_shipments_removal(hass, mock_config_entry, caplog):
+    """Finding 11: removing the deprecated has_active_shipments entity must emit a WARNING
+    pointing users to the replacement, so automations referencing it leave a log
+    breadcrumb instead of breaking silently.
+    """
+    import logging
+
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.shop2parcel import _sweep_orphaned_entities
+    from custom_components.shop2parcel.const import DOMAIN
+
+    mock_config_entry.add_to_hass(hass)
+    entry_id = mock_config_entry.entry_id
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{DOMAIN}_{entry_id}_has_active_shipments",
+        config_entry=mock_config_entry,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        _sweep_orphaned_entities(hass, mock_config_entry)
+
+    assert "has_active_shipments" in caplog.text, "removal must be surfaced at WARNING level"
+    assert "Shipments Forwarded" in caplog.text, "the warning must name the replacement entity"

@@ -291,10 +291,11 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
 
 
 async def test_store_saved_after_post(hass, mock_config_entry):
-    """FWRD-03: Store.async_delay_save scheduled immediately after each successful POST.
+    """FWRD-03 / finding 12: forward counters persisted IMMEDIATELY after each successful POST.
 
-    W1/P13-WR-06: saves are now debounced via async_delay_save (synchronous schedule).
-    Two distinct shipments → at least 2 schedule calls.
+    Post-forward saves now write durably via Store.async_save (not the 5s debounce) so a
+    crash in the debounce window can't lose the count. Two distinct shipments → at least 2
+    immediate writes.
     """
     mock_config_entry.add_to_hass(hass)
     with (
@@ -318,8 +319,9 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         }
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        save_mock = MagicMock()
-        mock_store_cls.return_value.async_delay_save = save_mock
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        save_mock = AsyncMock()  # immediate durable write path (finding 12)
+        mock_store_cls.return_value.async_save = save_mock
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(
             return_value=([{"id": "msg1"}, {"id": "msg2"}], "q after:0")
         )
@@ -349,8 +351,8 @@ async def test_store_saved_after_post(hass, mock_config_entry):
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
         await coord._async_update_data()
-        # W1: debounced save scheduled after each POST — at least 2 schedule calls.
-        assert save_mock.call_count >= 2
+        # finding 12: immediate durable write after each POST — at least 2 writes.
+        assert save_mock.await_count >= 2
 
 
 # -------- FWRD-04: quota handling ---------------------------------------
@@ -885,6 +887,56 @@ async def test_cleanup_removes_delivered_from_data(hass, mock_config_entry):
 
     assert "msg_a" not in coordinator.data
     assert "msg_b" in coordinator.data
+
+
+async def test_cleanup_entity_registry_noop_for_phase26(hass, mock_config_entry):
+    """Entity-registry removal loop is a no-op for Phase 26 installs.
+
+    _sweep_orphaned_entities (run at async_setup_entry) already removed all
+    per-message uid entries before the first async_cleanup_delivered fires.
+    The loop targets uids of the form {DOMAIN}_{entry_id}_{msg_id}; since no
+    such entries exist in the registry after the Phase 26 migration sweep,
+    async_remove must never be called even when a delivered shipment is removed
+    from coordinator.data.
+    """
+    mock_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(
+        return_value=[{"tracking_number": "TRACK_A", "status_code": 0}]
+    )
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+
+        # Seed coordinator.data with a delivered shipment (no registry entry for it — Phase 26)
+        coordinator.async_set_updated_data(
+            {"msg_a": ShipmentData("TRACK_A", "UPS", "#1", "msg_a", 1)}
+        )
+
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        with patch.object(registry, "async_remove") as mock_remove:
+            await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+            mock_remove.assert_not_called()
+
+    # Data was still cleaned up even though registry removal was a no-op
+    assert "msg_a" not in coordinator.data
 
 
 async def test_cleanup_uses_filter_mode_recent(hass, mock_config_entry):
@@ -3945,3 +3997,770 @@ def test_extract_imap_email_meta_returns_defaults_on_parse_error():
     ):
         result = _extract_imap_email_meta(b"raw bytes")
     assert result == {"subject": "", "from": "", "date": "", "snippet": ""}
+
+
+# -------- Phase 26: counter state helpers --------------------------------
+
+
+async def test_used_today_resets_on_date_rollover(hass, mock_config_entry):
+    """P26-CNT-03: _maybe_reset_used_today resets _used_today=0 on stale date; no-op same day.
+
+    Wave 0 RED: fails until _maybe_reset_used_today and _used_today_date are added to coordinator.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+
+    # Seed stale values
+    coord._used_today = 5
+    coord._used_today_date = "2000-01-01"  # stale date — guaranteed to differ from today
+
+    coord._maybe_reset_used_today()
+
+    assert coord._used_today == 0, "used_today must reset to 0 on stale date"
+    # _used_today_date must now match today's UTC date
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    assert coord._used_today_date == _dt.now(UTC).strftime("%Y-%m-%d"), (
+        "_used_today_date must be updated to today's UTC date after reset"
+    )
+
+    # Second call same day — must NOT reset (stays at current value)
+    coord._used_today = 2
+    coord._maybe_reset_used_today()
+    assert coord._used_today == 2, (
+        "_maybe_reset_used_today must be no-op when date has not rolled over"
+    )
+
+
+async def test_record_forward_skips_already_added(hass, mock_config_entry):
+    """P26-CNT: _record_forward increments counters exactly N times when called N times.
+
+    Wave 0 RED: fails until _record_forward is added to coordinator.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+
+    assert coord.total_forwarded == 0
+    assert coord.last_forwarded_ts is None
+
+    coord._record_forward()
+    assert coord.total_forwarded == 1
+    assert coord.last_forwarded_ts is not None
+    assert isinstance(coord.last_forwarded_ts, int)
+
+    coord._record_forward()
+    assert coord.total_forwarded == 2, "_record_forward must increment by exactly 1 on each call"
+
+
+# -------- Phase 26: _record_forward wired at POST-success sites (Task 2) ------
+
+
+async def test_total_forwarded_increments_on_gmail_post(hass, mock_config_entry):
+    """P26-CNT-01 (site 1): Gmail Stage-1 2xx success increments total_forwarded/used_today.
+
+    AlreadyAdded must NOT increment (proves counter is on the true 2xx path only).
+    Wave 0 RED: fails until _record_forward is called in gmail_coordinator.py success block.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
+        # First poll: async_add_delivery succeeds (2xx)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    assert coord.total_forwarded == 1, "total_forwarded must be 1 after one successful gmail POST"
+    assert coord.used_today == 1, "used_today must be 1 after one successful gmail POST"
+    assert coord.last_forwarded_ts is not None, (
+        "last_forwarded_ts must be set after successful POST"
+    )
+
+    # Second poll: same TN now raises AlreadyAdded — counter must NOT increment
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls2,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
+        ) as mock_parcel_cls2,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls2,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth2,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_oauth2.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth2.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth2.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls2.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls2.return_value.async_delay_save = MagicMock()
+        # Use a new tracking number so dedup doesn't skip it before even attempting POST
+        new_shipment = ShipmentData(
+            tracking_number="ALREADY_TN_001",
+            carrier_name="UPS",
+            order_name="#1235",
+            message_id="msg2",
+            email_date=1700000001,
+        )
+        mock_gmail_cls2.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg2"}], "q after:0")
+        )
+        mock_gmail_cls2.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000001000", "payload": {}}
+        )
+        mock_parser_cls2.return_value.parse.return_value = _make_parse_result(new_shipment)
+        mock_parcel_cls2.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+        coord2 = GmailCoordinator(hass, mock_config_entry)
+        await coord2._async_load_store()
+        # Copy counter state to new coordinator instance AFTER load (load resets to 0)
+        coord2._total_forwarded = coord._total_forwarded
+        coord2._used_today = coord._used_today
+        coord2._used_today_date = coord._used_today_date
+        coord2._last_forwarded_ts = coord._last_forwarded_ts
+        await coord2._async_update_data()
+
+    assert coord2.total_forwarded == 1, (
+        "total_forwarded must NOT increment on AlreadyAdded (stays at 1)"
+    )
+
+
+async def test_total_forwarded_increments_on_imap_post(hass, mock_imap_config_entry):
+    """P26-CNT-01 (site 2): IMAP Stage-1 2xx success increments total_forwarded/used_today.
+
+    AlreadyAdded must NOT increment.
+    Wave 0 RED: fails until _record_forward is called in imap_coordinator.py success block.
+    """
+    mock_imap_config_entry.add_to_hass(hass)
+    raw_msg = _make_imap_raw_message(200)
+    shipment = _make_shipment("200")
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(shipment)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()  # success
+
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    assert coord.total_forwarded == 1, "total_forwarded must be 1 after one successful IMAP POST"
+    assert coord.used_today == 1, "used_today must be 1 after one successful IMAP POST"
+    assert coord.last_forwarded_ts is not None
+
+    # Second poll: AlreadyAdded on a different TN — counter must NOT increment
+    raw_msg2 = _make_imap_raw_message(201)
+    already_added_shipment = ShipmentData(
+        tracking_number="IMAP_ALREADY_001",
+        carrier_name="UPS",
+        order_name="#2001",
+        message_id="201",
+        email_date=1700000001,
+    )
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls2,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls2,
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls2,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipped</html>",
+        ),
+    ):
+        mock_store_cls2.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls2.return_value.async_delay_save = MagicMock()
+        mock_imap_cls2.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg2])
+        mock_parser_cls2.return_value.parse.return_value = _make_parse_result(
+            already_added_shipment
+        )
+        mock_parcel_cls2.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord2 = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord2._async_load_store()
+        # Copy counter state to new coordinator AFTER load (load resets to 0)
+        coord2._total_forwarded = coord._total_forwarded
+        coord2._used_today = coord._used_today
+        coord2._used_today_date = coord._used_today_date
+        coord2._last_forwarded_ts = coord._last_forwarded_ts
+        await coord2._async_update_data()
+
+    assert coord2.total_forwarded == 1, (
+        "total_forwarded must NOT increment on IMAP AlreadyAdded (stays at 1)"
+    )
+
+
+async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry):
+    """P26-CNT-01 (site 4): drain 2xx success increments total_forwarded.
+
+    AlreadyAdded fall-through in drain must NOT increment (2xx-gated by posted_2xx flag).
+    Wave 0 RED: fails until _record_forward is called with 2xx gate in _async_drain_pending_posts.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        # Seed one pending post
+        drain_shipment = ShipmentData(
+            tracking_number="DRAIN_TN_001",
+            carrier_name="UPS",
+            order_name="#8001",
+            message_id="msg-drain-1",
+            email_date=1700000001,
+        )
+        coord._pending_posts = {"drain_key_1": drain_shipment}
+        coord._quota_exhausted_until = None
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()  # 2xx
+
+        await coord._async_drain_pending_posts()
+
+    assert coord.total_forwarded == 1, "total_forwarded must be 1 after one successful drain POST"
+    assert coord.last_forwarded_ts is not None, "last_forwarded_ts must be set after drain POST"
+
+    # Now test AlreadyAdded in drain: counter must NOT increment
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls2,
+    ):
+        mock_store_cls2.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls2.return_value.async_delay_save = MagicMock()
+
+        coord3 = GmailCoordinator(hass, mock_config_entry)
+        await coord3._async_load_store()
+        # Copy counter state AFTER load (load resets to 0)
+        coord3._total_forwarded = coord._total_forwarded
+        coord3._used_today = coord._used_today
+        coord3._used_today_date = coord._used_today_date
+        coord3._last_forwarded_ts = coord._last_forwarded_ts
+
+        already_added_drain = ShipmentData(
+            tracking_number="DRAIN_ALREADY_002",
+            carrier_name="UPS",
+            order_name="#8002",
+            message_id="msg-drain-2",
+            email_date=1700000002,
+        )
+        coord3._pending_posts = {"drain_key_2": already_added_drain}
+        coord3._quota_exhausted_until = None
+        mock_parcel_cls2.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        await coord3._async_drain_pending_posts()
+
+    assert coord3.total_forwarded == 1, (
+        "total_forwarded must NOT increment on drain AlreadyAdded (stays at 1)"
+    )
+
+
+async def test_load_store_rejects_corrupt_operational_counters(hass, mock_config_entry, caplog):
+    """Finding 4: hydration guard must reject negative/bool counters and warn on a
+    corrupt last_forwarded_ts.
+
+    The guard claims to prevent 'counter inflation from corrupt or hand-edited store
+    data' (T-26-01) but isinstance(x, int) accepts negatives AND bool (an int
+    subclass). A negative used_today made ParcelAppQuotaSensor advertise MORE than the
+    daily limit. last_forwarded_ts silently coerced bad data to None with no warning.
+    """
+    mock_config_entry.add_to_hass(hass)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "total_forwarded": -5,
+                "used_today": -3,
+                "used_today_date": today,  # avoid the property's rollover reset masking the guard
+                "last_forwarded_ts": "not-an-int",
+            }
+        )
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        with caplog.at_level(logging.WARNING):
+            await coord._async_load_store()
+
+    # Negative counters rejected → reset to 0 (not persisted as negatives).
+    assert coord._total_forwarded == 0, "negative total_forwarded must reset to 0"
+    assert coord._used_today == 0, "negative used_today must reset to 0"
+    # Corrupt timestamp rejected → None, WITH a warning (symmetric with the counters).
+    assert coord._last_forwarded_ts is None
+    assert "last_forwarded_ts" in caplog.text, (
+        "a corrupt last_forwarded_ts must be surfaced with a WARNING, not swallowed silently"
+    )
+
+
+async def test_load_store_rejects_bool_counters(hass, mock_config_entry):
+    """Finding 4: bool is an int subclass — True must not slip through as used_today=1."""
+    mock_config_entry.add_to_hass(hass)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "total_forwarded": True,
+                "used_today": True,
+                "used_today_date": today,
+                "last_forwarded_ts": False,
+            }
+        )
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert coord._total_forwarded == 0
+    assert coord._used_today == 0
+    assert coord._last_forwarded_ts is None
+
+
+async def test_load_store_accepts_valid_counters(hass, mock_config_entry):
+    """Finding 4: legitimate non-negative ints still hydrate unchanged."""
+    mock_config_entry.add_to_hass(hass)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "total_forwarded": 42,
+                "used_today": 7,
+                "used_today_date": today,
+                "last_forwarded_ts": 1700000000,
+            }
+        )
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert coord._total_forwarded == 42
+    assert coord._used_today == 7
+    assert coord._last_forwarded_ts == 1700000000
+
+
+async def test_used_today_rollover_persists_to_store(hass, mock_config_entry):
+    """Finding 5: a UTC date-rollover reset of used_today must be persisted.
+
+    _maybe_reset_used_today zeroed used_today/used_today_date in memory on rollover but
+    never scheduled a save. An HA restart after midnight UTC but before the first
+    forward restored yesterday's count, so the ParcelApp Quota sensor briefly
+    under-reported remaining quota. The reset must schedule a debounced persist.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        # Seed yesterday's state, then clear the save spy.
+        coord._used_today = 7
+        coord._used_today_date = "2000-01-01"  # definitely not today (UTC)
+        coord._store.async_delay_save.reset_mock()
+
+        # Reading the property triggers the UTC rollover reset.
+        assert coord.used_today == 0
+        assert coord._used_today_date == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert coord._store.async_delay_save.called, (
+            "used_today rollover reset must schedule a store save so it survives restart"
+        )
+
+
+async def test_used_today_no_rollover_does_not_persist(hass, mock_config_entry):
+    """Finding 5: reads WITHOUT a rollover must not schedule redundant saves."""
+    mock_config_entry.add_to_hass(hass)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        coord._used_today = 3
+        coord._used_today_date = today
+        coord._store.async_delay_save.reset_mock()
+
+        assert coord.used_today == 3
+        assert not coord._store.async_delay_save.called, (
+            "a same-day used_today read must not schedule a save (no rollover happened)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding 7: poll-lifecycle listener dispatch (gmail + imap)
+# ---------------------------------------------------------------------------
+
+
+async def test_gmail_poll_single_dispatch_on_success(hass, mock_config_entry):
+    """Finding 7: a successful poll must not fire redundant listener dispatches.
+
+    The wrapper notified at start AND in finally; with HA's own post-return dispatch
+    that was up to 3 notifications per poll. A direct _async_update_data() call (HA's
+    base wrapper not involved) must now notify exactly once — the start ON. HA's base
+    coordinator dispatches the OFF after we return.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "t",
+            "refresh_token": "r",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        with patch.object(coord, "async_update_listeners") as mock_notify:
+            await coord._async_update_data()
+
+    assert coord._poll_in_progress is False
+    assert mock_notify.call_count == 1, (
+        f"successful poll should dispatch once (start ON); got {mock_notify.call_count}"
+    )
+
+
+async def test_gmail_poll_dispatches_off_on_failure(hass, mock_config_entry):
+    """Finding 7: on poll failure the wrapper must still flip the sensor OFF.
+
+    HA's base _async_refresh may re-raise before its own dispatch (e.g.
+    ConfigEntryAuthFailed), so the failure path must reset the flag AND notify.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        with (
+            patch.object(
+                coord, "_async_update_data_inner", AsyncMock(side_effect=UpdateFailed("boom"))
+            ),
+            patch.object(coord, "async_update_listeners") as mock_notify,
+        ):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+
+    assert coord._poll_in_progress is False
+    assert mock_notify.called, "failure path must dispatch so the sensor flips OFF"
+
+
+async def test_imap_poll_single_dispatch_on_success(hass, mock_imap_config_entry):
+    """Finding 7 (IMAP parity): a successful poll dispatches once on a direct call."""
+    mock_imap_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+
+        with patch.object(coord, "async_update_listeners") as mock_notify:
+            await coord._async_update_data()
+
+    assert coord._poll_in_progress is False
+    assert mock_notify.call_count == 1, (
+        f"successful IMAP poll should dispatch once (start ON); got {mock_notify.call_count}"
+    )
+
+
+async def test_imap_poll_dispatches_off_on_failure(hass, mock_imap_config_entry):
+    """Finding 7 (IMAP parity): failure path resets the flag AND dispatches OFF."""
+    mock_imap_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+
+        with (
+            patch.object(
+                coord, "_async_update_data_inner", AsyncMock(side_effect=UpdateFailed("boom"))
+            ),
+            patch.object(coord, "async_update_listeners") as mock_notify,
+        ):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+
+    assert coord._poll_in_progress is False
+    assert mock_notify.called, "IMAP failure path must dispatch so the sensor flips OFF"
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: time-boundary refresh timers
+# ---------------------------------------------------------------------------
+
+
+async def test_arm_quota_expiry_timer_gated_by_enable(hass, mock_config_entry):
+    """Finding 3: arming is a no-op until enable_operational_timers().
+
+    This gate is what keeps the many bare-coordinator tests that assign
+    _quota_exhausted_until directly from leaking real (lingering) timers.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+
+        # Disabled (bare coordinator): arming does nothing even with a future window.
+        coord._quota_exhausted_until = int(time_module.time()) + 3600
+        coord._arm_quota_expiry_timer()
+        assert coord._quota_expiry_unsub is None
+
+        # Enabled: a future window schedules a timer; clearing the window cancels it.
+        coord.enable_operational_timers()
+        coord._quota_exhausted_until = int(time_module.time()) + 3600
+        coord._arm_quota_expiry_timer()
+        assert coord._quota_expiry_unsub is not None
+        coord._quota_exhausted_until = None
+        coord._arm_quota_expiry_timer()
+        assert coord._quota_expiry_unsub is None
+
+        coord._cancel_operational_timers()
+
+
+async def test_quota_expiry_timer_fires_and_refreshes(hass, mock_config_entry):
+    """Finding 3: when the quota window elapses, the timer clears the stale block and
+    dispatches to listeners so ProblemBinarySensor / ParcelAppQuotaSensor refresh
+    without waiting for the next poll.
+    """
+    import homeassistant.util.dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        coord.enable_operational_timers()
+
+        coord._quota_exhausted_until = int(time_module.time()) + 30
+        coord._arm_quota_expiry_timer()
+        assert coord.quota_is_exhausted is True
+        assert coord._quota_expiry_unsub is not None
+
+        notified = []
+        with patch.object(coord, "async_update_listeners", side_effect=lambda: notified.append(1)):
+            async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+            await hass.async_block_till_done()
+
+        assert coord._quota_exhausted_until is None, "expiry timer must clear the stale window"
+        assert coord.quota_is_exhausted is False
+        assert notified, "expiry timer must dispatch so the Problem/Quota entities refresh"
+
+        coord._cancel_operational_timers()
+
+
+async def test_midnight_refresh_resets_used_today(hass, mock_config_entry):
+    """Finding 3: the UTC-midnight timer forces the used_today rollover reset and
+    dispatches to listeners, then reschedules itself for the next midnight.
+    """
+    import homeassistant.util.dt as dt_util
+
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        coord.enable_operational_timers()
+        assert coord._midnight_unsub is not None, "enable must schedule the midnight timer"
+        # enable scheduled a real next-midnight timer. We drive _on_midnight directly below
+        # (not via an actual HA fire, which would fire+remove the timer first), so cancel the
+        # scheduled one now — otherwise _on_midnight nulls _midnight_unsub before rescheduling
+        # and the original timer leaks past teardown.
+        coord._cancel_operational_timers()
+
+        coord._used_today = 9
+        coord._used_today_date = "2000-01-01"  # stale prior day
+
+        notified = []
+        with patch.object(coord, "async_update_listeners", side_effect=lambda: notified.append(1)):
+            coord._on_midnight(dt_util.utcnow())  # direct call avoids the self-reschedule fire loop
+
+        assert coord._used_today == 0, "midnight refresh must reset used_today"
+        assert coord._used_today_date == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert notified, "midnight refresh must dispatch so the Quota sensor updates"
+        assert coord._midnight_unsub is not None, "midnight timer must reschedule itself"
+
+        coord._cancel_operational_timers()
+
+
+async def test_forward_counter_persisted_immediately(hass, mock_config_entry):
+    """Finding 12: the immediate post-forward save carries the incremented counters, so an
+    HA crash before the 5s debounce fire cannot lose them.
+    """
+    mock_config_entry.add_to_hass(hass)
+    captured: dict = {}
+
+    async def _capture(data):
+        captured.update(data)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html/>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock(side_effect=_capture)
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    assert captured.get("total_forwarded") == 1, "immediate save must carry total_forwarded"
+    assert captured.get("used_today") == 1, "immediate save must carry used_today"
+    assert captured.get("last_forwarded_ts") is not None, "immediate save must carry the timestamp"
+
+
+async def test_gmail_poll_start_notify_failure_resets_flag(hass, mock_config_entry):
+    """Finding 8: if the start-of-poll listener dispatch raises, _poll_in_progress must
+    still reset (no leaked True) and the original error must surface unmasked.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        with patch.object(coord, "async_update_listeners", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                await coord._async_update_data()
+
+    assert coord._poll_in_progress is False, (
+        "a start-notify failure must not leak _poll_in_progress=True"
+    )
+
+
+async def test_imap_poll_start_notify_failure_resets_flag(hass, mock_imap_config_entry):
+    """Finding 8 (IMAP parity): start-notify failure must reset the poll-in-progress flag."""
+    mock_imap_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+
+        with patch.object(coord, "async_update_listeners", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                await coord._async_update_data()
+
+    assert coord._poll_in_progress is False, (
+        "a start-notify failure must not leak _poll_in_progress=True"
+    )

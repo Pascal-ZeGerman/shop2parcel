@@ -972,3 +972,67 @@ async def test_async_load_store_wrong_type_custom_attributes_degrades_silently_w
     assert any("list" in r.getMessage() for r in warning_records), (
         "WARNING must mention the wrong type name 'list'"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 26 Plan 01: persisted counter round-trip (P26-CNT-04)
+# ---------------------------------------------------------------------------
+
+
+async def test_phase26_counters_persist_across_restart(
+    hass,
+    mock_config_entry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """P26-CNT-04: total_forwarded / last_forwarded_ts / used_today / used_today_date
+    survive a save → fresh-load round-trip (simulates HA restart).
+
+    Wave 0 RED: fails until the four Phase 26 store keys are wired in
+    _async_load_store and _async_save_store.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+
+        # Capture the lambda payload written by async_delay_save
+        captured_payload: dict = {}
+
+        def _capture_save(fn, delay=5):
+            captured_payload.update(fn())
+
+        mock_store_cls.return_value.async_delay_save = _capture_save
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    # Seed Phase 26 counter state
+    coord._total_forwarded = 7
+    coord._last_forwarded_ts = 1700000000
+    coord._used_today = 3
+    coord._used_today_date = "2026-06-24"
+
+    # Trigger save
+    await coord._async_save_store()
+
+    # Verify payload contains all four keys
+    assert captured_payload.get("total_forwarded") == 7, (
+        "_async_save_store must persist total_forwarded"
+    )
+    assert captured_payload.get("last_forwarded_ts") == 1700000000, (
+        "_async_save_store must persist last_forwarded_ts"
+    )
+    assert captured_payload.get("used_today") == 3, "_async_save_store must persist used_today"
+    assert captured_payload.get("used_today_date") == "2026-06-24", (
+        "_async_save_store must persist used_today_date"
+    )
+
+    # Now simulate a fresh coordinator loading from the saved store
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2:
+        mock_store_cls2.return_value.async_load = AsyncMock(return_value=captured_payload)
+        mock_store_cls2.return_value.async_delay_save = MagicMock()
+        coord2 = GmailCoordinator(hass, mock_config_entry)
+        await coord2._async_load_store()
+
+    assert coord2._total_forwarded == 7, "total_forwarded must be restored from store"
+    assert coord2._last_forwarded_ts == 1700000000, "last_forwarded_ts must be restored from store"
+    assert coord2._used_today == 3, "used_today must be restored from store"
+    assert coord2._used_today_date == "2026-06-24", "used_today_date must be restored from store"

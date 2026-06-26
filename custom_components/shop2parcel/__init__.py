@@ -18,13 +18,20 @@ Responsibilities:
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 
+from .binary_sensor import OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES
 from .const import DOMAIN
+from .diagnostic_sensor import DIAGNOSTIC_SENSOR_UID_SUFFIXES
+from .sensor import OPERATIONAL_SENSOR_UID_SUFFIXES
+
+_LOGGER = logging.getLogger(__name__)
 
 # Phase 5 (CONTEXT.md D-09): platforms now populated.
 # Phase 7 (D-13): diagnostic sensors are co-registered under the "sensor" platform
@@ -34,6 +41,82 @@ from .const import DOMAIN
 # longer needed; dedup is now tracking-number-based (not message-ID-based) and
 # persisted in HA Store, so users never need to manually clear a cache.
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
+
+# Phase 26 Plan 02 (P26-REG-01..03): allowlist of unique_id suffixes that belong
+# to known-good entities.  Any registry entry for this config entry whose suffix
+# is NOT in this set is treated as an orphan from a prior version and removed
+# during async_setup_entry before platform setup runs.
+#
+# All suffixes are derived from the entity classes' _unique_id_suffix attributes —
+# the single source of truth (finding 9). DIAGNOSTIC_SENSOR_UID_SUFFIXES (diagnostic
+# sensors), OPERATIONAL_SENSOR_UID_SUFFIXES (sensor.py), and
+# OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES (binary_sensor.py) each build from the classes
+# they cover, so renaming a suffix on a class automatically updates this allowlist.
+# No string literals here — that duplication previously risked the sweep deleting a
+# freshly-registered entity whose class suffix had drifted from a hardcoded copy.
+#
+# NOTE: has_active_shipments is intentionally absent — it is an orphan to sweep.
+# NOTE: per-message suffixes (e.g. msgABC123) are not in the allowlist — orphans.
+KNOWN_GOOD_UID_SUFFIXES: frozenset[str] = (
+    DIAGNOSTIC_SENSOR_UID_SUFFIXES
+    | OPERATIONAL_SENSOR_UID_SUFFIXES
+    | OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES
+)
+
+# Suffix of the binary sensor removed in Phase 26 (P26-REMOVE-02). It was part of the
+# public entity surface before removal, so its sweep is logged at WARNING (not INFO) with
+# migration guidance — otherwise a user's automation/dashboard referencing it would break
+# silently (finding 11).
+_REMOVED_HAS_ACTIVE_SHIPMENTS_SUFFIX = "has_active_shipments"
+
+
+def _sweep_orphaned_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove orphaned entity registry entries left by prior integration versions.
+
+    Phase 26 migration (P26-REG-01..03): HA does NOT auto-remove entities when
+    their producing code disappears (RESEARCH.md primary challenge).  This sweep
+    runs BEFORE async_forward_entry_setups (RESEARCH.md Pitfall 2) so the
+    registry is clean before new entities register.
+
+    Security domain (T-26-03): allowlist (positive) approach — only entries with
+    a non-allowlisted suffix AND the correct {DOMAIN}_{entry_id}_ prefix are
+    removed.  Entries outside this config entry / prefix are never touched.
+
+    Two-pass pattern (T-26-04): collect entity_ids first, then remove — avoids
+    mutating the iterable while iterating (RESEARCH.md anti-pattern).
+    """
+    registry = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    prefix = f"{DOMAIN}_{entry.entry_id}_"
+    to_remove: list[str] = []
+    for reg_entry in entries:
+        uid = reg_entry.unique_id
+        if not uid.startswith(prefix):
+            # Not ours — leave untouched (cross-entry safety)
+            continue
+        suffix = uid[len(prefix) :]
+        if suffix not in KNOWN_GOOD_UID_SUFFIXES:
+            to_remove.append(reg_entry.entity_id)
+            if suffix == _REMOVED_HAS_ACTIVE_SHIPMENTS_SUFFIX:
+                # Finding 11: this was a documented entity before Phase 26, so warn (not
+                # info) and point at the replacement — a user whose automations or
+                # dashboards reference it gets a log breadcrumb rather than silent breakage.
+                _LOGGER.warning(
+                    "Removing deprecated entity %s (uid=%s): the 'Has Active Shipments' "
+                    "binary sensor was removed in Phase 26. Update any automations or "
+                    "dashboards to use the 'Shipments Forwarded' sensor "
+                    "(its 'currently_tracked' attribute) instead.",
+                    reg_entry.entity_id,
+                    uid,
+                )
+            else:
+                _LOGGER.info(
+                    "Phase 26 migration: removing orphaned entity %s (uid=%s)",
+                    reg_entry.entity_id,
+                    uid,
+                )
+    for entity_id in to_remove:
+        registry.async_remove(entity_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -64,6 +147,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         coordinator = GmailCoordinator(hass, entry)
     await coordinator._async_load_store()
+    # Phase 26 Plan 02 (P26-REG-01..03): sweep orphaned entity registry entries
+    # (shipment_* per-message uids + has_active_shipments) left by prior versions.
+    # MUST run after _async_load_store (store hydrated) and BEFORE
+    # async_forward_entry_setups (RESEARCH.md Pitfall 2 — sweep before platform
+    # setup so new entities register into a clean registry).
+    _sweep_orphaned_entities(hass, entry)
     # Phase 17 D-05: derive stage2_enabled before first poll.
     # bool() coerces any non-empty URL string to True without exposing the URL value.
     # Empty string fallback prevents AttributeError on v1.2 entries with no ollama_url key.
@@ -83,6 +172,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         entry.async_on_unload(_stop_stage2)
     await coordinator.async_config_entry_first_refresh()
+
+    # Finding 3: enable the time-boundary refresh timers (quota-expiry + UTC-midnight
+    # used_today) now that the first poll has run and any quota window is established.
+    # These keep the should_poll=False Problem/Quota entities from going stale between
+    # polls when quota_is_exhausted / used_today flip purely by the passage of time.
+    # Register cleanup via async_on_unload so HA cancels them on every teardown path.
+    coordinator.enable_operational_timers()
+    entry.async_on_unload(coordinator._cancel_operational_timers)
 
     # Phase 5 D-08: schedule once-daily delivered-shipment cleanup.
     # The cancel callback MUST be stored so async_unload_entry can stop the

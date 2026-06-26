@@ -549,3 +549,88 @@ async def test_all_seven_diagnostic_sensors_registered(hass, mock_config_entry):
     found = {e.unique_id.removeprefix(prefix) for e in entries if e.unique_id.startswith(prefix)}
     missing = expected_suffixes - found
     assert not missing, f"missing diagnostic sensors: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# M6A-02: PendingPostsSensor tests
+# ---------------------------------------------------------------------------
+
+
+async def test_pending_posts_sensor_registered(hass, mock_config_entry):
+    """M6A-02: PendingPostsSensor registered at setup under the expected unique_id."""
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_pending_parcelapp_posts"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, (
+        f"pending_parcelapp_posts diagnostic sensor not registered. "
+        f"Found suffixes: {[e.unique_id for e in entries]}"
+    )
+
+
+async def test_pending_posts_sensor_native_value_reflects_pending(hass, mock_config_entry):
+    """M6A-02: PendingPostsSensor.native_value == len(coordinator._pending_posts)."""
+    from custom_components.shop2parcel.diagnostic_sensor import PendingPostsSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = PendingPostsSensor(coordinator, mock_config_entry)
+
+    # At rest: zero pending posts
+    assert sensor.native_value == 0
+
+    # Seed two pending shipments
+    coordinator._pending_posts["key1"] = _make_shipment("msg1")
+    coordinator._pending_posts["key2"] = _make_shipment("msg2")
+    assert sensor.native_value == 2
+
+    # Remove one — value updates immediately (property reads live dict)
+    del coordinator._pending_posts["key1"]
+    assert sensor.native_value == 1
+
+
+async def test_pending_posts_sensor_attributes_capped_at_10(hass, mock_config_entry):
+    """M6A-02 / T-m6a-01: pending_tracking_numbers attribute is capped at 10 (recorder DoS guard)."""
+    from custom_components.shop2parcel.diagnostic_sensor import PendingPostsSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+
+    # Seed 15 pending shipments
+    for i in range(15):
+        shipment = ShipmentData(
+            tracking_number=f"TRK{i:04d}",
+            carrier_name="UPS",
+            order_name=f"#ORDER{i}",
+            message_id=f"msg{i}",
+            email_date=1700000000,
+        )
+        coordinator._pending_posts[f"key{i}"] = shipment
+
+    sensor = PendingPostsSensor(coordinator, mock_config_entry)
+    attrs = sensor.extra_state_attributes
+    assert "pending_tracking_numbers" in attrs
+    pending_list = attrs["pending_tracking_numbers"]
+    assert isinstance(pending_list, list)
+    assert len(pending_list) == 10, f"expected 10 entries (capped), got {len(pending_list)}"
+    # Each entry must have exactly the compact triple
+    for entry in pending_list:
+        assert set(entry.keys()) == {"tracking_number", "carrier", "order_name"}, (
+            f"unexpected keys: {set(entry.keys())}"
+        )
+
+
+async def test_pending_posts_sensor_unique_id_and_category(hass, mock_config_entry):
+    """M6A-02: PendingPostsSensor unique_id suffix, DIAGNOSTIC category, MEASUREMENT state class."""
+    from homeassistant.components.sensor import SensorStateClass
+    from homeassistant.helpers.entity import EntityCategory
+
+    from custom_components.shop2parcel.diagnostic_sensor import PendingPostsSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = PendingPostsSensor(coordinator, mock_config_entry)
+
+    assert sensor._attr_unique_id == (
+        f"{DOMAIN}_{mock_config_entry.entry_id}_pending_parcelapp_posts"
+    )
+    assert sensor.entity_category == EntityCategory.DIAGNOSTIC
+    assert sensor.state_class == SensorStateClass.MEASUREMENT

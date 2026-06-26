@@ -30,10 +30,10 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -172,6 +172,26 @@ def _next_midnight_utc() -> int:
             tzinfo=UTC,
         ).timestamp()
     )
+
+
+def _today_utc_str() -> str:
+    """Return today's UTC date as 'YYYY-MM-DD' string.
+
+    Used for UTC date-rollover check in _maybe_reset_used_today.
+    UTC has no DST so the rollover is always at exactly 00:00 UTC.
+    (Phase 26 RESEARCH Pitfall 3 — always use UTC, not local time.)
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def _valid_nonneg_int(value: object) -> bool:
+    """True only for a genuine non-negative int.
+
+    Excludes bool (an int subclass — `isinstance(True, int)` is True) and negatives,
+    so corrupt or hand-edited operational counters in the store cannot inflate state
+    (T-26-01). Used to guard total_forwarded / used_today / last_forwarded_ts on load.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _sanitise_parser_error(err: BaseException) -> str:
@@ -404,6 +424,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # HA restarts (quota may clear between restart and next poll).
         # NOT reset on _reset_stage2_poll_counters — must survive across polls.
         self._pending_posts: dict[str, ShipmentData] = {}
+        # Phase 26: operational-health persisted counters.
+        # Persisted across HA restarts via additive store keys (no STORAGE_VERSION bump).
+        # Incremented only on genuine 2xx POST-success via _record_forward().
+        # _used_today_date holds the UTC date string when _used_today was last reset.
+        self._total_forwarded: int = 0
+        self._last_forwarded_ts: int | None = None
+        self._used_today: int = 0
+        self._used_today_date: str = ""
         self._store_loaded: bool = False
         # Phase 18 CR-01: sentinel so async_stop_stage2 is safe to call before
         # async_start_stage2 (e.g. Phase 19 worker or a reload race).
@@ -422,10 +450,25 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 23 AC-8: throttles the quota-skip WARNING to at most one per poll
         # (mirrors _stage2_cap_notified_this_poll). Reset in _reset_stage2_poll_counters.
         self._stage2_quota_warned_this_poll: bool = False
+        # M6A-01: poll-in-progress flag — set True at the top of each _async_update_data
+        # call in GmailCoordinator and ImapCoordinator (after _reset_stage2_poll_counters),
+        # then reset to False in the finally block before returning.  Surfaced via the
+        # email_processing_active property.  Never modified inside _async_update_data itself —
+        # only the subclass poll methods touch this flag.
+        self._poll_in_progress: bool = False
         # Phase 21 FAIL-04/05: consecutive-failure streak across polls + notification cooldown timestamp.
         # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
         self._stage2_consecutive_failures: int = 0
         self._stage2_last_notify_ts: float | None = None
+        # Finding 3: time-boundary refresh timers for the should_poll=False operational
+        # entities. quota_is_exhausted / used_today flip by the passage of time (no event),
+        # so without these the Problem + Quota sensors stay stale until the next poll.
+        # Gated by _operational_timers_enabled (set True only from async_setup_entry via
+        # enable_operational_timers) so bare-coordinator unit tests that assign
+        # _quota_exhausted_until directly never schedule real (lingering) timers.
+        self._operational_timers_enabled: bool = False
+        self._quota_expiry_unsub: CALLBACK_TYPE | None = None
+        self._midnight_unsub: CALLBACK_TYPE | None = None
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
@@ -447,6 +490,43 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self.hass,
                 notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
             )
+
+    def _maybe_reset_used_today(self) -> None:
+        """Reset used_today to 0 on UTC date rollover.
+
+        Called at the start of _record_forward and from the used_today property read
+        path so the ParcelApp Quota sensor always reflects the current day's count.
+        UTC has no DST — rollover is deterministic at 00:00 UTC.
+        (Phase 26 RESEARCH Pattern 5 / Pitfall 3.)
+        """
+        today = _today_utc_str()
+        if self._used_today_date != today:
+            self._used_today = 0
+            self._used_today_date = today
+            # Finding 5: persist the rollover so a restart before the next forward does
+            # not restore yesterday's count. Fires only on an actual rollover (at most
+            # once per UTC day); _persist_state is await-free so it is safe here even
+            # when reached via the synchronous used_today property read path.
+            self._persist_state()
+
+    def _record_forward(self) -> None:
+        """Record one genuine 2xx POST success to ParcelApp.
+
+        Increments total_forwarded, used_today (with UTC date-rollover reset),
+        and updates last_forwarded_ts to the current epoch second.
+
+        MUST be called ONLY on the genuine 2xx success path — never on
+        ParcelAppAlreadyAddedError or ParcelAppInvalidTrackingError, which do NOT
+        consume ParcelApp quota and do NOT represent forwarding a new shipment.
+        (Phase 26 RESEARCH Pitfall 1 / Pitfall 6 / STRIDE T-26-02.)
+
+        Does NOT call _async_save_store; the existing save at each call site handles
+        persistence so we avoid an extra debounce scheduling.
+        """
+        self._maybe_reset_used_today()
+        self._total_forwarded += 1
+        self._last_forwarded_ts = int(_time.time())
+        self._used_today += 1
 
     def _record_stage2_failure(self, job: Stage2Job, err: Exception) -> None:
         """Centralize loud-surface side effects for a Stage-2 Ollama or worker-outer failure.
@@ -510,6 +590,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # Update cooldown timestamp to gate re-fires (D-09).
             self._stage2_last_notify_ts = _time.time()
 
+        # Finding 2: this runs in the background Stage-2 worker, outside any poll's
+        # listener dispatch. Push the updated streak to subscribers so ProblemBinarySensor
+        # re-evaluates immediately when it crosses STAGE2_NOTIFY_THRESHOLD, instead of
+        # lagging by a full poll interval. (Recovery is already surfaced via the success
+        # path's async_set_updated_data.) async_update_listeners is a sync callback — safe
+        # to call from the worker coroutine.
+        self.async_update_listeners()
+
     def _record_stage2_success(self) -> None:
         """Centralize loud-surface side effects for a Stage-2 successful POST.
 
@@ -548,6 +636,160 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def stage2_consecutive_failures(self) -> int:
         """Current run of back-to-back Stage-2 failures; resets to 0 on any success."""
         return self._stage2_consecutive_failures
+
+    @property
+    def email_processing_active(self) -> bool:
+        """True while a poll is fetching/parsing emails OR the Stage-2 queue still has items to drain."""
+        return self._poll_in_progress or self.stage2_queue_depth > 0
+
+    @property
+    def pending_posts_depth(self) -> int:
+        """Count of quota-deferred merged shipments awaiting the ParcelApp POST step (Phase 23 _pending_posts)."""
+        return len(self._pending_posts)
+
+    @property
+    def pending_posts_entries(self) -> list[ShipmentData]:
+        """Public read-only view of quota-deferred shipments (values of _pending_posts)."""
+        return list(self._pending_posts.values())
+
+    # Phase 26: public read-only properties for operational-health entities.
+    # Entities must NEVER access private attributes directly (RESEARCH Pitfall 4).
+
+    @property
+    def total_forwarded(self) -> int:
+        """Lifetime count of genuine 2xx POSTs to ParcelApp; persisted across restarts."""
+        return self._total_forwarded
+
+    @property
+    def last_forwarded_ts(self) -> int | None:
+        """Unix epoch of the most recent successful POST; None before the first forwarding."""
+        return self._last_forwarded_ts
+
+    @property
+    def used_today(self) -> int:
+        """Estimated ParcelApp POSTs made today (UTC day); auto-resets on UTC date rollover.
+
+        Calls _maybe_reset_used_today() on each read so the ParcelApp Quota sensor
+        never shows a stale prior-day count even if no forwarding has happened today
+        yet. (Phase 26 RESEARCH Pattern 5.)
+        """
+        self._maybe_reset_used_today()
+        return self._used_today
+
+    @property
+    def currently_tracked_count(self) -> int:
+        """Count of live in-memory shipments from the current session (len(coordinator.data)).
+
+        Resets on HA restart (since coordinator.data rehydrates from persisted_shipments
+        on next poll). Use as 'currently active shipments' — not a lifetime total.
+        (Phase 26 RESEARCH Open Question 1 resolution / Assumption A4.)
+        """
+        return len(self.data or {})
+
+    @property
+    def quota_is_exhausted(self) -> bool:
+        """True when ParcelApp quota is exhausted and the cooldown window has not yet elapsed.
+
+        Public accessor so entities never read the private _quota_exhausted_until attribute.
+        (Phase 26 RESEARCH Pitfall 4 / STRIDE T-26-02.)
+        """
+        return (
+            self._quota_exhausted_until is not None
+            and int(_time.time()) < self._quota_exhausted_until
+        )
+
+    # ------------------------------------------------------------------
+    # Finding 3: time-boundary refresh timers
+    # ------------------------------------------------------------------
+
+    def enable_operational_timers(self) -> None:
+        """Enable the time-boundary refresh timers (finding 3).
+
+        Called once from async_setup_entry after the first refresh. Gated behind a flag
+        so unit tests that construct the coordinator bare (and poke _quota_exhausted_until
+        directly) never schedule real timers — only a fully set-up entry arms them. Arms
+        the quota-expiry timer (in case store hydration loaded a still-future window) and
+        the daily UTC-midnight used_today refresh. Pair with _cancel_operational_timers
+        registered via entry.async_on_unload.
+        """
+        self._operational_timers_enabled = True
+        self._arm_quota_expiry_timer()
+        self._schedule_midnight_refresh()
+
+    def _cancel_operational_timers(self) -> None:
+        """Cancel both refresh timers (registered via entry.async_on_unload).
+
+        Idempotent — safe on every teardown path (clean unload, exception, HA shutdown).
+        """
+        if self._quota_expiry_unsub is not None:
+            self._quota_expiry_unsub()
+            self._quota_expiry_unsub = None
+        if self._midnight_unsub is not None:
+            self._midnight_unsub()
+            self._midnight_unsub = None
+
+    def _arm_quota_expiry_timer(self) -> None:
+        """(Re)schedule the one-shot timer that refreshes entities when the ParcelApp
+        quota window expires (finding 3).
+
+        Called after every _quota_exhausted_until mutation in the poll/drain paths.
+        No-op unless operational timers are enabled, so direct attribute assignment in
+        tests never leaks a timer. Always cancels any prior quota timer first; schedules
+        a new one only when _quota_exhausted_until is still in the future (a past value
+        is already reported as not-exhausted, and the poll-time clear persists it).
+        """
+        if self._quota_expiry_unsub is not None:
+            self._quota_expiry_unsub()
+            self._quota_expiry_unsub = None
+        if not self._operational_timers_enabled:
+            return
+        until = self._quota_exhausted_until
+        if until is None or until <= int(_time.time()):
+            return
+        self._quota_expiry_unsub = async_track_point_in_time(
+            self.hass, self._on_quota_expiry, datetime.fromtimestamp(until, tz=UTC)
+        )
+
+    @callback
+    def _on_quota_expiry(self, _now: datetime) -> None:
+        """Quota window elapsed: clear the stale block, persist, and refresh entities.
+
+        The timer is re-armed on every _quota_exhausted_until change (set or clear), so
+        when it fires it always corresponds to the current window — clear unconditionally.
+        Clearing in memory makes quota_is_exhausted read False immediately; persisting it
+        means the cleared state survives a restart (mirrors the poll-time stale-quota clear).
+        """
+        self._quota_expiry_unsub = None
+        if self._quota_exhausted_until is not None:
+            self._quota_exhausted_until = None
+            self._persist_state()
+        self.async_update_listeners()
+
+    def _schedule_midnight_refresh(self) -> None:
+        """(Re)schedule the one-shot timer at the next 00:00 UTC that refreshes used_today
+        (finding 3).
+
+        used_today auto-resets on UTC date rollover but only when the property is read;
+        with should_poll=False nothing reads it at midnight, so the Quota sensor can show
+        the prior day's count until the next poll. No-op unless operational timers are
+        enabled. Reschedules itself each midnight.
+        """
+        if self._midnight_unsub is not None:
+            self._midnight_unsub()
+            self._midnight_unsub = None
+        if not self._operational_timers_enabled:
+            return
+        self._midnight_unsub = async_track_point_in_time(
+            self.hass, self._on_midnight, datetime.fromtimestamp(_next_midnight_utc(), tz=UTC)
+        )
+
+    @callback
+    def _on_midnight(self, _now: datetime) -> None:
+        """UTC midnight: force the used_today rollover reset, refresh entities, reschedule."""
+        self._midnight_unsub = None
+        self._maybe_reset_used_today()
+        self.async_update_listeners()
+        self._schedule_midnight_refresh()
 
     def _emit_scan_event(
         self,
@@ -820,12 +1062,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 merged_shipment.carrier_name,
             )
 
+            # Phase 26 RESEARCH Pitfall 6: posted_2xx flag distinguishes genuine 2xx from
+            # AlreadyAdded/InvalidTracking fall-through. _record_forward ONLY fires on 2xx.
+            posted_2xx = False
             try:
                 await parcel_client.async_add_delivery(
                     tracking_number=merged_shipment.tracking_number,
                     carrier_code=carrier_code,
                     description=merged_shipment.order_name or merged_shipment.tracking_number,
                 )
+                posted_2xx = True  # genuine 2xx response — gate for _record_forward
             except ParcelAppAuthError as err:
                 raise ConfigEntryAuthFailed("parcelapp.net auth error (drain)") from err
             except ParcelAppQuotaError as err:
@@ -834,6 +1080,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._quota_exhausted_until = (
                     err.reset_at if err.reset_at is not None else _next_midnight_utc()
                 )
+                self._arm_quota_expiry_timer()  # finding 3: refresh entities when it expires
                 _LOGGER.warning(
                     "Stage-2 drain: parcelapp quota hit mid-drain — deferring remaining "
                     "pending items until quota resets"
@@ -841,6 +1088,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 break
             except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
                 # Treat as success for dedup purposes — fall through to bookkeeping below.
+                # posted_2xx stays False: AlreadyAdded/InvalidTracking do NOT consume quota
+                # and do NOT represent forwarding a new shipment (RESEARCH Pitfall 6 / T-26-02).
                 _LOGGER.debug(
                     "Stage-2 drain: tn=%s already known to parcelapp (AlreadyAdded/InvalidTracking)",
                     normalized_tn,
@@ -859,6 +1108,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # _record_stage2_success on drain POSTs too — they are real POSTs).
             self._stage2_posts_this_poll += 1  # Pitfall 4: shared counter
             self._record_stage2_success()
+            if posted_2xx:
+                self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
             # Write dedup so next poll does not retry this TN.
             self._submitted_tracking_numbers[normalized_tn] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
@@ -872,7 +1123,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             _LOGGER.debug("Stage-2 drain: posted deferred tn=%s successfully", normalized_tn)
 
         # Single save at end of drain loop — Pitfall 2 aligned (save covers all mutations above).
-        await self._async_save_store()
+        # immediate=True: drained items include genuine forwards, so persist durably (finding 12).
+        await self._async_save_store(immediate=True)
 
     async def _async_process_stage2_job(self, job: Stage2Job) -> None:
         """Process one Stage2Job: extract via Ollama, merge, POST to parcelapp, update state.
@@ -1037,6 +1289,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._quota_exhausted_until = (
                 err.reset_at if err.reset_at is not None else _next_midnight_utc()
             )
+            self._arm_quota_expiry_timer()  # finding 3: refresh entities when it expires
             _LOGGER.warning(
                 "parcelapp.net daily quota exhausted (Stage-2 worker); forwarding paused: %s",
                 str(err)[:100],
@@ -1077,6 +1330,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Success path (mirrors gmail_coordinator.py lines 513-526).
         self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
         self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
+        self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
         self._submitted_tracking_numbers[normalized_tn] = None
         if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
             self._submitted_tracking_numbers.popitem(last=False)
@@ -1086,7 +1340,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Guard: self.data is None before the first coordinator refresh; use empty dict as base.
         # MRG-02: persist and surface the merged shipment so sensors reflect merged state.
         self._pending_shipments = {**(self.data or {}), job.storage_key: merged_shipment}
-        await self._async_save_store()  # D-05: per-job save immediately
+        await self._async_save_store(immediate=True)  # D-05 / finding 12: durable per-job forward
         # Re-snapshot self.data immediately before publish to avoid stale-base race (S2).
         self.async_set_updated_data({**(self.data or {}), job.storage_key: merged_shipment})
         _LOGGER.debug("Stage-2 worker: posted %s successfully", normalized_tn)
@@ -1208,6 +1462,43 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     err,
                 )
         self._pending_posts = restored_pending
+        # Phase 26: hydrate operational-health counters with type-guarded defaults.
+        # Additive keys — no STORAGE_VERSION bump (same pattern as pending_posts above).
+        # ASVS V5 / T-26-01: non-int values reset to 0/None with WARNING to prevent counter
+        # inflation from corrupt or hand-edited store data.
+        raw_tf = stored.get("total_forwarded", 0)
+        if _valid_nonneg_int(raw_tf):
+            self._total_forwarded = raw_tf
+        else:
+            _LOGGER.warning(
+                "total_forwarded in store is not a non-negative int (type=%s); resetting to 0",
+                type(raw_tf).__name__,
+            )
+            self._total_forwarded = 0
+        # last_forwarded_ts is optional (None before the first forward). A missing key
+        # is normal; a present-but-corrupt value is surfaced with a WARNING, symmetric
+        # with the counters above (previously coerced to None silently — finding 4).
+        raw_lf = stored.get("last_forwarded_ts")
+        if raw_lf is None:
+            self._last_forwarded_ts = None
+        elif _valid_nonneg_int(raw_lf):
+            self._last_forwarded_ts = raw_lf
+        else:
+            _LOGGER.warning(
+                "last_forwarded_ts in store is not a non-negative int (type=%s); resetting to None",
+                type(raw_lf).__name__,
+            )
+            self._last_forwarded_ts = None
+        raw_ut = stored.get("used_today", 0)
+        if _valid_nonneg_int(raw_ut):
+            self._used_today = raw_ut
+        else:
+            _LOGGER.warning(
+                "used_today in store is not a non-negative int (type=%s); resetting to 0",
+                type(raw_ut).__name__,
+            )
+            self._used_today = 0
+        self._used_today_date = str(stored.get("used_today_date", ""))
         self._store_loaded = True
         _LOGGER.debug(
             "Restored %d persisted shipments and %d pending posts from store",
@@ -1215,50 +1506,68 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             len(self._pending_posts),
         )
 
-    async def _async_save_store(self) -> None:
-        """Schedule a debounced persist of current dedup, quota, and shipment state to Store.
+    async def _async_save_store(self, *, immediate: bool = False) -> None:
+        """Persist dedup, quota, shipment, and operational-counter state to Store.
+
+        Default (immediate=False): schedule a debounced write via the sync _persist_state()
+        — rapid per-message saves within a poll coalesce into one disk write. The existing
+        awaited call sites keep working unchanged.
+
+        immediate=True: write synchronously via Store.async_save, bypassing the 5s debounce,
+        so the forward counters survive an HA crash within the debounce window (finding 12).
+        Forwards are capped at ~20/day, so the extra immediate writes are negligible.
+        """
+        if immediate:
+            await self._async_save_store_now()
+        else:
+            self._persist_state()
+
+    def _store_snapshot(self) -> dict:
+        """Build the full persisted-state dict from current in-memory state.
+
+        asdict() runs here (before any try block at the call site) so a serialization
+        failure surfaces immediately (loud-failure convention) rather than producing a
+        stale snapshot. Shared by the debounced (_persist_state) and immediate
+        (_async_save_store_now) write paths so the two can never drift.
+        """
+        return {
+            "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
+            "quota_exhausted_until": self._quota_exhausted_until,
+            "persisted_shipments": {
+                msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
+            },
+            # Phase 23 D-03 / LD-05: persist post-deferred merged shipments so they survive restarts.
+            "pending_posts": {
+                key: asdict(shipment) for key, shipment in self._pending_posts.items()
+            },
+            # Phase 26: operational-health counters (additive keys — no STORAGE_VERSION bump).
+            "total_forwarded": self._total_forwarded,
+            "last_forwarded_ts": self._last_forwarded_ts,
+            "used_today": self._used_today,
+            "used_today_date": self._used_today_date,
+        }
+
+    def _persist_state(self) -> None:
+        """Schedule a debounced persist of current state to Store.
 
         Uses async_delay_save (W1/P13-WR-06) so rapid per-message saves within
         a single poll are coalesced into one write. async_delay_save is
         synchronous — it schedules the write; it does NOT write immediately.
 
-        The lambda captures _pending_shipments by reference; callers MUST assign
-        self._pending_shipments before calling this method — the 5-second debounce
-        means the value at fire-time is what gets stored.
-
-        The try/except guards against AttributeError (uninitialized store/hass) and
-        other unexpected scheduling failures; actual write errors surface in HA logs
-        when the delayed timer fires.
-
-        asdict() calls are intentionally outside the try block so a serialization
-        failure raises immediately (loud failure) rather than being silently swallowed
-        and producing a stale snapshot at the next debounce fire.
+        The snapshot is built BEFORE the lambda (stable values) — callers MUST assign
+        self._pending_shipments before calling this method. The try/except guards against
+        AttributeError (uninitialized store/hass) and other scheduling failures; actual
+        write errors surface in HA logs when the delayed timer fires.
         """
-        snapshot_tracking = list(self._submitted_tracking_numbers.keys())
-        snapshot_quota = self._quota_exhausted_until
-        snapshot_shipments = {
-            msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
-        }
-        # Phase 23 D-03 / LD-05: persist post-deferred merged shipments so they survive
-        # HA restarts. asdict() is intentionally outside the try block (loud-failure convention
-        # matching persisted_shipments above — serialization failures must surface immediately).
-        snapshot_pending = {key: asdict(shipment) for key, shipment in self._pending_posts.items()}
+        snapshot = self._store_snapshot()  # asdict() outside try → loud serialization failure
         try:
-            self._store.async_delay_save(
-                lambda: {
-                    "submitted_tracking_numbers": snapshot_tracking,
-                    "quota_exhausted_until": snapshot_quota,
-                    "persisted_shipments": snapshot_shipments,
-                    "pending_posts": snapshot_pending,
-                },
-                delay=5,
-            )
+            self._store.async_delay_save(lambda: snapshot, delay=5)
             _LOGGER.debug(
                 "Scheduled debounced save for %d submitted tracking numbers, "
                 "%d persisted shipments, and %d pending posts",
-                len(snapshot_tracking),
-                len(snapshot_shipments),
-                len(snapshot_pending),
+                len(snapshot["submitted_tracking_numbers"]),
+                len(snapshot["persisted_shipments"]),
+                len(snapshot["pending_posts"]),
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
@@ -1267,13 +1576,39 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 exc_info=True,
             )
 
+    async def _async_save_store_now(self) -> None:
+        """Persist current state immediately (no debounce) so forward counters survive a
+        crash within the 5s debounce window (finding 12).
+
+        asdict() runs in _store_snapshot() before the try (loud-failure convention); the
+        write itself is guarded so a transient Store failure logs rather than crashing the
+        poll (the next debounced/immediate save will retry).
+        """
+        snapshot = self._store_snapshot()
+        try:
+            await self._store.async_save(snapshot)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Failed to persist forward state immediately — counters may revert on a "
+                "crash before the next save: %s",
+                err,
+                exc_info=True,
+            )
+
     async def async_cleanup_delivered(self, now: datetime) -> None:
-        """Remove delivered shipments from coordinator.data and the entity registry.
+        """Drop delivered shipments from coordinator.data (keeps currently_tracked_count
+        accurate and the store from growing unbounded).
 
         Phase 5 D-08/D-09/D-11: scheduled once daily via async_track_time_interval
         (24h period set in __init__.py). Match parcelapp deliveries to
         coordinator entries by tracking_number; status_code == 0 means
         Completed (parcelapp-api.md). Removal is immediate.
+
+        Phase 26 (finding 10): the explicit entity-registry-removal loop was removed —
+        ShipmentSensor and the per-message dynamic-add machinery are gone (sensor.py),
+        so no {DOMAIN}_{entry_id}_{msg_id} entities exist for it to delete. coordinator.data
+        is still consumed by ShipmentsForwardedSensor.currently_tracked_count, so trimming
+        it here remains meaningful.
 
         The 'now' parameter is required by async_track_time_interval's callback
         signature even though we ignore it (required by async_track_time_interval contract).
@@ -1331,19 +1666,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # data change that bypasses the normal poll cycle (Claude's Discretion).
         self.async_set_updated_data(new_data)
 
-        # Explicit entity registry removal — HA does NOT auto-remove entities
-        # when their key disappears from coordinator.data.
-        entity_registry = er.async_get(self.hass)
-        entry_entities = entity_registry.entities.get_entries_for_config_entry_id(
-            self.config_entry.entry_id
-        )
-        unique_id_to_entity_id = {e.unique_id: e.entity_id for e in entry_entities}
-        for removed_id in removed_ids:
-            target_uid = f"{DOMAIN}_{self.config_entry.entry_id}_{removed_id}"
-            entity_id = unique_id_to_entity_id.get(target_uid)
-            if entity_id is not None:
-                entity_registry.async_remove(entity_id)
-                _LOGGER.info("Removed delivered shipment entity: %s", entity_id)
         # Phase 13.1 (R4): persist the post-cleanup state so delivered shipments are removed
         # from the store. Runs only when removed_ids was non-empty (the `if not removed_ids:
         # return` guard above short-circuits otherwise). Gated on debug_mode to honour the

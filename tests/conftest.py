@@ -77,6 +77,7 @@ async def setup_imap_coordinator_with_data(
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()  # finding 12: immediate forward save
         mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
         await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
@@ -114,6 +115,7 @@ async def setup_coordinator_with_data(hass, mock_config_entry, data: dict[str, S
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()  # finding 12: immediate forward save
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
