@@ -4455,3 +4455,120 @@ async def test_used_today_no_rollover_does_not_persist(hass, mock_config_entry):
         assert not coord._store.async_delay_save.called, (
             "a same-day used_today read must not schedule a save (no rollover happened)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Finding 7: poll-lifecycle listener dispatch (gmail + imap)
+# ---------------------------------------------------------------------------
+
+
+async def test_gmail_poll_single_dispatch_on_success(hass, mock_config_entry):
+    """Finding 7: a successful poll must not fire redundant listener dispatches.
+
+    The wrapper notified at start AND in finally; with HA's own post-return dispatch
+    that was up to 3 notifications per poll. A direct _async_update_data() call (HA's
+    base wrapper not involved) must now notify exactly once — the start ON. HA's base
+    coordinator dispatches the OFF after we return.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "t",
+            "refresh_token": "r",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        with patch.object(coord, "async_update_listeners") as mock_notify:
+            await coord._async_update_data()
+
+    assert coord._poll_in_progress is False
+    assert mock_notify.call_count == 1, (
+        f"successful poll should dispatch once (start ON); got {mock_notify.call_count}"
+    )
+
+
+async def test_gmail_poll_dispatches_off_on_failure(hass, mock_config_entry):
+    """Finding 7: on poll failure the wrapper must still flip the sensor OFF.
+
+    HA's base _async_refresh may re-raise before its own dispatch (e.g.
+    ConfigEntryAuthFailed), so the failure path must reset the flag AND notify.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        with (
+            patch.object(
+                coord, "_async_update_data_inner", AsyncMock(side_effect=UpdateFailed("boom"))
+            ),
+            patch.object(coord, "async_update_listeners") as mock_notify,
+        ):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+
+    assert coord._poll_in_progress is False
+    assert mock_notify.called, "failure path must dispatch so the sensor flips OFF"
+
+
+async def test_imap_poll_single_dispatch_on_success(hass, mock_imap_config_entry):
+    """Finding 7 (IMAP parity): a successful poll dispatches once on a direct call."""
+    mock_imap_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+
+        with patch.object(coord, "async_update_listeners") as mock_notify:
+            await coord._async_update_data()
+
+    assert coord._poll_in_progress is False
+    assert mock_notify.call_count == 1, (
+        f"successful IMAP poll should dispatch once (start ON); got {mock_notify.call_count}"
+    )
+
+
+async def test_imap_poll_dispatches_off_on_failure(hass, mock_imap_config_entry):
+    """Finding 7 (IMAP parity): failure path resets the flag AND dispatches OFF."""
+    mock_imap_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+
+        with (
+            patch.object(
+                coord, "_async_update_data_inner", AsyncMock(side_effect=UpdateFailed("boom"))
+            ),
+            patch.object(coord, "async_update_listeners") as mock_notify,
+        ):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+
+    assert coord._poll_in_progress is False
+    assert mock_notify.called, "IMAP failure path must dispatch so the sensor flips OFF"

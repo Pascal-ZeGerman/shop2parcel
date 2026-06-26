@@ -101,18 +101,28 @@ class ImapCoordinator(Shop2ParcelCoordinator):
 
         self._reset_stage2_poll_counters()  # Phase 20 MRG-05 / D-11: reset per-poll counters
 
-        # M6A-01: signal poll-in-progress so EmailProcessingActiveBinarySensor reads on.
-        # async_update_listeners() is called inside the try so that:
-        #  - a listener exception still resets the flag via finally (fixes leaked True state)
-        #  - the finally call guarantees notification after flag reset even when HA's base
-        #    class short-circuits its own listener dispatch on consecutive failures.
+        # M6A-01 / finding 7: signal poll-in-progress so EmailProcessingActiveBinarySensor
+        # reads on for the duration of the poll, then flip it off afterwards — without the
+        # redundant double/triple dispatch the old try/finally produced.
         self._poll_in_progress = True
+        self.async_update_listeners()  # turn the sensor ON at poll start
         try:
-            self.async_update_listeners()
-            return await self._async_update_data_inner()
-        finally:
+            result = await self._async_update_data_inner()
+        except BaseException:
+            # Failure path: HA's base _async_refresh may re-raise (e.g. ConfigEntryAuthFailed)
+            # before dispatching its own listener round, so reset the flag and notify here so
+            # the sensor still flips OFF. Guard the dispatch so a listener error never masks
+            # the original poll exception.
             self._poll_in_progress = False
-            self.async_update_listeners()
+            try:
+                self.async_update_listeners()
+            except Exception:  # noqa: BLE001 — never mask the poll exception with a listener error
+                _LOGGER.debug("listener dispatch raised during poll-failure unwind", exc_info=True)
+            raise
+        # Success path: HA's base coordinator dispatches listeners after we return, so just
+        # reset the flag here — no redundant dispatch (finding 7).
+        self._poll_in_progress = False
+        return result
 
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
         """Inner implementation of the IMAP poll cycle (called from _async_update_data)."""
