@@ -32,7 +32,6 @@ from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.storage import Store
@@ -1580,12 +1579,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             )
 
     async def async_cleanup_delivered(self, now: datetime) -> None:
-        """Remove delivered shipments from coordinator.data and the entity registry.
+        """Drop delivered shipments from coordinator.data (keeps currently_tracked_count
+        accurate and the store from growing unbounded).
 
         Phase 5 D-08/D-09/D-11: scheduled once daily via async_track_time_interval
         (24h period set in __init__.py). Match parcelapp deliveries to
         coordinator entries by tracking_number; status_code == 0 means
         Completed (parcelapp-api.md). Removal is immediate.
+
+        Phase 26 (finding 10): the explicit entity-registry-removal loop was removed —
+        ShipmentSensor and the per-message dynamic-add machinery are gone (sensor.py),
+        so no {DOMAIN}_{entry_id}_{msg_id} entities exist for it to delete. coordinator.data
+        is still consumed by ShipmentsForwardedSensor.currently_tracked_count, so trimming
+        it here remains meaningful.
 
         The 'now' parameter is required by async_track_time_interval's callback
         signature even though we ignore it (required by async_track_time_interval contract).
@@ -1643,19 +1649,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # data change that bypasses the normal poll cycle (Claude's Discretion).
         self.async_set_updated_data(new_data)
 
-        # Explicit entity registry removal — HA does NOT auto-remove entities
-        # when their key disappears from coordinator.data.
-        entity_registry = er.async_get(self.hass)
-        entry_entities = entity_registry.entities.get_entries_for_config_entry_id(
-            self.config_entry.entry_id
-        )
-        unique_id_to_entity_id = {e.unique_id: e.entity_id for e in entry_entities}
-        for removed_id in removed_ids:
-            target_uid = f"{DOMAIN}_{self.config_entry.entry_id}_{removed_id}"
-            entity_id = unique_id_to_entity_id.get(target_uid)
-            if entity_id is not None:
-                entity_registry.async_remove(entity_id)
-                _LOGGER.info("Removed delivered shipment entity: %s", entity_id)
         # Phase 13.1 (R4): persist the post-cleanup state so delivered shipments are removed
         # from the store. Runs only when removed_ids was non-empty (the `if not removed_ids:
         # return` guard above short-circuits otherwise). Gated on debug_mode to honour the
