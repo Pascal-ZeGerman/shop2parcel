@@ -6,26 +6,12 @@ DOMAIN = "shop2parcel"
 CONF_POLL_INTERVAL = "poll_interval"  # minutes (int)
 CONF_GMAIL_QUERY = "gmail_query"  # Gmail search query string
 DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
-# Phase 8 D-03: extended to capture Shopify merchant emails AND direct carrier
-# shipping notifications (UPS, USPS, FedEx). The 'from:' anchor is required
-# because real UPS/USPS/FedEx subjects use 'out for delivery' / 'scheduled
-# for delivery' rather than 'shipped' (RESEARCH.md Gmail Query Update Research).
+# Phase 27: subject-only filter — no sender anchors, no spam label.
+# Gmail already excludes Spam/Trash from normal search, so -label:spam is
+# redundant. Removing sender anchors lets any carrier's shipping notification
+# through; the hybrid Ollama gatekeeper (Plan 02/03) rejects non-shipment mail.
 # User can override via Options flow at any time.
-#
-# QF-01 fix: removed 'label:inbox' from the broad-fallback arm. Users who
-# auto-archive shipping mail (via Gmail filters) never had those messages in
-# the inbox, so 'label:inbox' silently excluded them. Removing the token
-# broadens recall to archived messages while '-label:spam' retains the spam
-# guard. This restores correct match coverage for auto-archiving users.
-DEFAULT_GMAIL_QUERY = (
-    "(from:no-reply@shopify.com OR from:mcinfo@ups.com OR "
-    "from:USPSInformeddelivery@email.informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR "
-    "from:TrackingUpdates@fedex.com) "
-    "subject:(shipped OR delivered OR tracking OR package)"
-    " OR "
-    "-label:spam "
-    "subject:(tracking OR shipped OR shipment OR delivery OR parcel)"
-)
+DEFAULT_GMAIL_QUERY = "subject:(tracking OR shipped OR shipment OR delivery OR delivered OR parcel OR package OR order)"
 
 # QF-02: Gmail-only rescan window option. Controls the minimum lookback period
 # used in build_incremental_query. Allows users to widen the after: filter
@@ -91,6 +77,16 @@ def debug_mode_notification_id(entry_id: str) -> str:
 # quota. See WR-01 in phase 20 REVIEW.md for full analysis.
 # stage2_cap_notification_id mirrors debug_mode_notification_id pattern.
 MAX_STAGE2_POSTS_PER_POLL: int = 5
+# Phase 27 volume guards (Constants summary, Design §1):
+# SEEN_MESSAGE_IDS_MAXLEN: FIFO bound for the seen-message-ID cache introduced
+#   in Plan 02 (coordinator.py). Oldest ID evicted when the cache reaches this
+#   size. 10 000 covers years of typical shipment-mail volume.
+SEEN_MESSAGE_IDS_MAXLEN: int = 10_000
+# MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL: per-poll cap on Ollama fallback
+#   extractions (gmail_coordinator.py, Plan 03). Composes with
+#   MAX_STAGE2_POSTS_PER_POLL (POST cap); the extraction cap fires earlier to
+#   limit Ollama load on a large first-poll backlog.
+MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL: int = 10
 STAGE2_CAP_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_cap"
 
 
