@@ -457,6 +457,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 23 AC-8: throttles the quota-skip WARNING to at most one per poll
         # (mirrors _stage2_cap_notified_this_poll). Reset in _reset_stage2_poll_counters.
         self._stage2_quota_warned_this_poll: bool = False
+        # Phase 27 Plan 03: per-poll fallback extraction counter — how many Ollama fallback
+        # extractions have run on Stage-1-miss emails this poll. Capped at
+        # MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL (10). Reset each poll via
+        # _reset_stage2_poll_counters (mirrors _stage2_posts_this_poll).
+        self._stage2_fallback_extractions_this_poll: int = 0
         # M6A-01: poll-in-progress flag — set True at the top of each _async_update_data
         # call in GmailCoordinator and ImapCoordinator (after _reset_stage2_poll_counters),
         # then reset to False in the finally block before returning.  Surfaced via the
@@ -492,6 +497,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_posts_this_poll = 0
         self._stage2_cap_notified_this_poll = False
         self._stage2_quota_warned_this_poll = False
+        # Phase 27 Plan 03: reset fallback extraction counter (mirrors _stage2_posts_this_poll).
+        self._stage2_fallback_extractions_this_poll = 0
         if self.config_entry is not None:
             persistent_notification.async_dismiss(
                 self.hass,

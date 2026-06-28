@@ -23,6 +23,8 @@ from .api.email_parser import EmailParser, ParseResult, ShipmentData
 from .api.exceptions import (
     GmailAuthError,
     GmailTransientError,
+    OllamaSchemaError,
+    OllamaTransientError,
     ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
     ParcelAppInvalidTrackingError,
@@ -41,10 +43,12 @@ from .const import (
     DEFAULT_GMAIL_QUERY,
     DEFAULT_RESCAN_WINDOW_DAYS,
     MAX_RESCAN_WINDOW_DAYS,
+    MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
     MAX_SUBMITTED_TRACKING_NUMBERS,
     debug_mode_notification_id,
     normalize_tracking_number,
 )
+from .merge import _SANITY_RE
 from .coordinator import (
     Shop2ParcelCoordinator,
     Stage2Job,  # noqa: F401 — type import; subclass calls _enqueue_stage2 which constructs Stage2Job
@@ -382,9 +386,86 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_match")
-                # Phase 27 Plan 02: record as processed so next poll skips this ID.
-                # NOTE: Plan 03 will refine this branch into the Ollama fallback gatekeeper
-                # and move marking to the post-extraction decision for transient-no-cache safety.
+
+                # Phase 27 Plan 03: Ollama fallback gatekeeper on Stage-1 miss.
+                # Only when stage2_enabled is True and NOT in debug_mode (debug never POSTs).
+                # In debug_mode or when stage2 is disabled, fall through to the default
+                # marking below — there is no fallback to retry.
+                if self._diagnostics.stage2_enabled and not debug_mode:
+                    # Per-poll cap check (Design §4 / T-27-03-03 DoS guard): if we have
+                    # already run MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions this
+                    # poll, skip WITHOUT caching the ID so it is retried next poll (Pitfall 6).
+                    if self._stage2_fallback_extractions_this_poll >= MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL:
+                        _LOGGER.debug(
+                            "Gmail message %s: fallback cap reached (%d/%d) — skipping this poll",
+                            msg_id,
+                            self._stage2_fallback_extractions_this_poll,
+                            MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
+                        )
+                        continue  # do NOT cache (retry next poll)
+
+                    # Run Ollama fallback extraction (Design §3 / Pattern 3 / T-27-03-01).
+                    # Count the attempt regardless of outcome (increment before try so cap
+                    # applies even if the extractor raises).
+                    self._stage2_fallback_extractions_this_poll += 1
+                    try:
+                        result_fb = await self._extractor.async_extract(html, None)
+                    except (OllamaTransientError, OllamaSchemaError) as fb_err:
+                        # T-27-03-04 / Pitfall 5: transient failure → do NOT cache the ID
+                        # so it is retried next poll; no enqueue, no POST.
+                        _LOGGER.debug(
+                            "Gmail message %s: Ollama fallback %s — will retry next poll: %s",
+                            msg_id,
+                            type(fb_err).__name__,
+                            str(fb_err)[:100],
+                        )
+                        continue  # do NOT cache (retry next poll)
+
+                    # Extract + validate the tracking number from the Ollama result.
+                    tn = (result_fb.locked.get("tracking_number") or "").strip()
+                    if tn and _SANITY_RE.match(tn):
+                        # Valid tracking found: build ShipmentData directly (Pattern 3 — do
+                        # NOT route through merge_llm_authoritative whose precondition asserts
+                        # a non-None Stage-1 tracking_number).
+                        fb_shipment = ShipmentData(
+                            tracking_number=tn,
+                            carrier_name=result_fb.locked.get("carrier_name") or "",
+                            order_name=result_fb.locked.get("order_name") or "",
+                            message_id=msg_id,
+                            email_date=email_date,
+                            custom_attributes=result_fb.custom,
+                        )
+                        normalized_fb = normalize_tracking_number(tn)
+                        self._enqueue_stage2(
+                            normalized_fb,
+                            storage_key=msg_id,
+                            shipment=fb_shipment,
+                            html_body=html,
+                            message_id=f"gmail:{msg_id}",
+                            meta=email_meta,
+                        )
+                        # Cache on genuine decision (enqueue) — T-27-03-04 positive arm.
+                        self._mark_message_seen(msg_id)
+                        _LOGGER.debug(
+                            "Gmail message %s: Ollama fallback found tracking %s — enqueued",
+                            msg_id,
+                            tn,
+                        )
+                    else:
+                        # Null/invalid tracking: genuine reject — cache so we never re-judge.
+                        self._mark_message_seen(msg_id)
+                        self._emit_scan_event(
+                            message_id=f"gmail:{msg_id}",
+                            meta=email_meta,
+                            outcome="stage2_no_data",
+                        )
+                        _LOGGER.debug(
+                            "Gmail message %s: Ollama fallback returned no valid tracking — cached as rejected",
+                            msg_id,
+                        )
+                    continue
+
+                # stage2_enabled is False or debug_mode: mark seen (no fallback to retry).
                 self._mark_message_seen(msg_id)
                 continue
             # Iterate all shipments from this email. Single-shipment emails have
