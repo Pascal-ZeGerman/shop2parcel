@@ -535,7 +535,16 @@ def test_default_gmail_query_is_subject_only():
     assert DEFAULT_GMAIL_QUERY.startswith("subject:("), (
         "DEFAULT_GMAIL_QUERY must start with 'subject:(' (subject-only filter)"
     )
-    for keyword in ("tracking", "shipped", "shipment", "delivery", "delivered", "parcel", "package", "order"):
+    for keyword in (
+        "tracking",
+        "shipped",
+        "shipment",
+        "delivery",
+        "delivered",
+        "parcel",
+        "package",
+        "order",
+    ):
         assert keyword in DEFAULT_GMAIL_QUERY, (
             f"DEFAULT_GMAIL_QUERY must contain keyword '{keyword}'"
         )

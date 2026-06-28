@@ -48,7 +48,6 @@ from .const import (
     debug_mode_notification_id,
     normalize_tracking_number,
 )
-from .merge import _SANITY_RE
 from .coordinator import (
     Shop2ParcelCoordinator,
     Stage2Job,  # noqa: F401 — type import; subclass calls _enqueue_stage2 which constructs Stage2Job
@@ -56,6 +55,7 @@ from .coordinator import (
     _next_midnight_utc,
     _sanitise_parser_error,
 )
+from .merge import _SANITY_RE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -395,7 +395,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     # Per-poll cap check (Design §4 / T-27-03-03 DoS guard): if we have
                     # already run MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions this
                     # poll, skip WITHOUT caching the ID so it is retried next poll (Pitfall 6).
-                    if self._stage2_fallback_extractions_this_poll >= MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL:
+                    if (
+                        self._stage2_fallback_extractions_this_poll
+                        >= MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL
+                    ):
                         _LOGGER.debug(
                             "Gmail message %s: fallback cap reached (%d/%d) — skipping this poll",
                             msg_id,

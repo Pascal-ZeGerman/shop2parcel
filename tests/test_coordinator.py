@@ -4885,9 +4885,7 @@ async def test_load_store_non_list_seen_message_ids_resets_and_warns(
 
     assert len(coord._seen_message_ids) == 0
     assert any(
-        "seen_message_ids" in r.message
-        for r in caplog.records
-        if r.levelno == logging.WARNING
+        "seen_message_ids" in r.message for r in caplog.records if r.levelno == logging.WARNING
     )
 
 
@@ -4920,9 +4918,7 @@ def test_storage_version_unchanged():
 
 def _mock_oauth_ctx(hass_mock=None):
     """Return a patch context that stubs OAuth2 token refresh for Gmail coordinator tests."""
-    return patch(
-        "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
-    )
+    return patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow")
 
 
 def _setup_mock_oauth(mock_oauth, *, access_token: str = "fake-access-token"):
@@ -5167,9 +5163,7 @@ def _common_fallback_patches(mock_stage2_entry, mock_gmail):
     from unittest.mock import patch
 
     return (
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
-        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.GmailClient",
             return_value=mock_gmail,
@@ -5400,9 +5394,7 @@ async def test_fallback_per_poll_cap(hass, mock_stage2_entry):
     # 25 messages all missing Stage-1
     messages = [{"id": f"msg_cap_{i}"} for i in range(25)]
     mock_gmail = MagicMock()
-    mock_gmail.async_list_messages = AsyncMock(
-        return_value=(messages, "subject:(tracking)")
-    )
+    mock_gmail.async_list_messages = AsyncMock(return_value=(messages, "subject:(tracking)"))
     mock_gmail.async_get_message = AsyncMock(
         side_effect=lambda _creds, msg_id: {
             "id": msg_id,
@@ -5468,9 +5460,7 @@ async def test_fallback_counter_resets_each_poll(hass, mock_stage2_entry):
 
     with (
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
-        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
