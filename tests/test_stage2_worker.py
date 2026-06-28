@@ -3168,3 +3168,248 @@ async def test_record_stage2_failure_notifies_listeners(hass, mock_stage2_config
             "Problem sensor won't refresh: _record_stage2_failure must notify listeners "
             "when the streak crosses the threshold in the background worker."
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 27 Plan 03 Task 1: Skip-POST gate (tracking_number is None -> stage2_no_data)
+# ---------------------------------------------------------------------------
+
+
+def _make_none_tracking_shipment() -> ShipmentData:
+    """Build a ShipmentData whose tracking_number is intentionally sentinel-None.
+
+    ShipmentData.tracking_number is typed str (non-optional) in email_parser.py,
+    so we use object.__setattr__ to inject None — this mirrors the scenario where
+    the fallback path enqueues a job whose second extraction yields None after merge.
+    """
+    shipment = ShipmentData(
+        tracking_number="PLACEHOLDER",
+        carrier_name="UPS",
+        order_name="#1234",
+        message_id="msg-none-tn",
+        email_date=1700000000,
+    )
+    object.__setattr__(shipment, "tracking_number", None)
+    return shipment
+
+
+async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_stage2_config_entry):
+    """Phase 27 §3: a Stage2Job whose merged shipment has tracking_number=None must NOT POST.
+
+    After the extractor + merge run, if merged_shipment.tracking_number is None,
+    the worker emits stage2_no_data and returns — no call to ParcelAppClient.async_add_delivery.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        from unittest.mock import MagicMock
+
+        from custom_components.shop2parcel.extractors.types import Stage2Result
+
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        # Extractor returns a result whose locked tracking_number is None
+        # so merge_llm_authoritative will promote None -> merged has None tracking.
+        fake_result = Stage2Result(
+            locked={"tracking_number": None, "carrier_name": None, "order_name": None},
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=fake_result)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        # Enqueue a job whose Stage-1 shipment also has tracking_number=None
+        # so merge_llm_authoritative produces merged.tracking_number = None.
+        none_shipment = _make_none_tracking_shipment()
+        job = Stage2Job(
+            storage_key="none_tn_key",
+            normalized_tn="PLACEHOLDER",
+            shipment=none_shipment,
+            html_body="<html/>",
+            message_id="test-none-tn",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
+        coord._stage2_queue.put_nowait(job)
+
+        await asyncio.sleep(0)
+        await hass.async_block_till_done()
+
+    # The skip-POST gate must prevent any POST call.
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
+
+
+async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_config_entry):
+    """Phase 27 §3: skip-POST gate emits exactly one stage2_no_data scan event."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        from custom_components.shop2parcel.extractors.types import Stage2Result
+
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        fake_result = Stage2Result(
+            locked={"tracking_number": None, "carrier_name": None, "order_name": None},
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=fake_result)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        none_shipment = _make_none_tracking_shipment()
+        job = Stage2Job(
+            storage_key="none_tn_key2",
+            normalized_tn="PLACEHOLDER",
+            shipment=none_shipment,
+            html_body="<html/>",
+            message_id="test-none-tn2",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
+        coord._stage2_queue.put_nowait(job)
+
+        await asyncio.sleep(0)
+        await hass.async_block_till_done()
+
+    # Verify stage2_no_data event was emitted
+    scan_events = coord._diagnostics.scan_events
+    no_data_events = [e for e in scan_events if e.get("outcome") == "stage2_no_data"]
+    assert len(no_data_events) == 1, (
+        f"Expected exactly 1 stage2_no_data event, got {len(no_data_events)}. "
+        f"All events: {[e.get('outcome') for e in scan_events]}"
+    )
+
+
+async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_entry):
+    """Phase 27 §3: skip-POST gate discards the in-flight key from _stage2_enqueued_keys."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        from custom_components.shop2parcel.extractors.types import Stage2Result
+
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        fake_result = Stage2Result(
+            locked={"tracking_number": None, "carrier_name": None, "order_name": None},
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=fake_result)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        none_shipment = _make_none_tracking_shipment()
+        normalized_tn = "PLACEHOLDER"
+        job = Stage2Job(
+            storage_key="none_tn_key3",
+            normalized_tn=normalized_tn,
+            shipment=none_shipment,
+            html_body="<html/>",
+            message_id="test-none-tn3",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
+        # Pre-add the key to simulate the enqueue call
+        coord._stage2_enqueued_keys.add(normalized_tn)
+        coord._stage2_queue.put_nowait(job)
+
+        await asyncio.sleep(0)
+        await hass.async_block_till_done()
+
+    # Key must be discarded after skip-POST gate fires
+    assert normalized_tn not in coord._stage2_enqueued_keys
+
+
+async def test_non_none_tracking_number_still_posts(hass, mock_stage2_config_entry):
+    """Phase 27 §3: a Stage2Job with a valid tracking number still POSTs (existing path unchanged)."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        from custom_components.shop2parcel.extractors.types import Stage2Result
+
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        fake_result = Stage2Result(
+            locked={
+                "tracking_number": "1Z999AA10123456784",
+                "carrier_name": "UPS",
+                "order_name": "#1234",
+            },
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=fake_result)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        shipment = _make_shipment()
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-valid-tn",
+            meta={"subject": "test", "from": "test@example.com"},
+        )
+        coord._stage2_queue.put_nowait(job)
+
+        await asyncio.sleep(0)
+        await hass.async_block_till_done()
+
+    # Valid tracking number must reach the POST
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
