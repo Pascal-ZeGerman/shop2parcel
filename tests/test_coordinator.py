@@ -4764,3 +4764,339 @@ async def test_imap_poll_start_notify_failure_resets_flag(hass, mock_imap_config
     assert coord._poll_in_progress is False, (
         "a start-notify failure must not leak _poll_in_progress=True"
     )
+
+
+# -------- Phase 27 Plan 02: seen-message-ID cache (base coordinator) --------
+
+
+@pytest.fixture()
+def _coord_with_store(hass, mock_config_entry):
+    """Return a GmailCoordinator with a no-op store (sync helper)."""
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+    return coord
+
+
+def test_seen_message_ids_init_empty(_coord_with_store):
+    """A fresh coordinator has an empty seen-message-ID cache."""
+    coord = _coord_with_store
+    assert hasattr(coord, "_seen_message_ids")
+    assert isinstance(coord._seen_message_ids, OrderedDict)
+    assert len(coord._seen_message_ids) == 0
+
+
+def test_mark_message_seen_adds_id(_coord_with_store):
+    """_mark_message_seen makes the ID present in the cache."""
+    coord = _coord_with_store
+    coord._mark_message_seen("msg_abc")
+    assert "msg_abc" in coord._seen_message_ids
+
+
+def test_mark_message_seen_idempotent(_coord_with_store):
+    """Re-marking an ID does not duplicate it."""
+    coord = _coord_with_store
+    coord._mark_message_seen("msg_x")
+    coord._mark_message_seen("msg_x")
+    assert list(coord._seen_message_ids.keys()).count("msg_x") == 1
+    assert len(coord._seen_message_ids) == 1
+
+
+def test_mark_message_seen_fifo_eviction(_coord_with_store):
+    """Adding beyond SEEN_MESSAGE_IDS_MAXLEN evicts the oldest ID (FIFO)."""
+    from custom_components.shop2parcel.const import SEEN_MESSAGE_IDS_MAXLEN
+
+    coord = _coord_with_store
+    # Fill to the max
+    for i in range(SEEN_MESSAGE_IDS_MAXLEN):
+        coord._mark_message_seen(f"msg_{i:05d}")
+    assert len(coord._seen_message_ids) == SEEN_MESSAGE_IDS_MAXLEN
+    # The first ID added should still be at the front
+    first_key = next(iter(coord._seen_message_ids))
+    assert first_key == "msg_00000"
+
+    # Adding one more should evict the oldest
+    coord._mark_message_seen("msg_NEW")
+    assert len(coord._seen_message_ids) == SEEN_MESSAGE_IDS_MAXLEN
+    assert "msg_00000" not in coord._seen_message_ids
+    assert "msg_NEW" in coord._seen_message_ids
+
+
+def test_store_snapshot_includes_seen_message_ids(_coord_with_store):
+    """_store_snapshot includes seen_message_ids key in insertion order."""
+    coord = _coord_with_store
+    coord._mark_message_seen("id_first")
+    coord._mark_message_seen("id_second")
+    snapshot = coord._store_snapshot()
+    assert "seen_message_ids" in snapshot
+    assert snapshot["seen_message_ids"] == ["id_first", "id_second"]
+
+
+async def test_seen_message_ids_round_trips_through_store(hass, mock_config_entry):
+    """seen_message_ids serializes and deserializes preserving order."""
+    mock_config_entry.add_to_hass(hass)
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        coord._mark_message_seen("alpha")
+        coord._mark_message_seen("beta")
+        snapshot = coord._store_snapshot()
+
+    # Now simulate a second coordinator loading from that snapshot
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2:
+        mock_store_cls2.return_value.async_load = AsyncMock(return_value=snapshot)
+        mock_store_cls2.return_value.async_delay_save = MagicMock()
+        coord2 = GmailCoordinator(hass, mock_config_entry)
+        await coord2._async_load_store()
+
+    assert list(coord2._seen_message_ids.keys()) == ["alpha", "beta"]
+
+
+async def test_load_store_without_seen_message_ids_key(hass, mock_config_entry):
+    """A v3 store with no seen_message_ids key loads cleanly with empty cache."""
+    mock_config_entry.add_to_hass(hass)
+    store_data = {"submitted_tracking_numbers": [], "quota_exhausted_until": None}
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=store_data)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert len(coord._seen_message_ids) == 0
+
+
+async def test_load_store_non_list_seen_message_ids_resets_and_warns(
+    hass, mock_config_entry, caplog
+):
+    """A non-list seen_message_ids value in the store resets to empty + emits WARNING."""
+    mock_config_entry.add_to_hass(hass)
+    store_data = {"submitted_tracking_numbers": [], "seen_message_ids": "not-a-list"}
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=store_data)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        with caplog.at_level(logging.WARNING):
+            await coord._async_load_store()
+
+    assert len(coord._seen_message_ids) == 0
+    assert any(
+        "seen_message_ids" in r.message
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    )
+
+
+async def test_load_store_filters_non_str_seen_message_ids(hass, mock_config_entry):
+    """Non-str items in seen_message_ids are dropped; str items are kept."""
+    mock_config_entry.add_to_hass(hass)
+    store_data = {
+        "submitted_tracking_numbers": [],
+        "seen_message_ids": ["valid_id", 42, None, "another_valid"],
+    }
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=store_data)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert list(coord._seen_message_ids.keys()) == ["valid_id", "another_valid"]
+
+
+def test_storage_version_unchanged():
+    """STORAGE_VERSION must remain 3 (no bump for additive seen_message_ids key)."""
+    from custom_components.shop2parcel.coordinator import STORAGE_VERSION
+
+    assert STORAGE_VERSION == 3
+
+
+# -------- Phase 27 Plan 02: Gmail poll-loop seen-ID gate -------------------
+
+
+def _mock_oauth_ctx(hass_mock=None):
+    """Return a patch context that stubs OAuth2 token refresh for Gmail coordinator tests."""
+    return patch(
+        "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+    )
+
+
+def _setup_mock_oauth(mock_oauth, *, access_token: str = "fake-access-token"):
+    """Configure the mock_oauth context with a valid token."""
+    mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+    mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+    mock_oauth.OAuth2Session.return_value.token = {
+        "access_token": access_token,
+        "refresh_token": "fake-refresh-token",
+        "expires_at": 9999999999.0,
+    }
+
+
+async def test_seen_id_gate_skips_already_seen_message(hass, mock_config_entry):
+    """A pre-seeded message ID is not fetched from Gmail (pre-loop filter)."""
+    mock_config_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=(
+            [{"id": "seen_id"}, {"id": "new_id"}],
+            "subject:(tracking)",
+        )
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": "new_id",
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/plain", "body": {"data": ""}},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        # Pre-seed one message as already seen
+        coord._mark_message_seen("seen_id")
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    # async_get_message must NOT be called for "seen_id", only for "new_id"
+    call_args = [call.args[1] for call in mock_gmail.async_get_message.call_args_list]
+    assert "seen_id" not in call_args
+    assert "new_id" in call_args
+
+
+async def test_seen_id_gate_skipped_in_debug_mode(hass):
+    """In debug_mode the seen-ID filter is bypassed; pre-seeded IDs are still fetched."""
+    from custom_components.shop2parcel.const import DOMAIN
+
+    debug_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "token": {
+                "access_token": "tok",
+                "refresh_token": "rtok",
+                "expires_in": 3600,
+            },
+            "api_key": "test-api-key",
+        },
+        options={
+            "poll_interval": 30,
+            "debug_mode": True,
+        },
+    )
+    debug_entry.add_to_hass(hass)
+
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=(
+            [{"id": "seen_in_debug"}],
+            "subject:(tracking)",
+        )
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": "seen_in_debug",
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/plain", "body": {"data": ""}},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+
+        coord = GmailCoordinator(hass, debug_entry)
+        await coord._async_load_store()
+        # Pre-seed the message as seen
+        coord._mark_message_seen("seen_in_debug")
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    # In debug mode, seen_in_debug must still be fetched
+    call_args = [call.args[1] for call in mock_gmail.async_get_message.call_args_list]
+    assert "seen_in_debug" in call_args
+
+
+async def test_processed_message_id_added_to_seen_cache_after_no_match(hass, mock_config_entry):
+    """A message that exits via no_match path is added to the seen cache."""
+    mock_config_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=([{"id": "msg_nomatch"}], "subject:(tracking)")
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": "msg_nomatch",
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/html", "body": {"data": "PGh0bWw+PC9odG1sPg=="}},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    assert "msg_nomatch" in coord._seen_message_ids
