@@ -3196,8 +3196,9 @@ def _make_none_tracking_shipment() -> ShipmentData:
 async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_stage2_config_entry):
     """Phase 27 §3: a Stage2Job whose merged shipment has tracking_number=None must NOT POST.
 
-    After the extractor + merge run, if merged_shipment.tracking_number is None,
-    the worker emits stage2_no_data and returns — no call to ParcelAppClient.async_add_delivery.
+    Patches merge_llm_authoritative to return a shipment with tracking_number=None,
+    simulating the scenario where the second extraction inside the worker produces no
+    tracking number. The skip-POST gate must intercept and suppress the POST.
     """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -3210,36 +3211,27 @@ async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_st
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.merge_llm_authoritative") as mock_merge,
     ):
-        from unittest.mock import MagicMock
-
         from custom_components.shop2parcel.extractors.types import Stage2Result
 
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-
-        # Extractor returns a result whose locked tracking_number is None
-        # so merge_llm_authoritative will promote None -> merged has None tracking.
-        fake_result = Stage2Result(
-            locked={"tracking_number": None, "carrier_name": None, "order_name": None},
-            custom={},
-            passes_used=1,
-            latency_ms=10.0,
-        )
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=fake_result)
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        # Merge returns a shipment with tracking_number=None — this is the skip-POST scenario.
+        none_shipment = _make_none_tracking_shipment()
+        mock_merge.return_value = (none_shipment, [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
         await coord.async_start_stage2()
 
-        # Enqueue a job whose Stage-1 shipment also has tracking_number=None
-        # so merge_llm_authoritative produces merged.tracking_number = None.
-        none_shipment = _make_none_tracking_shipment()
         job = Stage2Job(
             storage_key="none_tn_key",
-            normalized_tn="PLACEHOLDER",
-            shipment=none_shipment,
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
             html_body="<html/>",
             message_id="test-none-tn",
             meta={"subject": "test", "from": "test@example.com"},
@@ -3266,30 +3258,24 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.merge_llm_authoritative") as mock_merge,
     ):
-        from custom_components.shop2parcel.extractors.types import Stage2Result
-
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-
-        fake_result = Stage2Result(
-            locked={"tracking_number": None, "carrier_name": None, "order_name": None},
-            custom={},
-            passes_used=1,
-            latency_ms=10.0,
-        )
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=fake_result)
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        none_shipment = _make_none_tracking_shipment()
+        mock_merge.return_value = (none_shipment, [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
         await coord.async_start_stage2()
 
-        none_shipment = _make_none_tracking_shipment()
         job = Stage2Job(
             storage_key="none_tn_key2",
-            normalized_tn="PLACEHOLDER",
-            shipment=none_shipment,
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
             html_body="<html/>",
             message_id="test-none-tn2",
             meta={"subject": "test", "from": "test@example.com"},
@@ -3321,31 +3307,25 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.merge_llm_authoritative") as mock_merge,
     ):
-        from custom_components.shop2parcel.extractors.types import Stage2Result
-
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-
-        fake_result = Stage2Result(
-            locked={"tracking_number": None, "carrier_name": None, "order_name": None},
-            custom={},
-            passes_used=1,
-            latency_ms=10.0,
-        )
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=fake_result)
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        none_shipment = _make_none_tracking_shipment()
+        mock_merge.return_value = (none_shipment, [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
         await coord.async_start_stage2()
 
-        none_shipment = _make_none_tracking_shipment()
-        normalized_tn = "PLACEHOLDER"
+        normalized_tn = "1Z999AA10123456784"
         job = Stage2Job(
             storage_key="none_tn_key3",
             normalized_tn=normalized_tn,
-            shipment=none_shipment,
+            shipment=_make_shipment(),
             html_body="<html/>",
             message_id="test-none-tn3",
             meta={"subject": "test", "from": "test@example.com"},

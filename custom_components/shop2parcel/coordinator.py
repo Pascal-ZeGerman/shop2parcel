@@ -1261,6 +1261,20 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_enqueued_keys.discard(normalized_tn)  # LD-01: allow re-enqueue next poll
             return  # no POST, no dedup write, no pending_posts write, no store save
 
+        # Phase 27 Design §3 skip-POST gate: if the post-merge tracking number is None
+        # (possible when the fallback path enqueues a job whose second extraction + merge
+        # yields nothing), emit stage2_no_data, discard the in-flight key, and return
+        # without POSTing, writing dedup, writing _pending_posts, or saving the store.
+        if merged_shipment.tracking_number is None:
+            self._emit_scan_event(
+                message_id=job.message_id,
+                meta=job.meta,
+                outcome="stage2_no_data",
+                tracking_number=None,
+            )
+            self._stage2_enqueued_keys.discard(normalized_tn)
+            return  # no POST, no dedup write, no _pending_posts write, no store save
+
         # Phase 23 LD-03/LD-05: Quota guard moved to AFTER extraction+merge so Ollama always
         # runs for every dequeued job. When quota is exhausted, persist the already-merged
         # shipment to _pending_posts so the drain (plan 04) can POST it later without
