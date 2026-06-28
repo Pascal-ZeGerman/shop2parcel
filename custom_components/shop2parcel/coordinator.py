@@ -66,6 +66,7 @@ from .const import (
     DOMAIN,
     MAX_STAGE2_POSTS_PER_POLL,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_NOTIFY_COOLDOWN_S,
     STAGE2_NOTIFY_THRESHOLD,
     normalize_tracking_number,
@@ -409,6 +410,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             hass, version=STORAGE_VERSION, key=f"shop2parcel.{entry.entry_id}"
         )
         self._submitted_tracking_numbers: OrderedDict[str, None] = OrderedDict()
+        # Phase 27 Plan 02: seen-message-ID cache (mirrors _submitted_tracking_numbers).
+        # Tracks Gmail message IDs already processed (any outcome) in a prior poll so
+        # they are skipped before async_get_message is called.  FIFO-bounded at
+        # SEEN_MESSAGE_IDS_MAXLEN (10 000) to cap memory; oldest ID evicted on overflow.
+        # Persisted via additive store key "seen_message_ids" — no STORAGE_VERSION bump.
+        self._seen_message_ids: OrderedDict[str, None] = OrderedDict()
         self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
@@ -490,6 +497,20 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self.hass,
                 notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
             )
+
+    def _mark_message_seen(self, msg_id: str) -> None:
+        """Record a Gmail message ID as processed (seen) so it is skipped on future polls.
+
+        Idempotent: re-marking an existing ID is a no-op (the key already exists in the
+        OrderedDict; no re-ordering of existing entries occurs).  After adding, the cache
+        is trimmed FIFO if it exceeds SEEN_MESSAGE_IDS_MAXLEN — mirrors the
+        _submitted_tracking_numbers trim at coordinator lines 1114-1116.
+
+        Phase 27 Plan 02 (seen-ID gate).
+        """
+        self._seen_message_ids[msg_id] = None
+        while len(self._seen_message_ids) > SEEN_MESSAGE_IDS_MAXLEN:
+            self._seen_message_ids.popitem(last=False)
 
     def _maybe_reset_used_today(self) -> None:
         """Reset used_today to 0 on UTC date rollover.
@@ -1397,6 +1418,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             "Loaded %d submitted tracking numbers from store",
             len(self._submitted_tracking_numbers),
         )
+        # Phase 27 Plan 02: hydrate seen-message-ID cache (additive store key).
+        # A store without the key (e.g. a v3 store written before Plan 02) loads
+        # cleanly with an empty cache — backward-compatible; no STORAGE_VERSION bump.
+        # ASVS V5 / T-27-02-01: non-list values reset to empty with WARNING;
+        # non-str items are dropped (mirrors submitted_tracking_numbers guard above).
+        raw_seen = stored.get("seen_message_ids", [])
+        if not isinstance(raw_seen, list):
+            _LOGGER.warning(
+                "seen_message_ids in store is not a list (type=%s); "
+                "treating as empty — seen-ID cache will repopulate over time.",
+                type(raw_seen).__name__,
+            )
+            raw_seen = []
+        self._seen_message_ids = OrderedDict(
+            (mid, None) for mid in raw_seen if isinstance(mid, str)
+        )
         # Phase 13.1 (R5): load persisted_shipments with per-entry type validation.
         # Each entry must be a dict with exactly the 5 fields in _SHIPMENT_FIELD_TYPES.
         # Invalid entries are skipped with a WARNING (T-13.1-04 / ASVS V5).
@@ -1545,6 +1582,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             "last_forwarded_ts": self._last_forwarded_ts,
             "used_today": self._used_today,
             "used_today_date": self._used_today_date,
+            # Phase 27 Plan 02: seen-message-ID cache (additive key — no STORAGE_VERSION bump).
+            # Stored as an ordered list of IDs (insertion order preserved by list(keys())).
+            "seen_message_ids": list(self._seen_message_ids.keys()),
         }
 
     def _persist_state(self) -> None:
