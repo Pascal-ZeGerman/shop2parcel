@@ -223,6 +223,23 @@ class GmailCoordinator(Shop2ParcelCoordinator):
             self._quota_exhausted_until is not None and now < self._quota_exhausted_until
         )
 
+        # Phase 27 Plan 02: Seen-ID gate — filter already-processed message IDs before
+        # the per-message loop so async_get_message is never called for them.
+        # DBG-02 mirror: skip the filter entirely in debug_mode so debug re-scans every
+        # message regardless of prior processing (mirrors tracking-number dedup skip at
+        # line 375).  Anti-pattern: filtering INSIDE the loop (after async_get_message)
+        # wastes a Gmail API call per seen ID — filter BEFORE to avoid the fetch.
+        if not debug_mode:
+            pre_filter = len(messages)
+            messages = [m for m in messages if m["id"] not in self._seen_message_ids]
+            skipped_seen = pre_filter - len(messages)
+            if skipped_seen:
+                d.last_poll_emails_skipped_dedup += skipped_seen
+                _LOGGER.debug(
+                    "Gmail poll: skipped %d already-seen message IDs (pre-loop seen-ID gate)",
+                    skipped_seen,
+                )
+
         # 4. Iterate messages — fetch body, parse, then dedup on tracking number.
         for msg_meta in messages:
             msg_id = msg_meta["id"]
@@ -252,6 +269,8 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     meta=email_meta,
                     outcome="invalid_internal_date",
                 )
+                # Phase 27 Plan 02: record as processed so next poll skips this ID.
+                self._mark_message_seen(msg_id)
                 continue
 
             payload = msg.get("payload", {})
@@ -287,6 +306,8 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_html_body")
+                # Phase 27 Plan 02: record as processed so next poll skips this ID.
+                self._mark_message_seen(msg_id)
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
@@ -324,6 +345,8 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "error")
+                # Phase 27 Plan 02: record as processed so next poll skips this ID.
+                self._mark_message_seen(msg_id)
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -359,6 +382,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_match")
+                # Phase 27 Plan 02: record as processed so next poll skips this ID.
+                # NOTE: Plan 03 will refine this branch into the Ollama fallback gatekeeper
+                # and move marking to the post-extraction decision for transient-no-cache safety.
+                self._mark_message_seen(msg_id)
                 continue
             # Iterate all shipments from this email. Single-shipment emails have
             # extra_shipments=[] so this loop runs once. Multi-package digests
@@ -411,6 +438,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         message_id=f"gmail:{msg_id}",
                         meta=email_meta,
                     )
+                    # Phase 27 Plan 02: Stage-1-HIT — mark msg_id seen (idempotent for
+                    # multi-shipment emails).  Plan 03 will add the fallback-branch marking.
+                    self._mark_message_seen(msg_id)
                     continue
 
                 # DBG-04: in debug mode, suppress POST and record dry_run_suppressed event.
