@@ -228,19 +228,29 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         )
 
         # Phase 27 Plan 02: Seen-ID gate — filter already-processed message IDs before
-        # the per-message loop so async_get_message is never called for them.
+        # the per-message loop so async_get_message is never called for them. Filters BOTH the
+        # persisted _seen_message_ids (terminal decisions) AND the in-memory
+        # _inflight_message_ids (Stage-2 work in flight this session, or a transient inline
+        # failure), so an enqueued message is not re-fetched / re-judged by Ollama while its
+        # job drains (round-4 fix for the convergence re-fetch + re-extract cost).
         # DBG-02 mirror: skip the filter entirely in debug_mode so debug re-scans every
-        # message regardless of prior processing (mirrors tracking-number dedup skip at
-        # line 375).  Anti-pattern: filtering INSIDE the loop (after async_get_message)
-        # wastes a Gmail API call per seen ID — filter BEFORE to avoid the fetch.
+        # message regardless of prior processing.  Anti-pattern: filtering INSIDE the loop
+        # (after async_get_message) wastes a Gmail API call per skip — filter BEFORE.
         if not debug_mode:
             pre_filter = len(messages)
-            messages = [m for m in messages if m["id"] not in self._seen_message_ids]
+            messages = [
+                m
+                for m in messages
+                if m["id"] not in self._seen_message_ids
+                and m["id"] not in self._inflight_message_ids
+            ]
             skipped_seen = pre_filter - len(messages)
             if skipped_seen:
-                d.last_poll_emails_skipped_dedup += skipped_seen
+                # Finding #240: do NOT fold this into last_poll_emails_skipped_dedup — that
+                # counter is for tracking-number dedup skips. Conflating the two makes the
+                # 'skipped (dedup)' diagnostic uninterpretable. Log only.
                 _LOGGER.debug(
-                    "Gmail poll: skipped %d already-seen message IDs (pre-loop seen-ID gate)",
+                    "Gmail poll: skipped %d already-seen/in-flight message IDs (pre-loop gate)",
                     skipped_seen,
                 )
 
@@ -273,8 +283,12 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     meta=email_meta,
                     outcome="invalid_internal_date",
                 )
-                # Phase 27 Plan 02: record as processed so next poll skips this ID.
-                self._mark_message_seen(msg_id)
+                # Phase 27 (round-4 fix #353/#314): these are transient-ish inline failures
+                # (bad internalDate, momentarily-missing body, parser crash). Use the in-memory
+                # in-flight gate, NOT the persisted seen cache — skip the message this session
+                # but re-evaluate after a restart / FIFO eviction so a transient failure or a
+                # later parser fix can still recover the shipment instead of losing it forever.
+                self._mark_inflight(msg_id)
                 continue
 
             payload = msg.get("payload", {})
@@ -310,8 +324,12 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_html_body")
-                # Phase 27 Plan 02: record as processed so next poll skips this ID.
-                self._mark_message_seen(msg_id)
+                # Phase 27 (round-4 fix #353/#314): these are transient-ish inline failures
+                # (bad internalDate, momentarily-missing body, parser crash). Use the in-memory
+                # in-flight gate, NOT the persisted seen cache — skip the message this session
+                # but re-evaluate after a restart / FIFO eviction so a transient failure or a
+                # later parser fix can still recover the shipment instead of losing it forever.
+                self._mark_inflight(msg_id)
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
@@ -349,8 +367,12 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "error")
-                # Phase 27 Plan 02: record as processed so next poll skips this ID.
-                self._mark_message_seen(msg_id)
+                # Phase 27 (round-4 fix #353/#314): these are transient-ish inline failures
+                # (bad internalDate, momentarily-missing body, parser crash). Use the in-memory
+                # in-flight gate, NOT the persisted seen cache — skip the message this session
+                # but re-evaluate after a restart / FIFO eviction so a transient failure or a
+                # later parser fix can still recover the shipment instead of losing it forever.
+                self._mark_inflight(msg_id)
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -434,20 +456,26 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         # surface (the worker path's _record_stage2_failure equivalent) so a
                         # sustained Ollama outage increments the consecutive-failure streak
                         # and raises the persistent notification — instead of being swallowed
-                        # at DEBUG. Still do NOT cache the ID: it is retried next poll
-                        # (T-27-03-04 / Pitfall 5).
+                        # at DEBUG. Finding #450: only the FIRST fallback failure of a poll
+                        # escalates (bumps the streak / may notify); the rest are recorded
+                        # without inflating the shared streak ~10x per poll on a no-match
+                        # backlog. Still do NOT cache the ID: it is retried next poll.
+                        escalate = not self._stage2_fallback_failed_this_poll
+                        self._stage2_fallback_failed_this_poll = True
                         self._surface_stage2_failure(
                             meta=email_meta,
                             message_id=f"gmail:{msg_id}",
                             normalized_tn="",
                             err=fb_err,
+                            escalate=escalate,
                         )
                         continue  # do NOT cache (retry next poll)
                     except Exception as fb_err:  # noqa: BLE001
                         # Finding #505: an unexpected (non-Ollama) exception must NOT abort the
                         # whole poll mid-iteration (which would skip every later message and
                         # drop the per-poll save). Surface it like a Stage-2 failure and move
-                        # on; the message stays un-cached, so it is retried next poll.
+                        # on; the message stays un-cached, so it is retried next poll. Finding
+                        # #450: escalate at most once per poll (shared latch).
                         _LOGGER.error(
                             "Gmail message %s: unexpected error during Ollama fallback "
                             "extraction — skipping this message: %s",
@@ -455,11 +483,14 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                             fb_err,
                             exc_info=True,
                         )
+                        escalate = not self._stage2_fallback_failed_this_poll
+                        self._stage2_fallback_failed_this_poll = True
                         self._surface_stage2_failure(
                             meta=email_meta,
                             message_id=f"gmail:{msg_id}",
                             normalized_tn="",
                             err=fb_err,
+                            escalate=escalate,
                         )
                         continue  # do NOT cache (retry next poll)
 
@@ -508,8 +539,14 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                                 # Finding #3: hand the already-extracted result to the worker so
                                 # it does NOT call Ollama a second time on the same body.
                                 prefetched_result=result_fb,
+                                raw_msg_id=msg_id,
                             )
                             if enqueued:
+                                # Round-4 fix #512: add to the in-memory in-flight gate so the
+                                # gatekeeper does NOT re-run Ollama on this message every poll
+                                # until the worker POSTs. The worker releases it on a defer; it
+                                # converges to a persisted seen ID via dedup once POSTed.
+                                self._mark_inflight(msg_id)
                                 _LOGGER.debug(
                                     "Gmail message %s: Ollama fallback found tracking %s — "
                                     "enqueued (re-fetch converges the seen-ID)",
@@ -615,21 +652,26 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # Phase 18 D-03: route Stage-2-enabled entries to the queue; the entire inline
                 # POST section (debug_mode, quota_blocked, parcel POST) is bypassed.
                 if self._diagnostics.stage2_enabled:
-                    # Convergence seen-ID model (findings #1/#594): enqueue the job but do NOT
-                    # mark the message seen here. Marking per-message at enqueue while work is
-                    # per-shipment loses deferred / QueueFull siblings of a multi-shipment
-                    # email. Instead, set msg_enqueued so the end-of-loop mark is skipped; the
-                    # message is re-fetched next poll and converges to seen via the
-                    # _submitted_tracking_numbers dedup-skip branch once the worker has POSTed.
-                    # (QueueFull / in-flight-skip are handled identically — re-fetch retries.)
-                    self._enqueue_stage2(
+                    # Convergence seen-ID model (findings #1/#594): do NOT mark the message
+                    # *seen* (persisted) at enqueue — per-message marking while work is
+                    # per-shipment loses deferred / QueueFull siblings. Instead add it to the
+                    # in-memory in-flight gate so it is not re-fetched / re-parsed every poll
+                    # while the job drains (round-4 fix #252); the worker releases it on any
+                    # defer so a deferred sibling is re-fetched, and it converges to a persisted
+                    # seen ID via the dedup-skip branch once the worker has POSTed. raw_msg_id
+                    # gives the worker the in-flight key. (QueueFull → not added to in-flight
+                    # below, so it is re-fetched and re-enqueued next poll.)
+                    enqueued = self._enqueue_stage2(
                         normalized,
                         storage_key,
                         shipment,
                         html,
                         message_id=f"gmail:{msg_id}",
                         meta=email_meta,
+                        raw_msg_id=msg_id,
                     )
+                    if enqueued:
+                        self._mark_inflight(msg_id)
                     msg_enqueued = True
                     continue
 

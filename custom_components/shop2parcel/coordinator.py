@@ -230,6 +230,11 @@ class Stage2Job:
     prefetched_result: Phase 27 fix — a Stage2Result already produced by the Ollama
         fallback gatekeeper (gmail_coordinator). When set, the worker reuses it instead of
         calling the extractor a second time on the same HTML (avoids double extraction).
+    raw_msg_id: Phase 27 — the unprefixed Gmail message ID for the in-flight gate. The poll
+        adds it to the in-memory _inflight_message_ids set on enqueue so the message is not
+        re-fetched (and not re-judged by Ollama) while its Stage-2 work is in flight. The
+        worker RELEASES it from that set on any retry-discard exit so a deferred job is
+        re-fetched and re-enqueued next poll. None for paths with no seen/in-flight gate (IMAP).
     """
 
     storage_key: str
@@ -239,6 +244,7 @@ class Stage2Job:
     message_id: str
     meta: dict
     prefetched_result: Any | None = None
+    raw_msg_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -420,6 +426,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # SEEN_MESSAGE_IDS_MAXLEN (10 000) to cap memory; oldest ID evicted on overflow.
         # Persisted via additive store key "seen_message_ids" — no STORAGE_VERSION bump.
         self._seen_message_ids: OrderedDict[str, None] = OrderedDict()
+        # Phase 27 (round-4 fix): in-memory, NON-persisted, FIFO-bounded set of message IDs
+        # whose Stage-2 work is in flight this session, or which hit a transient inline
+        # failure (parse crash / momentarily-missing body). The poll's seen-ID gate also
+        # filters these, so an enqueued message is not re-fetched / re-judged by Ollama while
+        # its job drains (fixes the convergence re-fetch + re-extract cost). It is deliberately
+        # NOT persisted: a restart re-evaluates these messages, which recovers transient
+        # failures and re-enqueues anything the (also-lost) queue had pending. The worker
+        # RELEASES an entry on any retry-discard so a deferred job is re-fetched next poll.
+        self._inflight_message_ids: OrderedDict[str, None] = OrderedDict()
         self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
@@ -466,6 +481,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL (10). Reset each poll via
         # _reset_stage2_poll_counters (mirrors _stage2_posts_this_poll).
         self._stage2_fallback_extractions_this_poll: int = 0
+        # Phase 27 finding #450: True once a fallback extraction failure has escalated this
+        # poll. Subsequent fallback failures in the same poll record without bumping the
+        # shared consecutive-failure streak / firing the notification. Reset each poll.
+        self._stage2_fallback_failed_this_poll: bool = False
         # M6A-01: poll-in-progress flag — set True at the top of each _async_update_data
         # call in GmailCoordinator and ImapCoordinator (after _reset_stage2_poll_counters),
         # then reset to False in the finally block before returning.  Surfaced via the
@@ -503,6 +522,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_quota_warned_this_poll = False
         # Phase 27 Plan 03: reset fallback extraction counter (mirrors _stage2_posts_this_poll).
         self._stage2_fallback_extractions_this_poll = 0
+        # Phase 27 finding #450: reset the per-poll fallback-escalation latch.
+        self._stage2_fallback_failed_this_poll = False
         if self.config_entry is not None:
             persistent_notification.async_dismiss(
                 self.hass,
@@ -522,6 +543,31 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._seen_message_ids[msg_id] = None
         while len(self._seen_message_ids) > SEEN_MESSAGE_IDS_MAXLEN:
             self._seen_message_ids.popitem(last=False)
+
+    def _mark_inflight(self, msg_id: str) -> None:
+        """Record a message ID as in-flight (or transiently skipped) for the current session.
+
+        FIFO-bounded at SEEN_MESSAGE_IDS_MAXLEN. In-flight IDs are filtered by the poll gate
+        (like seen IDs) so the message is not re-fetched / re-judged while its Stage-2 job
+        drains, but are NEVER persisted — a restart re-evaluates them. Eviction (or restart)
+        lets an already-forwarded entry converge to a persisted seen ID via the
+        tracking-number dedup-skip, and lets a transiently-failed entry be retried.
+        """
+        self._inflight_message_ids[msg_id] = None
+        while len(self._inflight_message_ids) > SEEN_MESSAGE_IDS_MAXLEN:
+            self._inflight_message_ids.popitem(last=False)
+
+    def _release_inflight(self, job: Stage2Job) -> None:
+        """Drop a job's message from the in-flight set so the next poll re-fetches it.
+
+        Called from every worker retry-discard exit (per-poll cap, transient Ollama/parcelapp
+        error, unexpected worker error, cancellation). Pairs with the existing
+        _stage2_enqueued_keys.discard at those sites: the key discard allows re-enqueue and
+        this release allows the re-fetch that produces it. No-op for jobs without a raw_msg_id
+        (IMAP) or already released. In-memory only — never persists.
+        """
+        if job.raw_msg_id is not None:
+            self._inflight_message_ids.pop(job.raw_msg_id, None)
 
     def _maybe_reset_used_today(self) -> None:
         """Reset used_today to 0 on UTC date rollover.
@@ -594,6 +640,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         message_id: str,
         normalized_tn: str,
         err: Exception,
+        escalate: bool = True,
     ) -> None:
         """Kwargs-based core of _record_stage2_failure (Phase 27 fix for finding #2).
 
@@ -601,6 +648,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         and from the Gmail Ollama fallback gatekeeper (which fails before any job exists).
         Routing fallback failures here means a sustained Ollama outage escalates and notifies
         the same way worker-path failures do — instead of being swallowed at DEBUG level.
+
+        escalate (finding #450): when True, also bump the consecutive-failure streak, run the
+        threshold/cooldown notification gate, and dispatch listeners. The Gmail fallback passes
+        escalate=False for every failure after the first in a poll, so a backlog of no-match
+        emails during a brief Ollama blip records each failure (log + event + lifetime counter)
+        WITHOUT inflating the shared streak ~10x per poll and firing a false 'Stage-2 Failing'
+        alarm. The worker path and the first fallback failure of each poll still escalate.
         """
         # FAIL-01: loud error log with 4 required fields (replaces Phase 19 _LOGGER.debug).
         _LOGGER.error(
@@ -621,13 +675,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             extra={"error_type": type(err).__name__, "error_msg": str(err)},
         )
 
-        # FAIL-04: consecutive-failure counter increment + threshold/cooldown notification gate.
-        self._stage2_consecutive_failures += 1
-
         # DIAG-02: lifetime failure counters; stage2_schema_error_total is a sub-counter.
+        # Always recorded (per-failure), independent of escalation.
         self._diagnostics.stage2_failed_total += 1
         if isinstance(err, OllamaSchemaError):
             self._diagnostics.stage2_schema_error_total += 1
+
+        # Finding #450: non-escalating failures (repeat fallback failures within one poll) stop
+        # here — no streak bump, no notification, no listener churn.
+        if not escalate:
+            return
+
+        # FAIL-04: consecutive-failure counter increment + threshold/cooldown notification gate.
+        self._stage2_consecutive_failures += 1
 
         # D-09 cooldown state machine: fire if at/past threshold AND (never fired OR cooldown elapsed).
         if self._stage2_consecutive_failures >= STAGE2_NOTIFY_THRESHOLD and (
@@ -987,6 +1047,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         message_id: str,
         meta: dict,
         prefetched_result: Any | None = None,
+        raw_msg_id: str | None = None,
     ) -> bool:
         """Enqueue a Stage-2 job with in-flight dedup and drop-newest backpressure.
 
@@ -1015,6 +1076,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             message_id=message_id,
             meta=meta,
             prefetched_result=prefetched_result,
+            raw_msg_id=raw_msg_id,
         )
         assert self._stage2_queue is not None
         try:
@@ -1068,11 +1130,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     await self._async_process_stage2_job(job)
                 except asyncio.CancelledError:
                     self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
+                    self._release_inflight(job)  # re-fetch on next start (not lost)
                     raise  # propagate — shuts down the worker
                 except Exception as err:  # noqa: BLE001
                     # FAIL-01/02/04: surface the failure loudly via the centralized helper (D-01..D-04).
                     self._record_stage2_failure(job, err)
                     self._stage2_enqueued_keys.discard(normalized_tn)
+                    self._release_inflight(job)  # re-fetch next poll (not lost)
                 finally:
                     self._stage2_queue.task_done()
         except asyncio.CancelledError:
@@ -1226,6 +1290,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             "on" if self._extractor is not None else "off",
         )
 
+        # Phase 27 (round-4 fix, finding #501): idempotency guard. If this tracking number was
+        # already forwarded — e.g. the _async_drain_pending_posts() call that runs immediately
+        # before this method just POSTed a quota-deferred copy of it, or a sibling job handled
+        # it — do NOT POST again. A second POST double-consumes the parcelapp 20/day quota and
+        # creates a duplicate delivery. Discard the in-flight key and return; leave the
+        # in-flight message entry so it converges to a persisted seen ID normally.
+        if normalized_tn in self._submitted_tracking_numbers:
+            _LOGGER.debug(
+                "Stage-2: tn=%s already forwarded — skipping duplicate POST", normalized_tn
+            )
+            self._stage2_enqueued_keys.discard(normalized_tn)
+            return
+
         # MRG-05: per-poll POST cap gate (D-09). Checked BEFORE the extractor call so
         # cap-skipped jobs never reach Ollama (avoids wasted inference cost during cap-hit polls).
         if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
@@ -1250,6 +1327,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
+            self._release_inflight(job)  # re-fetch next poll (cap-deferred, not lost)
             return  # no extractor, no POST, no dedup write
 
         # MRG-02: default to Stage-1 shipment; replaced by merged result after extraction.
@@ -1275,6 +1353,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # not touch control flow; existing discard+return below remain unchanged).
                 self._record_stage2_failure(job, err)
                 self._stage2_enqueued_keys.discard(normalized_tn)
+                self._release_inflight(job)  # re-fetch next poll (not lost)
                 return
 
             self._diagnostics.record_llm_call(
@@ -1318,12 +1397,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._stage2_enqueued_keys.discard(normalized_tn)  # LD-01: allow re-enqueue next poll
+            self._release_inflight(job)  # re-fetch next poll (dry-run defer)
             return  # no POST, no dedup write, no pending_posts write, no store save
 
-        # Phase 27 Design §3 skip-POST gate: if the post-merge tracking number is None
-        # (possible when the fallback path enqueues a job whose second extraction + merge
-        # yields nothing), emit stage2_no_data, discard the in-flight key, and return
-        # without POSTing, writing dedup, writing _pending_posts, or saving the store.
+        # Defensive skip-POST guard (finding #1327): under current code merged_shipment.tracking_number
+        # is never None — Stage-1 hits and prefetched fallback jobs carry a validated non-None
+        # number, and merge_llm_authoritative asserts a non-None Stage-1 number and keeps it (a
+        # None-tracking Stage-1 job trips that assertion and is handled by the worker's outer
+        # except, never reaching here). This guard is therefore not expected to fire in
+        # production; it remains as a cheap belt-and-braces check so a future merge/fallback
+        # change can never POST a None tracking number to parcelapp. It does NOT release the
+        # in-flight ID: a genuine no-data result is terminal (converges to seen), not a retry.
         if merged_shipment.tracking_number is None:
             self._emit_scan_event(
                 message_id=job.message_id,
@@ -1419,6 +1503,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             )
             self._diagnostics.stage2_transient_error_total += 1
             self._stage2_enqueued_keys.discard(normalized_tn)
+            self._release_inflight(job)  # re-fetch next poll (transient, not lost)
             return
 
         # Success path (mirrors gmail_coordinator.py lines 513-526).

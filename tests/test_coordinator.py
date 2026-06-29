@@ -5510,7 +5510,51 @@ async def test_stage2_hit_not_marked_seen_until_converged(hass, mock_stage2_entr
         await coord._async_update_data()
 
     mock_enqueue.assert_called_once()
+    # Not persisted-seen, but in the in-memory in-flight gate so it is not re-fetched /
+    # re-parsed every poll while the worker drains it (round-4 fix #252).
     assert "msg_s1hit" not in coord._seen_message_ids
+    assert "msg_s1hit" in coord._inflight_message_ids
+
+
+async def test_transient_failure_marks_inflight_not_seen(hass, mock_stage2_entry):
+    """Round-4 fix (#353/#314): a transient inline failure (here: no extractable body) must
+    NOT be permanently cached in _seen_message_ids — it goes to the in-memory in-flight gate
+    so a restart / FIFO eviction re-evaluates it and can recover a transient miss."""
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_nohtml")
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        # extract_html_body returns empty → no_html_body branch.
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="",
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_text_body",
+            return_value="",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        await coord._async_update_data()
+
+    assert "msg_nohtml" not in coord._seen_message_ids
+    assert "msg_nohtml" in coord._inflight_message_ids
 
 
 async def test_fallback_invalid_tracking_no_enqueue_but_cached(hass, mock_stage2_entry):
