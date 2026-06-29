@@ -3458,6 +3458,58 @@ async def test_cap_skip_unmarks_seen_for_retry(hass, mock_stage2_config_entry):
         await coord.async_stop_stage2()
 
 
+async def test_unmark_seen_for_retry_persists_store(hass, mock_stage2_config_entry):
+    """Finding #2 (iter 2): the worker's un-mark must be persisted, not just edited in memory.
+
+    The optimistic seen-mark is persisted at poll end; if the worker's compensating un-mark
+    only touched the in-memory OrderedDict, an HA restart before the next poll's save would
+    rehydrate the stale mark and filter the deferred message forever. The defer path must
+    schedule a store write (debounced _persist_state).
+    """
+    from custom_components.shop2parcel.const import MAX_STAGE2_POSTS_PER_POLL
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_persist_state") as mock_persist,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        coord._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL  # force cap-skip defer
+        coord._mark_message_seen("msg_persist")
+        mock_persist.reset_mock()  # ignore any persist from setup
+
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="gmail:msg_persist",
+            meta={"subject": "test", "from": "test@example.com"},
+            raw_msg_id="msg_persist",
+        )
+        await coord._async_process_stage2_job(job)
+
+        assert "msg_persist" not in coord._seen_message_ids  # un-marked in memory
+        assert mock_persist.called  # ...AND the un-mark was persisted
+
+        await coord.async_stop_stage2()
+
+
 async def test_transient_post_unmarks_seen_for_retry(hass, mock_stage2_config_entry):
     """Finding #1: a transient parcelapp POST error un-marks the source message for retry."""
     from custom_components.shop2parcel.api.exceptions import ParcelAppTransientError

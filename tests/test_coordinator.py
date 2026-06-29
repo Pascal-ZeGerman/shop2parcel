@@ -5246,6 +5246,126 @@ async def test_fallback_valid_tracking_enqueues_stage2_job(hass, mock_stage2_ent
     assert "msg_fb_valid" in coord._seen_message_ids
 
 
+async def test_fallback_queuefull_does_not_mark_seen(hass, mock_stage2_entry):
+    """Finding #1 (iter 2): when the Stage-2 queue is full the fallback enqueue returns False
+    (job dropped, no worker run). The message must NOT be marked seen — otherwise the
+    seen-ID gate filters it forever and the real shipment is lost. It must stay re-fetchable."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_qfull")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>non-template body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        # Simulate QueueFull: _enqueue_stage2 returns False.
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=False) as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1234",
+                },
+                custom={},
+                passes_used=1,
+                latency_ms=10.0,
+            )
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    assert mock_enqueue.called  # enqueue WAS attempted
+    # ...but it returned False (QueueFull), so the message stays re-fetchable.
+    assert "msg_fb_qfull" not in coord._seen_message_ids
+
+
+async def test_fallback_skips_already_submitted_tracking(hass, mock_stage2_entry):
+    """Finding #5 (iter 2): a fallback tracking number already in _submitted_tracking_numbers
+    must NOT be re-enqueued/re-POSTed (mirrors the main loop's dedup guard) — it is terminal,
+    so the message is marked seen without enqueuing."""
+    from custom_components.shop2parcel.const import normalize_tracking_number
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_dupe")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>non-template body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2") as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1234",
+                },
+                custom={},
+                passes_used=1,
+                latency_ms=10.0,
+            )
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Tracking number already forwarded in a prior poll.
+        coord._submitted_tracking_numbers[normalize_tracking_number("1Z999AA10123456784")] = None
+        await coord._async_update_data()
+
+    # Already submitted: must NOT enqueue, but the message is terminal → marked seen.
+    mock_enqueue.assert_not_called()
+    assert "msg_fb_dupe" in coord._seen_message_ids
+
+
 async def test_fallback_invalid_tracking_no_enqueue_but_cached(hass, mock_stage2_entry):
     """Phase 27: Stage-1 miss + extractor returns null/invalid tracking -> no enqueue + msg cached."""
     from custom_components.shop2parcel.extractors.types import Stage2Result

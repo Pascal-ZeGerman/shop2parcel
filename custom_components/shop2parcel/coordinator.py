@@ -540,9 +540,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         re-fetchable again, otherwise the persisted seen-ID gate filters it out forever and
         the deferred shipment is silently lost. Idempotent and a no-op for jobs that carry
         no raw_msg_id (e.g. IMAP, which has no seen-ID gate).
+
+        Finding #2: the optimistic mark is persisted at poll end, so the un-mark must be
+        persisted too — otherwise a restart between the defer and the next poll's save would
+        rehydrate the stale seen-ID and filter the deferred message forever. The debounced
+        _persist_state coalesces these writes; skipped in debug mode (DBG-03: zero store
+        writes), where the seen-ID gate is bypassed anyway.
         """
-        if job.raw_msg_id is not None:
-            self._seen_message_ids.pop(job.raw_msg_id, None)
+        if job.raw_msg_id is None or job.raw_msg_id not in self._seen_message_ids:
+            return
+        del self._seen_message_ids[job.raw_msg_id]
+        debug_mode = self.config_entry is not None and self.config_entry.options.get(
+            CONF_DEBUG_MODE, False
+        )
+        if not debug_mode:
+            self._persist_state()
 
     def _maybe_reset_used_today(self) -> None:
         """Reset used_today to 0 on UTC date rollover.
