@@ -227,12 +227,6 @@ class Stage2Job:
     message_id: Gmail message ID or IMAP UID — for _emit_scan_event attribution (D-06).
     meta: Email metadata dict {'subject': str, 'from': str} — for _emit_scan_event
         attribution (D-06). Populated from _extract_email_meta / _extract_imap_email_meta.
-    raw_msg_id: Phase 27 fix — the unprefixed seen-ID cache key (Gmail message ID) for the
-        message that produced this job, or None for paths that do not participate in the
-        seen-ID gate (e.g. IMAP). When set, the worker un-marks this ID from
-        _seen_message_ids on any retry-discard exit so a deferred job is re-fetched and
-        re-enqueued next poll instead of being permanently filtered out (the message was
-        optimistically marked seen at enqueue time).
     prefetched_result: Phase 27 fix — a Stage2Result already produced by the Ollama
         fallback gatekeeper (gmail_coordinator). When set, the worker reuses it instead of
         calling the extractor a second time on the same HTML (avoids double extraction).
@@ -244,7 +238,6 @@ class Stage2Job:
     html_body: str
     message_id: str
     meta: dict
-    raw_msg_id: str | None = None
     prefetched_result: Any | None = None
 
 
@@ -529,32 +522,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._seen_message_ids[msg_id] = None
         while len(self._seen_message_ids) > SEEN_MESSAGE_IDS_MAXLEN:
             self._seen_message_ids.popitem(last=False)
-
-    def _unmark_seen_for_retry(self, job: Stage2Job) -> None:
-        """Phase 27 fix: un-mark a job's message as seen on any retry-discard exit.
-
-        Stage-2 jobs are enqueued only after the Gmail poll has optimistically marked the
-        source message seen (so the happy path never re-fetches it). When the worker defers
-        a job for retry next poll — per-poll POST cap, transient Ollama/parcelapp error,
-        QueueFull-on-re-enqueue, or an unexpected worker error — the message MUST be made
-        re-fetchable again, otherwise the persisted seen-ID gate filters it out forever and
-        the deferred shipment is silently lost. Idempotent and a no-op for jobs that carry
-        no raw_msg_id (e.g. IMAP, which has no seen-ID gate).
-
-        Finding #2: the optimistic mark is persisted at poll end, so the un-mark must be
-        persisted too — otherwise a restart between the defer and the next poll's save would
-        rehydrate the stale seen-ID and filter the deferred message forever. The debounced
-        _persist_state coalesces these writes; skipped in debug mode (DBG-03: zero store
-        writes), where the seen-ID gate is bypassed anyway.
-        """
-        if job.raw_msg_id is None or job.raw_msg_id not in self._seen_message_ids:
-            return
-        del self._seen_message_ids[job.raw_msg_id]
-        debug_mode = self.config_entry is not None and self.config_entry.options.get(
-            CONF_DEBUG_MODE, False
-        )
-        if not debug_mode:
-            self._persist_state()
 
     def _maybe_reset_used_today(self) -> None:
         """Reset used_today to 0 on UTC date rollover.
@@ -1019,7 +986,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         *,
         message_id: str,
         meta: dict,
-        raw_msg_id: str | None = None,
         prefetched_result: Any | None = None,
     ) -> bool:
         """Enqueue a Stage-2 job with in-flight dedup and drop-newest backpressure.
@@ -1034,10 +1000,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         Phase 27 fix: returns True when the message is considered handled by the queue
         (successful put OR an in-flight-skip — an existing job for the same tracking number
-        will complete it), and False only when QueueFull dropped the job. The Gmail caller
-        uses the False return to avoid marking the message seen, so a backpressure-dropped
-        message is re-fetched and re-enqueued next poll instead of being lost. raw_msg_id /
-        prefetched_result are forwarded onto the Stage2Job (see its docstring).
+        will complete it), and False only when QueueFull dropped the job. Callers use the
+        return for logging; under the convergence seen-ID model the message is NOT marked
+        seen on enqueue regardless, so a dropped/deferred job is simply re-fetched next poll.
+        prefetched_result is forwarded onto the Stage2Job (see its docstring).
         """
         if normalized_tn in self._stage2_enqueued_keys:
             return True  # silent skip — already in flight (QUE-06); the in-flight job handles it
@@ -1048,7 +1014,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             html_body=html_body,
             message_id=message_id,
             meta=meta,
-            raw_msg_id=raw_msg_id,
             prefetched_result=prefetched_result,
         )
         assert self._stage2_queue is not None
@@ -1103,13 +1068,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     await self._async_process_stage2_job(job)
                 except asyncio.CancelledError:
                     self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
-                    self._unmark_seen_for_retry(job)  # Phase 27: re-fetch on next start (not lost)
                     raise  # propagate — shuts down the worker
                 except Exception as err:  # noqa: BLE001
                     # FAIL-01/02/04: surface the failure loudly via the centralized helper (D-01..D-04).
                     self._record_stage2_failure(job, err)
                     self._stage2_enqueued_keys.discard(normalized_tn)
-                    self._unmark_seen_for_retry(job)  # Phase 27: re-fetch next poll (not lost)
                 finally:
                     self._stage2_queue.task_done()
         except asyncio.CancelledError:
@@ -1287,9 +1250,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
-            self._unmark_seen_for_retry(
-                job
-            )  # Phase 27: re-fetch next poll (cap-deferred, not lost)
             return  # no extractor, no POST, no dedup write
 
         # MRG-02: default to Stage-1 shipment; replaced by merged result after extraction.
@@ -1315,7 +1275,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # not touch control flow; existing discard+return below remain unchanged).
                 self._record_stage2_failure(job, err)
                 self._stage2_enqueued_keys.discard(normalized_tn)
-                self._unmark_seen_for_retry(job)  # Phase 27: re-fetch next poll (not lost)
                 return
 
             self._diagnostics.record_llm_call(
@@ -1460,7 +1419,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             )
             self._diagnostics.stage2_transient_error_total += 1
             self._stage2_enqueued_keys.discard(normalized_tn)
-            self._unmark_seen_for_retry(job)  # Phase 27: re-fetch next poll (transient, not lost)
             return
 
         # Success path (mirrors gmail_coordinator.py lines 513-526).

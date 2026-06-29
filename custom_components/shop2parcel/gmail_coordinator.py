@@ -388,13 +388,18 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "no_match")
 
                 # Phase 27 Plan 03: Ollama fallback gatekeeper on Stage-1 miss.
-                # Only when stage2_enabled is True and NOT in debug_mode (debug never POSTs).
-                # In debug_mode or when stage2 is disabled, fall through to the default
-                # marking below — there is no fallback to retry.
-                # Finding #5: also require a live extractor. stage2_enabled and _extractor can
-                # diverge (async_stop_stage2 nulls _extractor without clearing stage2_enabled),
-                # so guard the deref here — otherwise a stop/reload race would raise
-                # AttributeError mid-poll and drop every remaining message's state.
+                # Runs only when stage2 is enabled, NOT in debug_mode, and a live extractor
+                # exists. _extractor and stage2_enabled can diverge (async_stop_stage2 nulls
+                # _extractor without clearing stage2_enabled), so the None guard both prevents
+                # an AttributeError and routes the stop/reload-race case to the re-fetch
+                # branch below (finding #523) rather than caching the message as a reject.
+                #
+                # Seen-ID model = convergence: a fallback that ENQUEUES does NOT mark the
+                # message seen here. The message is re-fetched next poll; once the worker has
+                # POSTed the tracking number, the re-fetch hits the _submitted_tracking_numbers
+                # dedup guard and marks it seen then. Marking per-message at enqueue while work
+                # is per-shipment is what lost deferred/QueueFull jobs (findings #1/#594), so
+                # the tracking-number dedup converges the seen-ID instead of optimistic marking.
                 if (
                     self._diagnostics.stage2_enabled
                     and not debug_mode
@@ -438,6 +443,25 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                             err=fb_err,
                         )
                         continue  # do NOT cache (retry next poll)
+                    except Exception as fb_err:  # noqa: BLE001
+                        # Finding #505: an unexpected (non-Ollama) exception must NOT abort the
+                        # whole poll mid-iteration (which would skip every later message and
+                        # drop the per-poll save). Surface it like a Stage-2 failure and move
+                        # on; the message stays un-cached, so it is retried next poll.
+                        _LOGGER.error(
+                            "Gmail message %s: unexpected error during Ollama fallback "
+                            "extraction — skipping this message: %s",
+                            msg_id,
+                            fb_err,
+                            exc_info=True,
+                        )
+                        self._surface_stage2_failure(
+                            meta=email_meta,
+                            message_id=f"gmail:{msg_id}",
+                            normalized_tn="",
+                            err=fb_err,
+                        )
+                        continue  # do NOT cache (retry next poll)
 
                     # Finding #4: record the successful extraction's latency (parity with the
                     # worker) so the LLM-call / parse-success-rate diagnostics stay accurate.
@@ -449,64 +473,65 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     # Extract + validate the tracking number from the Ollama result.
                     tn = (result_fb.locked.get("tracking_number") or "").strip()
                     if tn and _SANITY_RE.match(tn):
-                        # Valid tracking found: build ShipmentData directly (Pattern 3 — do
-                        # NOT route through merge_llm_authoritative whose precondition asserts
-                        # a non-None Stage-1 tracking_number).
-                        fb_shipment = ShipmentData(
-                            tracking_number=tn,
-                            carrier_name=result_fb.locked.get("carrier_name") or "",
-                            order_name=result_fb.locked.get("order_name") or "",
-                            message_id=msg_id,
-                            email_date=email_date,
-                            custom_attributes=result_fb.custom,
-                        )
                         normalized_fb = normalize_tracking_number(tn)
                         if normalized_fb in self._submitted_tracking_numbers:
                             # Finding #5: mirror the main shipment loop's dedup guard. An
-                            # already-forwarded tracking number must not be re-enqueued/
-                            # re-POSTed — the worker only checks the in-flight set, never
-                            # _submitted_tracking_numbers, so without this a redundant POST
-                            # would burn a parcelapp quota slot. Terminal → mark seen.
+                            # already-forwarded tracking number is terminal — mark seen and do
+                            # not re-enqueue (the worker only checks the in-flight set, not
+                            # _submitted_tracking_numbers, so a re-POST would burn a quota slot).
                             self._mark_message_seen(msg_id)
                             _LOGGER.debug(
                                 "Gmail message %s: fallback tracking %s already submitted — skipping",
                                 msg_id,
                                 tn,
                             )
-                        elif self._enqueue_stage2(
-                            normalized_fb,
-                            storage_key=msg_id,
-                            shipment=fb_shipment,
-                            html_body=html,
-                            message_id=f"gmail:{msg_id}",
-                            # Finding #1: let the worker un-mark this ID if the job is later
-                            # deferred (cap / transient) so a deferred fallback shipment is
-                            # re-fetched next poll instead of lost.
-                            meta=email_meta,
-                            raw_msg_id=msg_id,
-                            # Finding #3: hand the already-extracted result to the worker so it
-                            # does NOT call Ollama a second time on the same body.
-                            prefetched_result=result_fb,
-                        ):
-                            # Finding #1: cache optimistically ONLY when the job was actually
-                            # enqueued. On QueueFull _enqueue_stage2 returns False (job
-                            # dropped, no worker run → no _unmark_seen_for_retry), so leaving
-                            # the message unmarked is what forces a re-fetch + re-enqueue.
-                            self._mark_message_seen(msg_id)
-                            _LOGGER.debug(
-                                "Gmail message %s: Ollama fallback found tracking %s — enqueued",
-                                msg_id,
-                                tn,
-                            )
                         else:
-                            _LOGGER.warning(
-                                "Gmail message %s: Stage-2 queue full — fallback tracking %s "
-                                "not enqueued; will retry next poll",
-                                msg_id,
-                                tn,
+                            # Valid, not-yet-forwarded: build ShipmentData directly (Pattern 3
+                            # — do NOT route through merge_llm_authoritative whose precondition
+                            # asserts a non-None Stage-1 tracking_number) and enqueue. Do NOT
+                            # mark seen — convergence re-fetch + dedup will mark it once POSTed.
+                            fb_shipment = ShipmentData(
+                                tracking_number=tn,
+                                carrier_name=result_fb.locked.get("carrier_name") or "",
+                                order_name=result_fb.locked.get("order_name") or "",
+                                message_id=msg_id,
+                                email_date=email_date,
+                                custom_attributes=result_fb.custom,
                             )
+                            enqueued = self._enqueue_stage2(
+                                normalized_fb,
+                                storage_key=msg_id,
+                                shipment=fb_shipment,
+                                html_body=html,
+                                message_id=f"gmail:{msg_id}",
+                                meta=email_meta,
+                                # Finding #3: hand the already-extracted result to the worker so
+                                # it does NOT call Ollama a second time on the same body.
+                                prefetched_result=result_fb,
+                            )
+                            if enqueued:
+                                _LOGGER.debug(
+                                    "Gmail message %s: Ollama fallback found tracking %s — "
+                                    "enqueued (re-fetch converges the seen-ID)",
+                                    msg_id,
+                                    tn,
+                                )
+                            else:
+                                _LOGGER.warning(
+                                    "Gmail message %s: Stage-2 queue full — fallback tracking %s "
+                                    "not enqueued; will retry next poll",
+                                    msg_id,
+                                    tn,
+                                )
                     else:
-                        # Null/invalid tracking: genuine reject — cache so we never re-judge.
+                        # Soft reject: the model returned no valid tracking number (NOT an
+                        # exception — those are handled above and retried). Cache as a terminal
+                        # decision so the gatekeeper does not re-judge the same non-shipment
+                        # mail every poll, which would burn the per-poll fallback cap on junk
+                        # and starve genuine shipments. Trade-off (finding #510): a model
+                        # false-negative on a real shipment is therefore not re-judged; the
+                        # alternative — never caching — re-runs Ollama on every no-match email
+                        # forever, which is the worse failure mode for the capped budget.
                         self._mark_message_seen(msg_id)
                         self._emit_scan_event(
                             message_id=f"gmail:{msg_id}",
@@ -519,18 +544,32 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         )
                     continue
 
-                # stage2_enabled is False or debug_mode: mark seen (no fallback to retry).
+                # stage2 enabled but the extractor is transiently unavailable (stop/reload
+                # race): the fallback could not judge this message. Do NOT mark it seen —
+                # leave it re-fetchable so the gatekeeper runs once the extractor is restored
+                # (finding #523).
+                if self._diagnostics.stage2_enabled and not debug_mode:
+                    _LOGGER.debug(
+                        "Gmail message %s: stage2 enabled but extractor unavailable — "
+                        "leaving un-cached for retry",
+                        msg_id,
+                    )
+                    continue
+
+                # stage2 disabled (or debug_mode): no fallback will ever run for this message,
+                # so a Stage-1 miss is a terminal no-match — mark seen. (Debug skips the
+                # seen-ID filter anyway, so the mark is a no-op there.)
                 self._mark_message_seen(msg_id)
                 continue
-            # Phase 27 fix (findings #1/#6): per-message seen-marking bookkeeping.
-            # msg_pending_retry: a shipment is awaiting retry (Stage-2 queue full now,
-            #   quota-blocked, or transient POST error) → do NOT mark the message seen.
-            # msg_enqueued: at least one Stage-2 job was queued for this message. Such
-            #   messages are marked seen SYNCHRONOUSLY at enqueue (below), not at end-of-loop,
-            #   because the background worker's _unmark_seen_for_retry can run during a later
-            #   await in this same poll; a later end-of-loop mark would clobber that un-mark
-            #   and silently lose a deferred shipment. The end-of-loop mark therefore covers
-            #   only non-enqueued terminal messages (all dedup-skipped, or inline-forwarded).
+            # Phase 27 fix (findings #1/#6/#594): per-message seen-marking bookkeeping for the
+            # convergence model. The message is marked seen at end-of-loop ONLY when it is
+            # fully terminal *inline* this poll — i.e. every shipment was dedup-skipped or
+            # inline-forwarded, with nothing enqueued and nothing pending retry.
+            # msg_pending_retry: a shipment is awaiting retry (quota-blocked or transient POST
+            #   error) → leave the message re-fetchable.
+            # msg_enqueued: at least one Stage-2 job was queued (or QueueFull-dropped) for this
+            #   message → do NOT mark seen; the message is re-fetched next poll and converges to
+            #   seen via the tracking-number dedup-skip branch once the worker has POSTed.
             msg_pending_retry = False
             msg_enqueued = False
             # Iterate all shipments from this email. Single-shipment emails have
@@ -576,24 +615,22 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # Phase 18 D-03: route Stage-2-enabled entries to the queue; the entire inline
                 # POST section (debug_mode, quota_blocked, parcel POST) is bypassed.
                 if self._diagnostics.stage2_enabled:
-                    # Phase 27 fix (finding #1): pass raw_msg_id so the worker can un-mark the
-                    # seen-ID if it later defers this job (cap / transient). Mark seen
-                    # SYNCHRONOUSLY on a successful enqueue (not at end-of-loop) so the
-                    # worker's later un-mark is never clobbered. On QueueFull the job was
-                    # dropped (no worker run → no un-mark), so leave it pending for re-fetch.
-                    if self._enqueue_stage2(
+                    # Convergence seen-ID model (findings #1/#594): enqueue the job but do NOT
+                    # mark the message seen here. Marking per-message at enqueue while work is
+                    # per-shipment loses deferred / QueueFull siblings of a multi-shipment
+                    # email. Instead, set msg_enqueued so the end-of-loop mark is skipped; the
+                    # message is re-fetched next poll and converges to seen via the
+                    # _submitted_tracking_numbers dedup-skip branch once the worker has POSTed.
+                    # (QueueFull / in-flight-skip are handled identically — re-fetch retries.)
+                    self._enqueue_stage2(
                         normalized,
                         storage_key,
                         shipment,
                         html,
                         message_id=f"gmail:{msg_id}",
                         meta=email_meta,
-                        raw_msg_id=msg_id,
-                    ):
-                        msg_enqueued = True
-                        self._mark_message_seen(msg_id)
-                    else:
-                        msg_pending_retry = True
+                    )
+                    msg_enqueued = True
                     continue
 
                 # DBG-04: in debug mode, suppress POST and record dry_run_suppressed event.
@@ -757,13 +794,13 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "posted")
 
-            # Phase 27 fix (findings #1/#6): all shipments of this message have now been
-            # processed. Mark the message seen so future polls skip the Gmail fetch — but
-            # ONLY for non-enqueued terminal messages (all dedup-skipped, or inline-forwarded)
-            # with nothing pending retry. Enqueued messages were already marked synchronously
-            # at enqueue (and the worker owns reverting that via _unmark_seen_for_retry), so
-            # re-marking them here would race the worker and lose deferred shipments. Skipped
-            # in debug mode, which re-scans every message each poll.
+            # Phase 27 fix (findings #1/#6/#594): all shipments of this message have now been
+            # processed. Mark the message seen so future polls skip the Gmail fetch — but ONLY
+            # for fully-terminal-inline messages (all dedup-skipped or inline-forwarded) with
+            # nothing enqueued and nothing pending retry. Enqueued messages are deliberately
+            # left unmarked here and converge to seen on a later poll via the dedup-skip branch
+            # once the worker has POSTed their tracking numbers. Skipped in debug mode, which
+            # re-scans every message each poll.
             if not debug_mode and not msg_enqueued and not msg_pending_retry:
                 self._mark_message_seen(msg_id)
 
