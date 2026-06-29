@@ -5341,6 +5341,56 @@ async def test_fallback_transient_error_not_cached(hass, mock_stage2_entry):
     assert "msg_fb_transient" not in coord._seen_message_ids
 
 
+async def test_fallback_failure_escalates_consecutive_streak(hass, mock_stage2_entry):
+    """Finding #2: a fallback Ollama failure must increment the consecutive-failure streak
+    and emit a stage2_failed event — the same loud-surface path the worker uses — instead
+    of being swallowed at DEBUG. With the subject-only query routing most extraction through
+    the fallback, a swallowed failure would mean a silent Ollama outage with no alert."""
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_escalate")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(side_effect=OllamaTransientError("timeout"))
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    # Failure surfaced: streak incremented, lifetime counter bumped, and an event emitted.
+    assert coord._stage2_consecutive_failures == 1
+    assert coord._diagnostics.stage2_failed_total == 1
+    assert any(e["outcome"] == "stage2_failed" for e in coord._diagnostics.scan_events)
+    # Still not cached — retried next poll.
+    assert "msg_fb_escalate" not in coord._seen_message_ids
+
+
 async def test_fallback_schema_error_not_cached(hass, mock_stage2_entry):
     """Phase 27: Stage-1 miss + OllamaSchemaError -> msg_id NOT cached (same as transient)."""
     from custom_components.shop2parcel.api.exceptions import OllamaSchemaError

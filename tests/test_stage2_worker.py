@@ -3393,3 +3393,219 @@ async def test_non_none_tracking_number_still_posts(hass, mock_stage2_config_ent
 
     # Valid tracking number must reach the POST
     mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase 27 review fixes: seen-ID un-mark on retry (finding #1) + prefetch reuse
+# (finding #3). These drive the worker's _async_process_stage2_job directly.
+# ---------------------------------------------------------------------------
+
+
+async def test_cap_skip_unmarks_seen_for_retry(hass, mock_stage2_config_entry):
+    """Finding #1: a cap-deferred job un-marks its source message so it is re-fetched.
+
+    The Gmail poll marks the message seen optimistically at enqueue. When the worker
+    defers the job because the per-poll POST cap is hit, the persisted seen-ID gate would
+    otherwise filter the message out forever — losing the shipment. The worker must remove
+    the raw_msg_id from _seen_message_ids on the cap-skip path.
+    """
+    from custom_components.shop2parcel.const import MAX_STAGE2_POSTS_PER_POLL
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        # Simulate the cap already being reached this poll.
+        coord._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
+        # Message was optimistically marked seen by the poll loop at enqueue time.
+        coord._mark_message_seen("msg_cap")
+        coord._stage2_enqueued_keys = {"1Z999AA10123456784"}
+
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="gmail:msg_cap",
+            meta={"subject": "test", "from": "test@example.com"},
+            raw_msg_id="msg_cap",
+        )
+        await coord._async_process_stage2_job(job)
+
+        # Cap-deferred: no POST, key discarded, and crucially the seen-ID is reverted so
+        # the message is re-fetched and re-enqueued next poll (not silently lost).
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+        assert "1Z999AA10123456784" not in coord._stage2_enqueued_keys
+        assert "msg_cap" not in coord._seen_message_ids
+
+        await coord.async_stop_stage2()
+
+
+async def test_transient_post_unmarks_seen_for_retry(hass, mock_stage2_config_entry):
+    """Finding #1: a transient parcelapp POST error un-marks the source message for retry."""
+    from custom_components.shop2parcel.api.exceptions import ParcelAppTransientError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppTransientError("503")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        coord._mark_message_seen("msg_transient")
+        coord._stage2_enqueued_keys = {"1Z999AA10123456784"}
+
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="gmail:msg_transient",
+            meta={"subject": "test", "from": "test@example.com"},
+            raw_msg_id="msg_transient",
+        )
+        await coord._async_process_stage2_job(job)
+
+        # Transient POST failure: not deduped, and the seen-ID reverted for next-poll retry.
+        assert "1Z999AA10123456784" not in coord._submitted_tracking_numbers
+        assert "msg_transient" not in coord._seen_message_ids
+
+        await coord.async_stop_stage2()
+
+
+async def test_successful_post_keeps_message_seen(hass, mock_stage2_config_entry):
+    """Finding #1 (negative): a terminal success must NOT un-mark the message.
+
+    The happy path relies on the optimistic enqueue-time mark surviving so the message is
+    never re-fetched after it is durably forwarded.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        coord._mark_message_seen("msg_ok")
+
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="gmail:msg_ok",
+            meta={"subject": "test", "from": "test@example.com"},
+            raw_msg_id="msg_ok",
+        )
+        await coord._async_process_stage2_job(job)
+
+        mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+        assert "msg_ok" in coord._seen_message_ids  # stays seen — no needless re-fetch
+
+        await coord.async_stop_stage2()
+
+
+async def test_prefetched_result_skips_reextraction(hass, mock_stage2_config_entry):
+    """Finding #3: a job carrying a prefetched result must NOT re-run the extractor.
+
+    The Gmail Ollama fallback gatekeeper already extracted from this HTML; re-extracting in
+    the worker would double Ollama load and defeat the per-poll fallback cap.
+    """
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        prefetched = Stage2Result(
+            locked={
+                "tracking_number": "1Z999AA10123456784",
+                "carrier_name": "UPS",
+                "order_name": "#1234",
+            },
+            custom={},
+            passes_used=1,
+            latency_ms=12.0,
+        )
+        job = Stage2Job(
+            storage_key="msg_pf",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="gmail:msg_pf",
+            meta={"subject": "test", "from": "test@example.com"},
+            raw_msg_id="msg_pf",
+            prefetched_result=prefetched,
+        )
+        await coord._async_process_stage2_job(job)
+
+        # The worker must reuse the prefetched result — no second extractor call.
+        mock_extractor_cls.return_value.async_extract.assert_not_called()
+        # And the shipment is still POSTed.
+        mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+
+        await coord.async_stop_stage2()

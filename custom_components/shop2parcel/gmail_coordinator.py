@@ -391,7 +391,15 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # Only when stage2_enabled is True and NOT in debug_mode (debug never POSTs).
                 # In debug_mode or when stage2 is disabled, fall through to the default
                 # marking below — there is no fallback to retry.
-                if self._diagnostics.stage2_enabled and not debug_mode:
+                # Finding #5: also require a live extractor. stage2_enabled and _extractor can
+                # diverge (async_stop_stage2 nulls _extractor without clearing stage2_enabled),
+                # so guard the deref here — otherwise a stop/reload race would raise
+                # AttributeError mid-poll and drop every remaining message's state.
+                if (
+                    self._diagnostics.stage2_enabled
+                    and not debug_mode
+                    and self._extractor is not None
+                ):
                     # Per-poll cap check (Design §4 / T-27-03-03 DoS guard): if we have
                     # already run MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions this
                     # poll, skip WITHOUT caching the ID so it is retried next poll (Pitfall 6).
@@ -411,18 +419,32 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     # Count the attempt regardless of outcome (increment before try so cap
                     # applies even if the extractor raises).
                     self._stage2_fallback_extractions_this_poll += 1
+                    # Finding #4: count the LLM attempt before the call (parity with the
+                    # worker) so the emails_sent_to_llm diagnostic includes fallback runs.
+                    self._diagnostics.stage2_llm_attempts_total += 1
                     try:
                         result_fb = await self._extractor.async_extract(html, None)
                     except (OllamaTransientError, OllamaSchemaError) as fb_err:
-                        # T-27-03-04 / Pitfall 5: transient failure → do NOT cache the ID
-                        # so it is retried next poll; no enqueue, no POST.
-                        _LOGGER.debug(
-                            "Gmail message %s: Ollama fallback %s — will retry next poll: %s",
-                            msg_id,
-                            type(fb_err).__name__,
-                            str(fb_err)[:100],
+                        # Finding #2: route fallback failures through the shared failure
+                        # surface (the worker path's _record_stage2_failure equivalent) so a
+                        # sustained Ollama outage increments the consecutive-failure streak
+                        # and raises the persistent notification — instead of being swallowed
+                        # at DEBUG. Still do NOT cache the ID: it is retried next poll
+                        # (T-27-03-04 / Pitfall 5).
+                        self._surface_stage2_failure(
+                            meta=email_meta,
+                            message_id=f"gmail:{msg_id}",
+                            normalized_tn="",
+                            err=fb_err,
                         )
                         continue  # do NOT cache (retry next poll)
+
+                    # Finding #4: record the successful extraction's latency (parity with the
+                    # worker) so the LLM-call / parse-success-rate diagnostics stay accurate.
+                    self._diagnostics.record_llm_call(
+                        result_fb.latency_ms,
+                        fence_retry=result_fb.passes_used == 2,
+                    )
 
                     # Extract + validate the tracking number from the Ollama result.
                     tn = (result_fb.locked.get("tracking_number") or "").strip()
@@ -446,8 +468,17 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                             html_body=html,
                             message_id=f"gmail:{msg_id}",
                             meta=email_meta,
+                            # Finding #1: let the worker un-mark this ID if the job is later
+                            # deferred (cap / transient / queue full) so a deferred fallback
+                            # shipment is re-fetched next poll instead of lost.
+                            raw_msg_id=msg_id,
+                            # Finding #3: hand the already-extracted result to the worker so it
+                            # does NOT call Ollama a second time on the same body.
+                            prefetched_result=result_fb,
                         )
-                        # Cache on genuine decision (enqueue) — T-27-03-04 positive arm.
+                        # Cache optimistically on genuine decision (enqueue) — T-27-03-04
+                        # positive arm. The worker reverts this via _unmark_seen_for_retry
+                        # if it cannot complete the job this poll (finding #1).
                         self._mark_message_seen(msg_id)
                         _LOGGER.debug(
                             "Gmail message %s: Ollama fallback found tracking %s — enqueued",
@@ -471,6 +502,11 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # stage2_enabled is False or debug_mode: mark seen (no fallback to retry).
                 self._mark_message_seen(msg_id)
                 continue
+            # Phase 27 fix (findings #1/#6): track whether any shipment of this message is
+            # pending a retry (Stage-2 queue full now, quota-blocked, or transient POST
+            # error). The message is marked seen at the end of the loop ONLY when nothing is
+            # pending — otherwise it must be re-fetched and retried next poll.
+            msg_pending_retry = False
             # Iterate all shipments from this email. Single-shipment emails have
             # extra_shipments=[] so this loop runs once. Multi-package digests
             # (e.g. USPS Informed Delivery) may have 2+ shipments; each gets its
@@ -514,17 +550,21 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # Phase 18 D-03: route Stage-2-enabled entries to the queue; the entire inline
                 # POST section (debug_mode, quota_blocked, parcel POST) is bypassed.
                 if self._diagnostics.stage2_enabled:
-                    self._enqueue_stage2(
+                    # Phase 27 fix (finding #1): pass raw_msg_id so the worker can un-mark the
+                    # seen-ID if it later defers this job (cap / transient / queue full). The
+                    # message itself is marked seen at the end of the per-message loop, not
+                    # here — and only when nothing is pending retry. If the queue is full right
+                    # now the job was dropped, so flag pending-retry to force a re-fetch.
+                    if not self._enqueue_stage2(
                         normalized,
                         storage_key,
                         shipment,
                         html,
                         message_id=f"gmail:{msg_id}",
                         meta=email_meta,
-                    )
-                    # Phase 27 Plan 02: Stage-1-HIT — mark msg_id seen (idempotent for
-                    # multi-shipment emails).  Plan 03 will add the fallback-branch marking.
-                    self._mark_message_seen(msg_id)
+                        raw_msg_id=msg_id,
+                    ):
+                        msg_pending_retry = True
                     continue
 
                 # DBG-04: in debug mode, suppress POST and record dry_run_suppressed event.
@@ -564,6 +604,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         )
                     else:
                         _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "skipped_quota")
+                    # Finding #1/#6: quota-blocked POST is deferred — keep the message
+                    # re-fetchable so it forwards once the quota window resets.
+                    msg_pending_retry = True
                     continue
 
                 carrier_code = normalize_carrier(shipment.carrier_name)
@@ -596,6 +639,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         tracking_number=shipment.tracking_number,
                     )
                     quota_blocked = True
+                    # Finding #1/#6: this shipment was not POSTed — keep the message
+                    # re-fetchable so it forwards once the quota window resets.
+                    msg_pending_retry = True
                     continue
                 except ParcelAppAlreadyAddedError:
                     self._submitted_tracking_numbers[normalized] = None
@@ -651,6 +697,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                             "error_msg": str(err)[:100],
                         },
                     )
+                    # Finding #1/#6: transient POST failure — keep the message re-fetchable
+                    # so it is retried next poll instead of being filtered out permanently.
+                    msg_pending_retry = True
                     continue
 
                 # 6. Success — record tracking number dedup, save immediately (D-10/D-03).
@@ -678,6 +727,15 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("Gmail message %s outcome: %s", msg_id, "posted")
+
+            # Phase 27 fix (findings #1/#6): all shipments of this message have now been
+            # processed. Mark the message seen so future polls skip the Gmail fetch — but
+            # ONLY when nothing is pending retry. Stage-2 jobs are marked optimistically here;
+            # the worker reverts via _unmark_seen_for_retry if it later defers a job. Inline
+            # quota / transient deferrals set msg_pending_retry above so the message stays
+            # re-fetchable. Skipped in debug mode, which re-scans every message each poll.
+            if not debug_mode and not msg_pending_retry:
+                self._mark_message_seen(msg_id)
 
         # Phase 7: capture per-poll timing (D-04, Specifics).
         d.last_poll_time = poll_start
