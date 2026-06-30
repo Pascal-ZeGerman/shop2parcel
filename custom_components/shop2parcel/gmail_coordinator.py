@@ -55,7 +55,7 @@ from .coordinator import (
     _next_midnight_utc,
     _sanitise_parser_error,
 )
-from .merge import _SANITY_RE
+from .api.email_parser import validate_carrier_format
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -502,83 +502,92 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
 
                     # Extract + validate the tracking number from the Ollama result.
+                    # Phase 28 Plan 04 (R1/R2/R3): strict carrier-format gate replaces
+                    # the loose _SANITY_RE check. validate_carrier_format strips internal
+                    # separators ([ -]) and uppercases before pattern-matching, then returns
+                    # the canonical clean form used for dedup + enqueue + ShipmentData (D-03).
                     tn = (result_fb.locked.get("tracking_number") or "").strip()
-                    if tn and _SANITY_RE.match(tn):
-                        normalized_fb = normalize_tracking_number(tn)
-                        if normalized_fb in self._submitted_tracking_numbers:
-                            # Finding #5: mirror the main shipment loop's dedup guard. An
-                            # already-forwarded tracking number is terminal — mark seen and do
-                            # not re-enqueue (the worker only checks the in-flight set, not
-                            # _submitted_tracking_numbers, so a re-POST would burn a quota slot).
-                            self._mark_message_seen(msg_id)
-                            _LOGGER.debug(
-                                "Gmail message %s: fallback tracking %s already submitted — skipping",
-                                msg_id,
-                                tn,
-                            )
-                        else:
-                            # Valid, not-yet-forwarded: build ShipmentData directly (Pattern 3
-                            # — do NOT route through merge_llm_authoritative whose precondition
-                            # asserts a non-None Stage-1 tracking_number) and enqueue. Do NOT
-                            # mark seen — convergence re-fetch + dedup will mark it once POSTed.
-                            fb_shipment = ShipmentData(
-                                tracking_number=tn,
-                                carrier_name=result_fb.locked.get("carrier_name") or "",
-                                order_name=result_fb.locked.get("order_name") or "",
-                                message_id=msg_id,
-                                email_date=email_date,
-                                custom_attributes=result_fb.custom,
-                            )
-                            enqueued = self._enqueue_stage2(
-                                normalized_fb,
-                                storage_key=msg_id,
-                                shipment=fb_shipment,
-                                html_body=html,
-                                message_id=f"gmail:{msg_id}",
-                                meta=email_meta,
-                                # Finding #3: hand the already-extracted result to the worker so
-                                # it does NOT call Ollama a second time on the same body.
-                                prefetched_result=result_fb,
-                                raw_msg_id=msg_id,
-                            )
-                            if enqueued:
-                                # Round-4 fix #512: add to the in-memory in-flight gate so the
-                                # gatekeeper does NOT re-run Ollama on this message every poll
-                                # until the worker POSTs. The worker releases it on a defer; it
-                                # converges to a persisted seen ID via dedup once POSTed.
-                                self._mark_inflight(msg_id)
-                                _LOGGER.debug(
-                                    "Gmail message %s: Ollama fallback found tracking %s — "
-                                    "enqueued (re-fetch converges the seen-ID)",
-                                    msg_id,
-                                    tn,
-                                )
-                            else:
-                                _LOGGER.warning(
-                                    "Gmail message %s: Stage-2 queue full — fallback tracking %s "
-                                    "not enqueued; will retry next poll",
-                                    msg_id,
-                                    tn,
-                                )
-                    else:
-                        # Soft reject: the model returned no valid tracking number (NOT an
-                        # exception — those are handled above and retried). Cache as a terminal
-                        # decision so the gatekeeper does not re-judge the same non-shipment
-                        # mail every poll, which would burn the per-poll fallback cap on junk
-                        # and starve genuine shipments. Trade-off (finding #510): a model
-                        # false-negative on a real shipment is therefore not re-judged; the
-                        # alternative — never caching — re-runs Ollama on every no-match email
-                        # forever, which is the worse failure mode for the capped budget.
+                    fb_clean, fb_ok, fb_reason = validate_carrier_format(tn)
+                    if not fb_ok:
+                        # Hard reject: the fallback model returned a hallucinated or
+                        # non-carrier string. Record the rejection (R3/D-06) and log at
+                        # DEBUG only (D-07/T-28-09 — no INFO/WARNING leakage of TN values).
+                        # This is a terminal decision (mirror the no-match branch below):
+                        # mark seen so the gatekeeper does not re-run Ollama on this
+                        # non-shipment email every poll.
+                        self._diagnostics.record_carrier_format_rejection(fb_clean, fb_reason)
+                        _LOGGER.debug(
+                            "Gmail message %s: fallback carrier-format gate rejected '%s' "
+                            "(reason=%s) — cached as rejected",
+                            msg_id,
+                            fb_clean,
+                            fb_reason,
+                        )
                         self._mark_message_seen(msg_id)
                         self._emit_scan_event(
                             message_id=f"gmail:{msg_id}",
                             meta=email_meta,
                             outcome="stage2_no_data",
                         )
+                    elif fb_clean in self._submitted_tracking_numbers:
+                        # Finding #5: mirror the main shipment loop's dedup guard. An
+                        # already-forwarded tracking number is terminal — mark seen and do
+                        # not re-enqueue (the worker only checks the in-flight set, not
+                        # _submitted_tracking_numbers, so a re-POST would burn a quota slot).
+                        self._mark_message_seen(msg_id)
                         _LOGGER.debug(
-                            "Gmail message %s: Ollama fallback returned no valid tracking — cached as rejected",
+                            "Gmail message %s: fallback tracking %s already submitted — skipping",
                             msg_id,
+                            fb_clean,
                         )
+                    else:
+                        # Gate pass, not-yet-forwarded: build ShipmentData using the gate
+                        # clean canonical form (D-03 — separator-free, uppercased). Do NOT
+                        # route through merge_llm_authoritative (Stage-1 is None here; Pattern 3).
+                        # Do NOT mark seen — convergence re-fetch + dedup marks it once POSTed.
+                        fb_shipment = ShipmentData(
+                            tracking_number=fb_clean,
+                            carrier_name=result_fb.locked.get("carrier_name") or "",
+                            order_name=result_fb.locked.get("order_name") or "",
+                            message_id=msg_id,
+                            email_date=email_date,
+                            custom_attributes=result_fb.custom,
+                        )
+                        enqueued = self._enqueue_stage2(
+                            fb_clean,
+                            storage_key=msg_id,
+                            shipment=fb_shipment,
+                            html_body=html,
+                            message_id=f"gmail:{msg_id}",
+                            meta=email_meta,
+                            # Finding #3: hand the already-extracted result to the worker so
+                            # it does NOT call Ollama a second time on the same body.
+                            prefetched_result=result_fb,
+                            raw_msg_id=msg_id,
+                        )
+                        if enqueued:
+                            # Round-4 fix #512: add to the in-memory in-flight gate so the
+                            # gatekeeper does NOT re-run Ollama on this message every poll
+                            # until the worker POSTs. The worker releases it on a defer; it
+                            # converges to a persisted seen ID via dedup once POSTed.
+                            self._mark_inflight(msg_id)
+                            _LOGGER.debug(
+                                "Gmail message %s: Ollama fallback found tracking %s — "
+                                "enqueued (re-fetch converges the seen-ID)",
+                                msg_id,
+                                fb_clean,
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Gmail message %s: Stage-2 queue full — fallback tracking %s "
+                                "not enqueued; will retry next poll",
+                                msg_id,
+                                fb_clean,
+                            )
+                    # Note: the old `else` branch for `_SANITY_RE` non-match (soft reject /
+                    # no valid tracking) is now subsumed by `if not fb_ok:` above.
+                    # validate_carrier_format("") and validate_carrier_format(None) both
+                    # return ok=False (reason="empty") so the hard-reject path covers all cases.
                     continue
 
                 # stage2 enabled but the extractor is transiently unavailable (stop/reload
