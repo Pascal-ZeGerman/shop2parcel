@@ -634,3 +634,110 @@ async def test_pending_posts_sensor_unique_id_and_category(hass, mock_config_ent
     )
     assert sensor.entity_category == EntityCategory.DIAGNOSTIC
     assert sensor.state_class == SensorStateClass.MEASUREMENT
+
+
+# ---------------------------------------------------------------------------
+# Phase 28 Plan 05 — R4: CarrierFormatRejectionsSensor tests
+# ---------------------------------------------------------------------------
+
+
+async def test_carrier_format_rejections_sensor_registered(hass, mock_config_entry):
+    """R4: CarrierFormatRejectionsSensor registered at setup under the expected unique_id."""
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    uid = f"{DOMAIN}_{mock_config_entry.entry_id}_carrier_format_rejections"
+    entry = next((e for e in entries if e.unique_id == uid), None)
+    assert entry is not None, (
+        f"carrier_format_rejections diagnostic sensor not registered. "
+        f"Found suffixes: {[e.unique_id for e in entries]}"
+    )
+
+
+async def test_carrier_format_rejections_included_in_all_sensors_registered(
+    hass, mock_config_entry
+):
+    """R4/D-09: 'carrier_format_rejections' suffix present in all registered diagnostic sensors."""
+    await _setup_integration(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    entries = registry.entities.get_entries_for_config_entry_id(mock_config_entry.entry_id)
+    prefix = f"{DOMAIN}_{mock_config_entry.entry_id}_"
+    expected_suffixes = {
+        "emails_scanned",
+        "new_emails_inspected",
+        "emails_matched",
+        "tracking_numbers_found",
+        "keyword_hits",
+        "activity_log",
+        "stage2_queue",
+        "carrier_format_rejections",
+    }
+    found = {e.unique_id.removeprefix(prefix) for e in entries if e.unique_id.startswith(prefix)}
+    missing = expected_suffixes - found
+    assert not missing, f"missing diagnostic sensors: {missing}"
+
+
+async def test_carrier_format_rejections_sensor_state_after_n_rejections(hass, mock_config_entry):
+    """R4 acceptance: state == N after N record_carrier_format_rejection() calls.
+
+    Call record_carrier_format_rejection() twice, then assert:
+    - sensor state == 2
+    - last_rejected_value attribute == the rejected (cleaned) value
+    - last_rejected_reason attribute == the rejection reason
+    """
+    from custom_components.shop2parcel.diagnostic_sensor import CarrierFormatRejectionsSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+
+    # Simulate 2 gate rejections using the PollStats method (mirrors drain/merge paths)
+    coordinator._diagnostics.record_carrier_format_rejection("ORDER12345", "no_carrier_match")
+    coordinator._diagnostics.record_carrier_format_rejection("ORDER12345", "no_carrier_match")
+
+    sensor = CarrierFormatRejectionsSensor(coordinator, mock_config_entry)
+
+    # State: native_value == rejection count
+    assert sensor.native_value == 2, (
+        f"expected native_value=2 after 2 rejections, got {sensor.native_value}"
+    )
+
+    # Attributes: last rejected value and reason
+    attrs = sensor.extra_state_attributes
+    assert attrs["last_rejected_value"] == "ORDER12345", (
+        f"expected last_rejected_value='ORDER12345', got {attrs.get('last_rejected_value')}"
+    )
+    assert attrs["last_rejected_reason"] == "no_carrier_match", (
+        f"expected last_rejected_reason='no_carrier_match', got {attrs.get('last_rejected_reason')}"
+    )
+    assert "description" in attrs, "expected 'description' key in extra_state_attributes"
+
+
+async def test_carrier_format_rejections_sensor_unique_id_and_category(hass, mock_config_entry):
+    """R4: CarrierFormatRejectionsSensor unique_id suffix, DIAGNOSTIC category, MEASUREMENT class."""
+    from homeassistant.components.sensor import SensorStateClass
+    from homeassistant.helpers.entity import EntityCategory
+
+    from custom_components.shop2parcel.diagnostic_sensor import CarrierFormatRejectionsSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = CarrierFormatRejectionsSensor(coordinator, mock_config_entry)
+
+    assert sensor._attr_unique_id == (
+        f"{DOMAIN}_{mock_config_entry.entry_id}_carrier_format_rejections"
+    )
+    assert sensor.entity_category == EntityCategory.DIAGNOSTIC
+    assert sensor.state_class == SensorStateClass.MEASUREMENT
+
+
+async def test_carrier_format_rejections_sensor_initial_state_zero(hass, mock_config_entry):
+    """R4: CarrierFormatRejectionsSensor state == 0 before any rejections."""
+    from custom_components.shop2parcel.diagnostic_sensor import CarrierFormatRejectionsSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = CarrierFormatRejectionsSensor(coordinator, mock_config_entry)
+
+    assert sensor.native_value == 0, (
+        f"expected native_value=0 before any rejections, got {sensor.native_value}"
+    )
+    attrs = sensor.extra_state_attributes
+    assert attrs["last_rejected_value"] is None
+    assert attrs["last_rejected_reason"] is None
