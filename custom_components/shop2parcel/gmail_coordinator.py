@@ -593,10 +593,13 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
                     continue
 
-                # stage2 disabled (or debug_mode): no fallback will ever run for this message,
-                # so a Stage-1 miss is a terminal no-match — mark seen. (Debug skips the
-                # seen-ID filter anyway, so the mark is a no-op there.)
-                self._mark_message_seen(msg_id)
+                # stage2 disabled: no fallback will ever run for this message, so a Stage-1
+                # miss is a terminal no-match — mark seen. Finding #749: do NOT mark in
+                # debug_mode — that writes the PERSISTED seen cache during a dry-run, so an
+                # email scanned in debug (possibly a real shipment the regex missed) would be
+                # filtered out once debug is disabled, before the fallback could judge it.
+                if not debug_mode:
+                    self._mark_message_seen(msg_id)
                 continue
             # Phase 27 fix (findings #1/#6/#594): per-message seen-marking bookkeeping for the
             # convergence model. The message is marked seen at end-of-loop ONLY when it is
@@ -652,26 +655,24 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # Phase 18 D-03: route Stage-2-enabled entries to the queue; the entire inline
                 # POST section (debug_mode, quota_blocked, parcel POST) is bypassed.
                 if self._diagnostics.stage2_enabled:
-                    # Convergence seen-ID model (findings #1/#594): do NOT mark the message
-                    # *seen* (persisted) at enqueue — per-message marking while work is
-                    # per-shipment loses deferred / QueueFull siblings. Instead add it to the
-                    # in-memory in-flight gate so it is not re-fetched / re-parsed every poll
-                    # while the job drains (round-4 fix #252); the worker releases it on any
-                    # defer so a deferred sibling is re-fetched, and it converges to a persisted
-                    # seen ID via the dedup-skip branch once the worker has POSTed. raw_msg_id
-                    # gives the worker the in-flight key. (QueueFull → not added to in-flight
-                    # below, so it is re-fetched and re-enqueued next poll.)
-                    enqueued = self._enqueue_stage2(
+                    # Stage-1 uses PURE CONVERGENCE — NOT the in-flight gate (finding #1516).
+                    # A Stage-1 email can yield multiple shipments (extra_shipments), so pinning
+                    # the whole message in-flight when one sibling enqueues would permanently
+                    # filter a QueueFull-dropped sibling once the first sibling's job succeeds
+                    # (the worker can't release the message until ALL siblings are done). Stage-1
+                    # re-fetch is cheap (Gmail fetch + regex parse, no Ollama), so we simply do
+                    # not mark the message seen here: it is re-fetched next poll, already-POSTed
+                    # siblings hit the dedup-skip branch, not-yet-done siblings re-enqueue, and
+                    # the message converges to a persisted seen ID once all dedup-skip. No
+                    # raw_msg_id (Stage-1 jobs do not participate in the in-flight gate).
+                    self._enqueue_stage2(
                         normalized,
                         storage_key,
                         shipment,
                         html,
                         message_id=f"gmail:{msg_id}",
                         meta=email_meta,
-                        raw_msg_id=msg_id,
                     )
-                    if enqueued:
-                        self._mark_inflight(msg_id)
                     msg_enqueued = True
                     continue
 

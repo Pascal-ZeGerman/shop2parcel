@@ -3579,3 +3579,56 @@ async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stag
         assert "1Z999AA10123456784" not in coord._stage2_enqueued_keys
 
         await coord.async_stop_stage2()
+
+
+async def test_enqueue_returns_false_on_inflight_skip(hass, mock_stage2_config_entry):
+    """Finding #674: _enqueue_stage2 must return False when the tracking number is already
+    in flight (no new job created by this call), so the fallback caller does not pin its
+    message in-flight under a job it does not own. A genuinely new tracking number returns
+    True."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        # Fresh tracking number → a new job is created → True.
+        assert (
+            coord._enqueue_stage2(
+                "1Z111",
+                "1Z111",
+                _make_shipment(),
+                "<html/>",
+                message_id="gmail:m1",
+                meta={"subject": "s", "from": "f"},
+                raw_msg_id="m1",
+            )
+            is True
+        )
+        # Same tracking number already in flight → in-flight skip → False (no new job).
+        assert (
+            coord._enqueue_stage2(
+                "1Z111",
+                "1Z111",
+                _make_shipment(),
+                "<html/>",
+                message_id="gmail:m2",
+                meta={"subject": "s", "from": "f"},
+                raw_msg_id="m2",
+            )
+            is False
+        )
+
+        await coord.async_stop_stage2()

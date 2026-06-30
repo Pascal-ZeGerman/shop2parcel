@@ -1059,15 +1059,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         The add to _stage2_enqueued_keys happens ONLY after successful put_nowait
         (Anti-Patterns §3) — if put_nowait raises QueueFull, the key is NOT added.
 
-        Phase 27 fix: returns True when the message is considered handled by the queue
-        (successful put OR an in-flight-skip — an existing job for the same tracking number
-        will complete it), and False only when QueueFull dropped the job. Callers use the
-        return for logging; under the convergence seen-ID model the message is NOT marked
-        seen on enqueue regardless, so a dropped/deferred job is simply re-fetched next poll.
-        prefetched_result is forwarded onto the Stage2Job (see its docstring).
+        Phase 27 fix: returns True ONLY when THIS call created a new Stage-2 job for this
+        tracking number (a successful put_nowait). Returns False for both QueueFull (job
+        dropped) AND the in-flight-skip case (the tracking number is already queued — possibly
+        from a DIFFERENT message). The fallback caller uses the True return to decide whether
+        to mark its message in-flight: it must only do so when it actually owns a job, so a
+        defer's _release_inflight (keyed by that job's raw_msg_id) frees the right message
+        (finding #674). A False return leaves the message un-pinned, so it converges via the
+        tracking-number dedup-skip / re-fetch instead. prefetched_result and raw_msg_id are
+        forwarded onto the Stage2Job (see its docstring).
         """
         if normalized_tn in self._stage2_enqueued_keys:
-            return True  # silent skip — already in flight (QUE-06); the in-flight job handles it
+            # In-flight skip (QUE-06): a job for this tracking number already exists (this or
+            # another message). Return False — THIS call did not create a job, so the caller
+            # must not pin its message in-flight under a job it does not own (finding #674).
+            return False
         job = Stage2Job(
             storage_key=storage_key,
             normalized_tn=normalized_tn,

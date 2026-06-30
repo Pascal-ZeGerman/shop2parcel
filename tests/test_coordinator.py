@@ -5468,9 +5468,10 @@ async def test_fallback_unexpected_exception_does_not_abort_poll(hass, mock_stag
 
 
 async def test_stage2_hit_not_marked_seen_until_converged(hass, mock_stage2_entry):
-    """Convergence (findings #1/#594): a Stage-1-HIT stage2-enabled message is enqueued but
-    NOT marked seen in the same poll — it converges to seen on a later poll via the
-    tracking-number dedup once the worker has POSTed."""
+    """Convergence (findings #1/#594/#1516): a Stage-1-HIT stage2-enabled message is enqueued
+    but NEITHER marked seen NOR pinned in the in-flight gate — Stage-1 can be multi-shipment,
+    so pinning would lose a QueueFull sibling. It is re-fetched next poll and converges to
+    seen via the tracking-number dedup once the worker has POSTed."""
     mock_stage2_entry.add_to_hass(hass)
     mock_gmail = _make_stage1_miss_poll("msg_s1hit")
     hit = ShipmentData(
@@ -5510,10 +5511,70 @@ async def test_stage2_hit_not_marked_seen_until_converged(hass, mock_stage2_entr
         await coord._async_update_data()
 
     mock_enqueue.assert_called_once()
-    # Not persisted-seen, but in the in-memory in-flight gate so it is not re-fetched /
-    # re-parsed every poll while the worker drains it (round-4 fix #252).
+    # Stage-1 uses pure convergence: not persisted-seen AND not pinned in-flight (multi-shipment
+    # safe). It converges to seen on a later poll via the tracking-number dedup-skip branch.
     assert "msg_s1hit" not in coord._seen_message_ids
-    assert "msg_s1hit" in coord._inflight_message_ids
+    assert "msg_s1hit" not in coord._inflight_message_ids
+
+
+async def test_fallback_enqueue_marks_inflight_not_seen(hass, mock_stage2_entry):
+    """Round-5: a fallback (single-shipment) enqueue pins the message in the in-memory in-flight
+    gate (so Ollama is not re-run on it every poll) but does NOT persist it as seen — it
+    converges to seen via the dedup-skip once the worker POSTs. Uses the real _enqueue_stage2."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_inflight")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1234",
+                },
+                custom={},
+                passes_used=1,
+                latency_ms=10.0,
+            )
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Provide a real queue so the real _enqueue_stage2 can put_nowait.
+        import asyncio as _asyncio
+
+        coord._stage2_queue = _asyncio.Queue(maxsize=100)
+        await coord._async_update_data()
+
+    assert "msg_fb_inflight" not in coord._seen_message_ids
+    assert "msg_fb_inflight" in coord._inflight_message_ids
 
 
 async def test_transient_failure_marks_inflight_not_seen(hass, mock_stage2_entry):
