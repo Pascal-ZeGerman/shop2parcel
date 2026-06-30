@@ -600,13 +600,17 @@ def test_looks_like_tracking_usps_international() -> None:
     assert _looks_like_tracking("LZ123456789CN") is True
 
 
-def test_looks_like_tracking_dhl_boundaries() -> None:
-    """DHL pattern accepts 10 and 11 digits; 9 digits is too short."""
+def test_looks_like_tracking_rejects_bare_digits() -> None:
+    """DHL bare-digit pattern (^[0-9]{10,11}$) has been removed (R5).
+
+    10- and 11-digit bare numbers must now be rejected by _looks_like_tracking.
+    9-digit numbers were already rejected before this change.
+    """
     from custom_components.shop2parcel.api.email_parser import _looks_like_tracking
 
-    assert _looks_like_tracking("1234567890") is True  # 10-digit DHL
-    assert _looks_like_tracking("12345678901") is True  # 11-digit DHL
-    assert _looks_like_tracking("123456789") is False  # 9-digit — below DHL minimum
+    assert _looks_like_tracking("1234567890") is False  # 10-digit bare — DHL pattern removed
+    assert _looks_like_tracking("12345678901") is False  # 11-digit bare — DHL pattern removed
+    assert _looks_like_tracking("123456789") is False  # 9-digit — always rejected
 
 
 def test_looks_like_tracking_lowercase_ups_fails() -> None:
@@ -784,3 +788,95 @@ def test_fedex_regex_rejects_non_exact_digit_lengths() -> None:
     parser = EmailParser()
     result = parser.parse(html, "fedex_13digit", 0)
     assert result.shipment is None
+
+
+# ---------------------------------------------------------------------------
+# validate_carrier_format gate (Phase 28 Plan 01 — R1, R2, R5)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_carrier_format_rejects_order_number() -> None:
+    """ORDER-12345 stripped to ORDER12345 matches no carrier pattern (R1)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("ORDER-12345")
+    assert ok is False
+    assert reason == "no_carrier_match"
+
+
+def test_validate_carrier_format_rejects_promo_text() -> None:
+    """PROMO 2026 SALE stripped to PROMO2026SALE matches no carrier pattern (R1)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    _clean, ok, reason = validate_carrier_format("PROMO 2026 SALE")
+    assert ok is False
+    assert reason == "no_carrier_match"
+
+
+def test_validate_carrier_format_accepts_usps_with_spaces() -> None:
+    """USPS domestic number with internal spaces is cleaned and accepted (R2 boundary edge)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("9400 1111 2222 3333 4444 55")
+    assert ok is True
+    assert reason is None
+    assert " " not in clean
+    assert "-" not in clean
+
+
+def test_validate_carrier_format_accepts_ups_with_hyphen() -> None:
+    """UPS number with an internal hyphen is cleaned to the canonical form and accepted."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("1Z999AA1-0123456784")
+    assert ok is True
+    assert reason is None
+    assert clean == "1Z999AA10123456784"
+
+
+def test_validate_carrier_format_rejects_empty_string() -> None:
+    """Empty string returns ok=False with reason 'empty' (R1 empty edge)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    _clean, ok, reason = validate_carrier_format("")
+    assert ok is False
+    assert reason == "empty"
+
+
+def test_validate_carrier_format_rejects_none() -> None:
+    """None is coerced to empty string and returns ok=False with reason 'empty' (R1 null edge)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    _clean, ok, reason = validate_carrier_format(None)  # type: ignore[arg-type]
+    assert ok is False
+    assert reason == "empty"
+
+
+def test_validate_carrier_format_regression_ups() -> None:
+    """UPS number passes the gate and is returned in canonical form (regression guard)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("1Z999AA10123456784")
+    assert ok is True
+    assert reason is None
+    assert clean == "1Z999AA10123456784"
+
+
+def test_validate_carrier_format_regression_usps_international() -> None:
+    """USPS international format passes the gate (regression guard)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("EA123456789US")
+    assert ok is True
+    assert reason is None
+    assert clean == "EA123456789US"
+
+
+def test_validate_carrier_format_regression_fedex_12() -> None:
+    """FedEx 12-digit Express number passes the gate (regression guard)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("123456789012")
+    assert ok is True
+    assert reason is None
+    assert clean == "123456789012"
