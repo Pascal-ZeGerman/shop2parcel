@@ -751,10 +751,15 @@ async def test_worker_does_not_swallow_cancelled_error_during_process_job(
 # ---------------------------------------------------------------------------
 
 
-async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_config_entry):
-    """I6 precondition: When stage1.tracking_number is None, _async_process_stage2_job
-    raises AssertionError — coordinators only enqueue emails with a resolved Stage-1
-    tracking number (I6 contract). Stage-2 promotion of None is a contract violation."""
+async def test_merge_stage1_none_gate_failing_stage2_no_post(hass, mock_stage2_config_entry):
+    """Phase 28 Plan 03 / MRG-04: When stage1.tracking_number is None AND stage2 returns a
+    non-carrier tracking number (gate-failing), the job produces NO POST.
+
+    The I6 AssertionError was replaced by the MRG-04 strict carrier-format gate.
+    A gate-failing Stage-2 value (e.g. 'STAGE2TN123456' — no carrier pattern match)
+    is silently discarded, merged.tracking_number stays None, and the skip-POST
+    guard (tracking_number is None → no POST) prevents the parcelapp call.
+    """
     from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
@@ -776,7 +781,8 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
 
-        # Stage-2 provides a tracking number; Stage-1 has None.
+        # Stage-2 provides a non-carrier tracking number; Stage-1 has None.
+        # "STAGE2TN123456" passes _SANITY_RE but fails the strict carrier-format gate.
         stage2_result = Stage2Result(
             locked={"tracking_number": "STAGE2TN123456", "carrier_name": None, "order_name": None},
             custom={},
@@ -790,7 +796,7 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
         await coord._async_load_store()
         await coord.async_start_stage2()
 
-        # Stage-1 tracking_number is None — stage2 should promote.
+        # Stage-1 tracking_number is None — MRG-04 strict gate fires on the promotion path.
         shipment = ShipmentData(
             tracking_number=None,
             carrier_name="UPS",
@@ -806,10 +812,10 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
         )
-        with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
-            await coord._async_process_stage2_job(job)
+        # No AssertionError raised — the gate replaces the old I6 assert.
+        await coord._async_process_stage2_job(job)
 
-        # Per I6 contract, POST must NOT be called when stage1.tracking_number is None.
+        # Gate rejected the non-carrier value → merged.tracking_number=None → skip-POST guard fires.
         mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
 
 
@@ -837,9 +843,12 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
 
-        # Conflict: stage1 has "ABC123", stage2 has "XYZ789".
+        # Conflict: stage1 has a valid UPS number, stage2 proposes a different valid UPS number.
+        # Use real carrier-format-valid tracking numbers so the new WR-02 gate passes.
+        stage1_tn = "1Z999AA10123456784"  # valid UPS
+        stage2_tn = "1Z999BB10123456785"  # different valid UPS (conflict)
         stage2_result = Stage2Result(
-            locked={"tracking_number": "XYZ789", "carrier_name": None, "order_name": None},
+            locked={"tracking_number": stage2_tn, "carrier_name": None, "order_name": None},
             custom={},
             passes_used=1,
             latency_ms=10.0,
@@ -852,15 +861,15 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         await coord.async_start_stage2()
 
         shipment = ShipmentData(
-            tracking_number="ABC123",
+            tracking_number=stage1_tn,
             carrier_name="UPS",
             order_name="#1234",
             message_id="msg1",
             email_date=1700000000,
         )
         job = Stage2Job(
-            storage_key="ABC123",
-            normalized_tn="ABC123",
+            storage_key=stage1_tn,
+            normalized_tn=stage1_tn,
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -868,9 +877,9 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         )
         await coord._async_process_stage2_job(job)
 
-        # Stage-1 wins on conflict — POST receives "ABC123".
+        # Stage-1 wins on conflict — POST receives stage1_tn.
         call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
-        assert call_kwargs["tracking_number"] == "ABC123"
+        assert call_kwargs["tracking_number"] == stage1_tn
 
         # Exactly one stage2_conflict event.
         conflict_events = [
@@ -880,8 +889,8 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         extra_conflicts = conflict_events[0].get("conflicts", [])
         assert len(extra_conflicts) == 1
         assert extra_conflicts[0]["field"] == "tracking_number"
-        assert extra_conflicts[0]["stage1"] == "ABC123"
-        assert extra_conflicts[0]["stage2"] == "XYZ789"
+        assert extra_conflicts[0]["stage1"] == stage1_tn
+        assert extra_conflicts[0]["stage2"] == stage2_tn
 
 
 async def test_two_field_conflict_emits_single_event(hass, mock_stage2_config_entry):
@@ -2856,7 +2865,7 @@ async def test_pending_post_not_re_extracted_on_drain(hass, mock_stage2_config_e
         # Pre-populate _pending_posts with an already-merged shipment.
         merged_shipment = _make_shipment(message_id="msg-pending-1")
         merged_shipment_updated = ShipmentData(
-            tracking_number="1ZPENDING123",
+            tracking_number="1Z999AA10123456784",  # real UPS format — passes strict gate
             carrier_name="UPS",
             order_name="#9001",
             message_id="msg-pending-1",
@@ -2914,9 +2923,19 @@ async def test_drain_posts_pending_when_quota_freed(hass, mock_stage2_config_ent
         coord._quota_exhausted_until = int(stdlib_time.time()) - 1
 
         # Populate 7 pending items — more than MAX_STAGE2_POSTS_PER_POLL (= 5).
+        # Use real UPS tracking numbers that pass the strict carrier-format gate.
+        _ups_drain_tns = [
+            "1Z999AA10123456784",
+            "1Z999AA10123456785",
+            "1Z999AA10123456786",
+            "1Z999AA10123456787",
+            "1Z999AA10123456788",
+            "1Z999AA10123456789",
+            "1Z999AA10123456790",
+        ]
         for i in range(7):
             shipment = ShipmentData(
-                tracking_number=f"1ZDRAIN{i:04d}",
+                tracking_number=_ups_drain_tns[i],
                 carrier_name="UPS",
                 order_name=f"#{9000 + i}",
                 message_id=f"msg-drain-{i}",
@@ -3222,7 +3241,7 @@ async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_st
 
         # Merge returns a shipment with tracking_number=None — this is the skip-POST scenario.
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [])
+        mock_merge.return_value = (none_shipment, [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -3266,7 +3285,7 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [])
+        mock_merge.return_value = (none_shipment, [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -3315,7 +3334,7 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [])
+        mock_merge.return_value = (none_shipment, [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -3631,4 +3650,148 @@ async def test_enqueue_returns_false_on_inflight_skip(hass, mock_stage2_config_e
             is False
         )
 
-        await coord.async_stop_stage2()
+
+# ---------------------------------------------------------------------------
+# Phase 28 quick-260630-n3k Task 1 (WR-02): defensive re-gate before
+# the Stage-2 worker POST.
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_rejects_malformed_tracking_no_post(hass, mock_stage2_config_entry):
+    """WR-02 RED: _async_process_stage2_job with merged_shipment.tracking_number that fails
+    validate_carrier_format must NOT call async_add_delivery, must increment
+    carrier_format_rejected_total by 1, and must converge terminally (key discarded,
+    no _pending_posts write).
+
+    RED: fails because there is currently no carrier-format re-gate inside the worker
+    before the POST — the malformed TN reaches async_add_delivery.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+
+    malformed_shipment = ShipmentData(
+        tracking_number="NOTATRACKINGNUM",
+        carrier_name="UPS",
+        order_name="#9999",
+        message_id="msg_wr02_reject",
+        email_date=1700000000,
+    )
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        # Extractor not needed — we skip straight to _async_process_stage2_job
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        # Build a job that looks like a prefetched-fallback job (no Ollama re-extract).
+        # Use a shipment whose tracking_number fails validate_carrier_format.
+        job = Stage2Job(
+            storage_key="msg_wr02_reject",
+            normalized_tn="NOTATRACKINGNUM",
+            shipment=malformed_shipment,
+            html_body="<html/>",
+            message_id="gmail:msg_wr02_reject",
+            meta={"subject": "test", "from": "test@example.com"},
+            prefetched_result=MagicMock(),  # skip Ollama re-extract path
+        )
+
+        # Pre-seed the enqueued-keys set (mirrors what _enqueue_stage2 would do).
+        coord._stage2_enqueued_keys.add("NOTATRACKINGNUM")
+
+        await coord._async_process_stage2_job(job)
+
+    # (a) async_add_delivery must NEVER be called.
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+
+    # (b) rejection counter must have incremented by exactly 1.
+    assert coord._diagnostics.carrier_format_rejected_total == 1, (
+        f"Expected carrier_format_rejected_total=1, got "
+        f"{coord._diagnostics.carrier_format_rejected_total}"
+    )
+    assert coord._diagnostics.last_carrier_format_rejected_reason == "no_carrier_match", (
+        f"Expected reason='no_carrier_match', got "
+        f"{coord._diagnostics.last_carrier_format_rejected_reason!r}"
+    )
+
+    # (c) terminal convergence: key discarded, no _pending_posts written.
+    assert "NOTATRACKINGNUM" not in coord._stage2_enqueued_keys
+    assert len(coord._pending_posts) == 0
+
+
+async def test_worker_posts_clean_canonical_form(hass, mock_stage2_config_entry):
+    """WR-02 / D-03 RED: When merged_shipment.tracking_number passes the gate but carries a
+    strippable separator, async_add_delivery must receive the clean canonical form (no spaces).
+
+    RED: fails because there is currently no gate to rebind merged_shipment to the clean form
+    — the raw (spaced) value is passed to async_add_delivery.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+
+    spaced_ups = "1Z 999AA1 0123456784"
+    expected_clean = "1Z999AA10123456784"
+
+    spaced_shipment = ShipmentData(
+        tracking_number=spaced_ups,
+        carrier_name="UPS",
+        order_name="#7777",
+        message_id="msg_wr02_clean",
+        email_date=1700000000,
+    )
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        job = Stage2Job(
+            storage_key="msg_wr02_clean",
+            normalized_tn=expected_clean,
+            shipment=spaced_shipment,
+            html_body="<html/>",
+            message_id="gmail:msg_wr02_clean",
+            meta={"subject": "test", "from": "test@example.com"},
+            prefetched_result=MagicMock(),  # skip Ollama re-extract path
+        )
+        coord._stage2_enqueued_keys.add(expected_clean)
+
+        await coord._async_process_stage2_job(job)
+
+    # async_add_delivery must be called with the CLEAN form (no spaces).
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args[1]
+    assert call_kwargs["tracking_number"] == expected_clean, (
+        f"Expected tracking_number='{expected_clean}', got {call_kwargs['tracking_number']!r}"
+    )

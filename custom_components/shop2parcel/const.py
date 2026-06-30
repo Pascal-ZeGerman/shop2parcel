@@ -6,12 +6,26 @@ DOMAIN = "shop2parcel"
 CONF_POLL_INTERVAL = "poll_interval"  # minutes (int)
 CONF_GMAIL_QUERY = "gmail_query"  # Gmail search query string
 DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
-# Phase 27: subject-only filter — no sender anchors, no spam label.
-# Gmail already excludes Spam/Trash from normal search, so -label:spam is
-# redundant. Removing sender anchors lets any carrier's shipping notification
-# through; the hybrid Ollama gatekeeper (Plan 02/03) rejects non-shipment mail.
-# User can override via Options flow at any time.
-DEFAULT_GMAIL_QUERY = "subject:(tracking OR shipped OR shipment OR delivery OR delivered OR parcel OR package OR order)"
+# Phase 28 Plan 02 (R6): full-body keyword match — no Gmail operator prefix.
+# Phase 27 used a header-only operator to avoid broad-scan noise; Phase 28
+# widens to the full message body so that body-only carrier emails (e.g. USPS
+# Informed Delivery digests whose headers lack every keyword but whose body
+# carries the 9400… number) are now fetched.  The strict carrier-format
+# pre-POST gate introduced in Plans 01/03/04 is the backstop that makes the
+# wider net safe — non-shipment mail that slips through the query is rejected
+# before burning a parcelapp quota slot.  Gmail already excludes Spam/Trash,
+# so no -label:spam guard is needed.
+# User can override via Options flow at any time (CONF_GMAIL_QUERY).
+#
+# Residual FedEx risk (T-N3K-02): the FedEx carrier pattern in _TRACKING_PATTERNS
+# matches ANY bare 12-, 15-, or 20-digit number.  An email body containing an
+# order/invoice/phone number of those lengths that Stage-1 matches as FedEx will
+# pass the carrier-format gate and burn a parcelapp quota slot.  The wider query
+# above increases the email volume exposed to this risk.  Tightening the FedEx
+# pattern to a known-prefix anchor is deferred to a future phase.
+DEFAULT_GMAIL_QUERY = (
+    "tracking OR shipped OR shipment OR delivery OR delivered OR parcel OR package OR order"
+)
 
 # QF-02: Gmail-only rescan window option. Controls the minimum lookback period
 # used in build_incremental_query. Allows users to widen the after: filter

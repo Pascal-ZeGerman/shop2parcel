@@ -130,7 +130,7 @@ async def test_no_shipment_sensor_registered(hass, mock_config_entry):
     NO per-shipment sensor entity registers — only diagnostic + 3 operational sensors."""
     # Known operational/diagnostic suffixes that should exist
     known_suffixes = {
-        # 13 diagnostic
+        # 14 diagnostic
         "emails_scanned",
         "new_emails_inspected",
         "emails_matched",
@@ -140,6 +140,7 @@ async def test_no_shipment_sensor_registered(hass, mock_config_entry):
         "stage2_queue",
         "ollama_latency",
         "ollama_parse_retries",
+        "carrier_format_rejections",
         "stage2_consecutive_failures",
         "emails_sent_to_llm",
         "emails_parsed_by_llm",

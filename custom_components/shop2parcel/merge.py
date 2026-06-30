@@ -11,49 +11,53 @@ Maps to Phase 20 requirements:
   (mirrors ``normalize_tracking_number()`` in ``const.py``). Any divergence keeps
   Stage-1 and records a conflict entry in the returned ``conflicts`` list.
 
-- **MRG-04**: Before promoting a Stage-2-sourced ``tracking_number`` (Stage-1 is
-  ``None``), validate it against ``_SANITY_RE`` (non-empty, 6–40 chars,
-  alphanumeric/dash/space). Fails → treat as ``None``; no conflict emitted.
-  The sanity gate does NOT apply to the conflict path (Stage-1 non-``None``).
+- **MRG-04** (Phase 28 Plan 03): Before promoting a Stage-2-sourced ``tracking_number``
+  (Stage-1 is ``None``), validate it against the strict carrier-format gate
+  ``validate_carrier_format`` from ``api/email_parser.py``.  Fails → treat as
+  ``None``; no conflict emitted; a gate-rejection entry is appended to the returned
+  ``gate_rejections`` list for the HA-holding caller to count (D-02 seam — counter
+  increment stays in coordinator.py, NOT here).  On pass, ``s2_val`` is replaced
+  with the CLEANED canonical form (separator-stripped, uppercased) per D-03.
+  The strict gate does NOT apply to the conflict path (Stage-1 non-``None``).
 
-The function returns a ``tuple[ShipmentData, list[dict]]`` so the caller (the
-coordinator, which holds ``self.hass``) can emit the ``stage2_conflict`` activity
-event via ``_emit_scan_event`` — keeping this module HA-free per **D-02** and
-CONTEXT.md decisions **D-03 / D-04 / D-05**.
+The function returns a ``tuple[ShipmentData, list[dict], list[dict]]`` so the
+caller (the coordinator, which holds ``self.hass``) can:
+
+  1. Emit the ``stage2_conflict`` activity event via ``_emit_scan_event``.
+  2. Increment ``PollStats.carrier_format_rejected_total`` for each gate rejection.
+
+This keeps the module HA-free per **D-02** and CONTEXT.md decisions
+**D-03 / D-04 / D-05**.
 
 ``Stage2Result.custom`` is propagated unconditionally into ``ShipmentData.custom_attributes``
 and surfaced as HA sensor attributes (FLD-03). Custom fields are never POSTed to parcelapp.net.
+
+All four Ollama-derived POST paths now go through the strict carrier-format gate
+(``validate_carrier_format``).  Phase 28 Plan 04 completed the fourth path —
+the ``gmail_coordinator.py`` Stage-1-miss inline fallback.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import replace
 
-from .api.email_parser import ShipmentData
+from .api.email_parser import ShipmentData, validate_carrier_format
 from .const import LOCKED_OLLAMA_FIELDS
 from .extractors.types import Stage2Result
-
-# MRG-04: loose sanity regex for Stage-2-sourced tracking numbers.
-# Accepts 6–40 characters of alphanumeric, hyphen, or space.
-# Applied ONLY when Stage-1 tracking_number is None (promotion path).
-# The conflict path (Stage-1 non-None) is exempt — a short or invalid
-# Stage-2 value is still a conflict, not silently discarded.
-_SANITY_RE = re.compile(r"^[A-Za-z0-9\- ]{6,40}$")
 
 
 def merge_llm_authoritative(
     stage1: ShipmentData,
     result: Stage2Result,
-) -> tuple[ShipmentData, list[dict]]:
+) -> tuple[ShipmentData, list[dict], list[dict]]:
     """Merge Stage-2 LLM result into Stage-1 ShipmentData.
 
     Iterates ``LOCKED_OLLAMA_FIELDS`` (``tracking_number``, ``carrier_name``,
     ``order_name``). For each field, applies **MRG-03** routing:
 
-    1. **Stage-1 is None** — accept Stage-2 value (after **MRG-04** sanity gate
-       for ``tracking_number``; value may still be ``None`` if Stage-2 also
-       declined or failed sanity).
+    1. **Stage-1 is None** — accept Stage-2 value (after **MRG-04** strict carrier-
+       format gate for ``tracking_number``; value may still be ``None`` if Stage-2
+       also declined or failed the gate).
     2. **Stage-2 is None** — keep Stage-1 value (Stage-2 declined to extract).
     3. **``str.strip().upper()`` match** — keep Stage-1 canonical casing; no
        conflict.  Normalization mirrors ``normalize_tracking_number()`` in
@@ -61,13 +65,18 @@ def merge_llm_authoritative(
     4. **Mismatch** — keep Stage-1, append
        ``{"field": ..., "stage1": ..., "stage2": ...}`` to ``conflicts``.
 
-    **MRG-04 sanity gate**: applied ONLY to ``tracking_number`` on the Stage-1
-    ``None`` promotion path.  Regex ``^[A-Za-z0-9\\- ]{6,40}$`` (see
-    ``_SANITY_RE``).  Invalid values are silently discarded (treated as
-    ``None``); no conflict entry is emitted.
+    **MRG-04 strict carrier-format gate** (Phase 28 Plan 03): applied ONLY to
+    ``tracking_number`` on the Stage-1 ``None`` promotion path.  Calls
+    ``validate_carrier_format`` from ``api/email_parser.py``.  On pass, ``s2_val``
+    is replaced with the CLEAN canonical form (separator-stripped, uppercased) per
+    D-03.  On fail, value is silently discarded (treated as ``None``); no conflict
+    entry is emitted.  A gate-rejection entry is appended to ``gate_rejections``
+    so the HA-holding caller can count it (D-02 seam — the counter increment stays
+    in ``coordinator.py``).  The strict gate does NOT apply to the conflict path
+    (Stage-1 non-``None``).
 
     Returns:
-        A ``(merged, conflicts)`` tuple where:
+        A ``(merged, conflicts, gate_rejections)`` tuple where:
 
         - ``merged`` is a **new** ``ShipmentData`` produced via
           ``dataclasses.replace``; ``stage1`` is never mutated.
@@ -77,30 +86,39 @@ def merge_llm_authoritative(
           ``len(conflicts) > 0``, via
           ``_emit_scan_event(outcome="stage2_conflict", extra={"conflicts": conflicts})``
           (CONTEXT.md **D-04 / D-05**).
+        - ``gate_rejections`` is a ``list[dict]`` of carrier-format rejections on
+          the MRG-04 promotion path.  Each entry is
+          ``{"field": str, "clean": str, "reason": str}``.  The HA-holding caller
+          calls ``record_carrier_format_rejection(entry["clean"], entry["reason"])``
+          for each entry (D-02 seam).  Empty when no MRG-04 gate fired.
 
     ``Stage2Result.custom`` is unconditionally propagated into the merged
     ``ShipmentData.custom_attributes`` (FLD-03) — user-added fields surface as
     HA sensor attributes and are never POSTed to parcelapp.net.
     """
-    # Precondition: coordinators only enqueue emails with a resolved Stage-1
-    # tracking number, so stage1.tracking_number must be non-None here.
-    # The assert surfaces any future caller that violates this contract loudly
-    # rather than silently constructing a ShipmentData with tracking_number=None.
-    assert stage1.tracking_number is not None, (
-        "merge_llm_authoritative precondition: stage1.tracking_number must be non-None"
-    )
-
     overrides: dict[str, str | None] = {}
     conflicts: list[dict] = []
+    gate_rejections: list[dict] = []
 
     for field_name in LOCKED_OLLAMA_FIELDS:
         s1_val: str | None = getattr(stage1, field_name, None)
         s2_val: str | None = result.locked.get(field_name)
 
-        # MRG-04: validate Stage-2 tracking_number before promoting when Stage-1 is None.
+        # MRG-04: apply strict carrier-format gate to tracking_number on the Stage-1-None
+        # promotion path.  The conflict path (s1_val non-None) is exempt — a carrier-format-
+        # invalid Stage-2 value is still a conflict against Stage-1, not silently discarded.
         if field_name == "tracking_number" and s1_val is None and s2_val is not None:
-            if not _SANITY_RE.match(s2_val):
-                s2_val = None  # silent discard; no conflict entry
+            clean, ok, reason = validate_carrier_format(s2_val)
+            if ok:
+                # Gate passed: use the CLEAN canonical form (D-03).
+                s2_val = clean
+            else:
+                # Gate failed: silent discard (no conflict entry); signal to caller via
+                # gate_rejections (D-02 seam — counter increment stays in coordinator.py).
+                gate_rejections.append(
+                    {"field": field_name, "clean": clean, "reason": reason or "no_carrier_match"}
+                )
+                s2_val = None
 
         if s1_val is None:
             # Stage-2 wins (promotion path); value may be None if Stage-2 declined
@@ -126,4 +144,4 @@ def merge_llm_authoritative(
     # FLD-03 / D-12: unconditionally propagate Stage2Result.custom into custom_attributes.
     # Stage2Result.custom is always a dict per Phase 16 extractor contract — empty-over-empty is harmless.
     merged = replace(merged, custom_attributes=result.custom)
-    return merged, conflicts
+    return merged, conflicts, gate_rejections

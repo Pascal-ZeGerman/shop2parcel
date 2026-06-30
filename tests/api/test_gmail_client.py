@@ -523,17 +523,19 @@ def test_extract_text_body_returns_none_when_no_text_part():
     assert extract_text_body(payload) is None
 
 
-def test_default_gmail_query_is_subject_only():
-    """Phase 27: DEFAULT_GMAIL_QUERY is a subject-only filter — no sender anchors.
+def test_default_gmail_query_is_full_body():
+    """Phase 28 (R6): DEFAULT_GMAIL_QUERY is a full-body keyword filter — no subject scope, no sender anchors.
 
-    The query must start with 'subject:(', contain all eight shipping keywords,
-    and contain neither 'from:' nor '-label:spam' (Gmail excludes Spam/Trash
-    from normal search by default; sender anchors caused the 0-results bug).
+    Phase 28 R6 widened the query from subject-only to a full-body match so body-only
+    carrier emails (e.g. USPS Informed Delivery digests) are fetched. The query must NOT
+    scope to 'subject:(', must contain all eight shipping keywords, and must contain
+    neither 'from:' nor '-label:spam' (Gmail excludes Spam/Trash from normal search by
+    default; sender anchors caused the 0-results bug).
     """
     from custom_components.shop2parcel.const import DEFAULT_GMAIL_QUERY  # noqa: PLC0415
 
-    assert DEFAULT_GMAIL_QUERY.startswith("subject:("), (
-        "DEFAULT_GMAIL_QUERY must start with 'subject:(' (subject-only filter)"
+    assert "subject:(" not in DEFAULT_GMAIL_QUERY, (
+        "DEFAULT_GMAIL_QUERY must not scope to 'subject:(' — Phase 28 R6 widened it to a full-body match"
     )
     for keyword in (
         "tracking",
@@ -557,10 +559,11 @@ def test_default_gmail_query_is_subject_only():
 
 
 def test_build_incremental_query_appends_after_to_default_query():
-    """Phase 27: build_incremental_query still appends after: to the new subject-only default.
+    """Phase 28 (R6): build_incremental_query still appends after: to the full-body default.
 
-    The after: window filter must compose with the new DEFAULT_GMAIL_QUERY
-    regardless of the query not having sender anchors.
+    The after: window filter must compose with the full-body DEFAULT_GMAIL_QUERY
+    (Phase 28 R6 removed the subject: scope) — the keyword body is preserved and
+    after: is appended.
     """
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
         DEFAULT_GMAIL_QUERY,
@@ -569,7 +572,7 @@ def test_build_incremental_query_appends_after_to_default_query():
 
     result = build_incremental_query(DEFAULT_GMAIL_QUERY, DEFAULT_RESCAN_WINDOW_DAYS)
     assert "after:" in result, "build_incremental_query must still append 'after:' to new default"
-    assert "subject:(" in result, "subject filter body must be preserved in the output"
+    assert "tracking" in result, "keyword body must be preserved in the output"
 
 
 def test_build_incremental_query_7_day_window():
