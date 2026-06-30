@@ -9,6 +9,7 @@ from __future__ import annotations
 import html as _html_stdlib
 import logging
 import time
+from dataclasses import replace as dc_replace
 from typing import cast
 
 import aiohttp
@@ -726,6 +727,45 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     # re-fetchable so it forwards once the quota window resets.
                     msg_pending_retry = True
                     continue
+
+                # WR-03: Defensive carrier-format gate before the Gmail Stage-1 inline POST.
+                # Mirrors the drain re-gate (coordinator.py ~L1216) and the worker re-gate (WR-02).
+                # A carrier-invalid value is terminal (can never pass — a future merge/parser change
+                # cannot slip a bad value through). On reject: record the counter, log at DEBUG only
+                # (D-07/T-28-09 — no TN values at INFO/WARNING), emit a terminal scan event, and
+                # continue to the next shipment WITHOUT setting msg_pending_retry (do NOT force a
+                # retry of a value that can never pass). The message converges to seen via the
+                # post-loop _mark_message_seen guard since msg_enqueued/msg_pending_retry stay False.
+                # On pass: rebind shipment to the gate-clean canonical form (D-03) so the POST body
+                # and the subsequent success-path dedup write both use the separator-free string.
+                #
+                # Residual FedEx risk (T-N3K-02): the FedEx pattern matches ANY bare 12/15/20-digit
+                # number, so a body order/invoice/phone number of those lengths that Stage-1 matches
+                # as FedEx WILL pass this gate and burn a quota slot. Tightening the FedEx pattern
+                # is deferred to a future phase.
+                gm_clean, gm_ok, gm_reason = validate_carrier_format(shipment.tracking_number)
+                if not gm_ok:
+                    self._diagnostics.record_carrier_format_rejection(
+                        gm_clean, gm_reason or "no_carrier_match"
+                    )
+                    _LOGGER.debug(
+                        "Gmail message %s: carrier-format gate rejected tn='%s' (reason=%s)"
+                        " — skipping inline POST (terminal)",
+                        msg_id,
+                        gm_clean,
+                        gm_reason,
+                    )
+                    self._emit_scan_event(
+                        message_id=f"gmail:{msg_id}",
+                        meta=email_meta,
+                        outcome="stage2_no_data",
+                        strategy=result.strategy_used or "unknown",
+                    )
+                    continue  # terminal — do not set msg_pending_retry; converges to seen
+
+                # Rebind shipment to the gate-clean canonical form (D-03) so the POST body and
+                # the success-path dedup write both use the identical separator-free string.
+                shipment = dc_replace(shipment, tracking_number=gm_clean)  # type: ignore[arg-type]
 
                 carrier_code = normalize_carrier(shipment.carrier_name)
                 try:

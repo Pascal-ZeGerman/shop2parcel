@@ -16,6 +16,13 @@ DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
 # before burning a parcelapp quota slot.  Gmail already excludes Spam/Trash,
 # so no -label:spam guard is needed.
 # User can override via Options flow at any time (CONF_GMAIL_QUERY).
+#
+# Residual FedEx risk (T-N3K-02): the FedEx carrier pattern in _TRACKING_PATTERNS
+# matches ANY bare 12-, 15-, or 20-digit number.  An email body containing an
+# order/invoice/phone number of those lengths that Stage-1 matches as FedEx will
+# pass the carrier-format gate and burn a parcelapp quota slot.  The wider query
+# above increases the email volume exposed to this risk.  Tightening the FedEx
+# pattern to a known-prefix anchor is deferred to a future phase.
 DEFAULT_GMAIL_QUERY = (
     "tracking OR shipped OR shipment OR delivery OR delivered OR parcel OR package OR order"
 )
