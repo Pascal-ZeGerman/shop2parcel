@@ -1477,6 +1477,32 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_enqueued_keys.discard(normalized_tn)
             return  # no POST, no dedup write, no _pending_posts write, no store save
 
+        # WR-02: Defensive carrier-format re-gate before the worker POST.
+        # Mirrors the drain re-gate (coordinator.py ~L1216). A carrier-invalid value is
+        # terminal (it can never pass); use the same terminal-convergence handling as the
+        # no-data branch above — discard the key and return without _release_inflight and
+        # without writing _pending_posts. The gate also produces the canonical clean form
+        # (D-03) used for the quota-defer persistence, the POST body, and the dedup write
+        # on the happy path.
+        wk_clean, wk_ok, wk_reason = validate_carrier_format(merged_shipment.tracking_number)
+        if not wk_ok:
+            _LOGGER.debug(
+                "Stage-2 worker: carrier-format gate rejected tn='%s' (reason=%s)"
+                " — discarding job without POST (terminal)",
+                wk_clean,
+                wk_reason,
+            )
+            self._diagnostics.record_carrier_format_rejection(
+                wk_clean, wk_reason or "no_carrier_match"
+            )
+            self._stage2_enqueued_keys.discard(normalized_tn)
+            return  # terminal — no POST, no _pending_posts write, no _release_inflight
+
+        # Rebind merged_shipment to the gate-clean canonical form (D-03) so the quota-defer
+        # persistence, the POST body, and the dedup write all use the identical separator-free
+        # canonical string.
+        merged_shipment = dc_replace(merged_shipment, tracking_number=wk_clean)  # type: ignore[arg-type]
+
         # Phase 23 LD-03/LD-05: Quota guard moved to AFTER extraction+merge so Ollama always
         # runs for every dequeued job. When quota is exhausted, persist the already-merged
         # shipment to _pending_posts so the drain (plan 04) can POST it later without

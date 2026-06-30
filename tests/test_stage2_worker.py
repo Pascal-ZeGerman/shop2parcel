@@ -843,9 +843,12 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
 
-        # Conflict: stage1 has "ABC123", stage2 has "XYZ789".
+        # Conflict: stage1 has a valid UPS number, stage2 proposes a different valid UPS number.
+        # Use real carrier-format-valid tracking numbers so the new WR-02 gate passes.
+        stage1_tn = "1Z999AA10123456784"  # valid UPS
+        stage2_tn = "1Z999BB10123456785"  # different valid UPS (conflict)
         stage2_result = Stage2Result(
-            locked={"tracking_number": "XYZ789", "carrier_name": None, "order_name": None},
+            locked={"tracking_number": stage2_tn, "carrier_name": None, "order_name": None},
             custom={},
             passes_used=1,
             latency_ms=10.0,
@@ -858,15 +861,15 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         await coord.async_start_stage2()
 
         shipment = ShipmentData(
-            tracking_number="ABC123",
+            tracking_number=stage1_tn,
             carrier_name="UPS",
             order_name="#1234",
             message_id="msg1",
             email_date=1700000000,
         )
         job = Stage2Job(
-            storage_key="ABC123",
-            normalized_tn="ABC123",
+            storage_key=stage1_tn,
+            normalized_tn=stage1_tn,
             shipment=shipment,
             html_body="<html/>",
             message_id="test-msg-id",
@@ -874,9 +877,9 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         )
         await coord._async_process_stage2_job(job)
 
-        # Stage-1 wins on conflict — POST receives "ABC123".
+        # Stage-1 wins on conflict — POST receives stage1_tn.
         call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
-        assert call_kwargs["tracking_number"] == "ABC123"
+        assert call_kwargs["tracking_number"] == stage1_tn
 
         # Exactly one stage2_conflict event.
         conflict_events = [
@@ -886,8 +889,8 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
         extra_conflicts = conflict_events[0].get("conflicts", [])
         assert len(extra_conflicts) == 1
         assert extra_conflicts[0]["field"] == "tracking_number"
-        assert extra_conflicts[0]["stage1"] == "ABC123"
-        assert extra_conflicts[0]["stage2"] == "XYZ789"
+        assert extra_conflicts[0]["stage1"] == stage1_tn
+        assert extra_conflicts[0]["stage2"] == stage2_tn
 
 
 async def test_two_field_conflict_emits_single_event(hass, mock_stage2_config_entry):
