@@ -77,6 +77,7 @@ class ParseResult:
 
 # Known tracking number format patterns (EMAIL-04).
 # Patterns are bounded quantifiers — no ReDoS risk (ASVS V5).
+# R5: DHL bare-digit pattern (^[0-9]{10,11}$) removed — too broad, causes false positives.
 _TRACKING_PATTERNS = [
     re.compile(r"^1Z[A-Z0-9]{16}$"),  # UPS: 1Z999AA10123456784
     re.compile(r"^9[12345][0-9]{15,24}$"),  # USPS domestic: IMpb 91-95 (91=Priority Mail Express)
@@ -84,7 +85,6 @@ _TRACKING_PATTERNS = [
     re.compile(
         r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$"
     ),  # FedEx: Express=12, Ground=15, SmartPost=20
-    re.compile(r"^[0-9]{10,11}$"),  # DHL (assumed)
 ]
 
 
@@ -112,6 +112,34 @@ _FEDEX_TRACKING_RE = re.compile(
 def _looks_like_tracking(s: str) -> bool:
     """Return True if s matches any known carrier tracking number format."""
     return any(p.match(s) for p in _TRACKING_PATTERNS)
+
+
+def validate_carrier_format(value: str | None) -> tuple[str, bool, str | None]:
+    """Validate a carrier tracking number against all known carrier patterns.
+
+    Strips internal ``[ -]`` separators and uppercases the input to produce the
+    single canonical clean form (D-03). This clean form is the value used for
+    validation, dedup, and the parcelapp POST — callers must not normalise further.
+
+    Returns:
+        ``(clean_value, ok, reason)`` where:
+
+        * ``clean_value`` — separator-stripped, uppercased form (always returned,
+          even on failure, so callers can log the cleaned value per D-06).
+        * ``ok`` — ``True`` if the clean form matches a carrier pattern.
+        * ``reason`` — ``"empty"`` when the input is blank/None,
+          ``"no_carrier_match"`` when no pattern matches, or ``None`` on success.
+
+    Reuses ``_looks_like_tracking()`` internally — no parallel reimplementation
+    of pattern logic (D-01). The separator strip uses a bounded char class
+    ``re.sub(r"[ -]", "", ...)``; no unbounded quantifier is introduced (ASVS V5).
+    """
+    clean = re.sub(r"[ -]", "", value or "").upper()
+    if not clean:
+        return clean, False, "empty"
+    if not _looks_like_tracking(clean):
+        return clean, False, "no_carrier_match"
+    return clean, True, None
 
 
 def _infer_carrier(tracking: str) -> str:
