@@ -107,7 +107,7 @@
         },
         "data_description": {
           "poll_interval": "How often to check for new shipping emails (5–1440 minutes).",
-          "gmail_query": "Gmail search query to find shipping emails.",
+          "gmail_query": "Gmail search query to find shipping emails. The default matches shipping emails by subject keywords (tracking, shipped, shipment, delivery, etc.) regardless of sender. Clearing this field restores the default. Existing entries keep their stored query until manually cleared.",
           "imap_search": "IMAP SEARCH criteria (e.g. SUBJECT \"shipped\").",
           "rescan_window_days": "Always look back at least this many days for shipping emails (7-365). Increase this to rescan recent history without resetting the integration. Already-forwarded shipments are not re-sent.",
           "ollama_url": "Ollama server base URL (e.g. http://192.168.0.190:11434). Leave empty to disable AI extraction.",

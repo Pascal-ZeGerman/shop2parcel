@@ -523,13 +523,53 @@ def test_extract_text_body_returns_none_when_no_text_part():
     assert extract_text_body(payload) is None
 
 
-def test_default_gmail_query_keeps_spam_exclusion():
-    """QF-01: DEFAULT_GMAIL_QUERY must still contain '-label:spam' for the spam guard."""
+def test_default_gmail_query_is_subject_only():
+    """Phase 27: DEFAULT_GMAIL_QUERY is a subject-only filter — no sender anchors.
+
+    The query must start with 'subject:(', contain all eight shipping keywords,
+    and contain neither 'from:' nor '-label:spam' (Gmail excludes Spam/Trash
+    from normal search by default; sender anchors caused the 0-results bug).
+    """
     from custom_components.shop2parcel.const import DEFAULT_GMAIL_QUERY  # noqa: PLC0415
 
-    assert "-label:spam" in DEFAULT_GMAIL_QUERY, (
-        "DEFAULT_GMAIL_QUERY must retain '-label:spam' to exclude spam results"
+    assert DEFAULT_GMAIL_QUERY.startswith("subject:("), (
+        "DEFAULT_GMAIL_QUERY must start with 'subject:(' (subject-only filter)"
     )
+    for keyword in (
+        "tracking",
+        "shipped",
+        "shipment",
+        "delivery",
+        "delivered",
+        "parcel",
+        "package",
+        "order",
+    ):
+        assert keyword in DEFAULT_GMAIL_QUERY, (
+            f"DEFAULT_GMAIL_QUERY must contain keyword '{keyword}'"
+        )
+    assert "from:" not in DEFAULT_GMAIL_QUERY, (
+        "DEFAULT_GMAIL_QUERY must not contain 'from:' anchors"
+    )
+    assert "-label:spam" not in DEFAULT_GMAIL_QUERY, (
+        "DEFAULT_GMAIL_QUERY must not contain '-label:spam' (Gmail excludes spam by default)"
+    )
+
+
+def test_build_incremental_query_appends_after_to_default_query():
+    """Phase 27: build_incremental_query still appends after: to the new subject-only default.
+
+    The after: window filter must compose with the new DEFAULT_GMAIL_QUERY
+    regardless of the query not having sender anchors.
+    """
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        DEFAULT_GMAIL_QUERY,
+        DEFAULT_RESCAN_WINDOW_DAYS,
+    )
+
+    result = build_incremental_query(DEFAULT_GMAIL_QUERY, DEFAULT_RESCAN_WINDOW_DAYS)
+    assert "after:" in result, "build_incremental_query must still append 'after:' to new default"
+    assert "subject:(" in result, "subject filter body must be preserved in the output"
 
 
 def test_build_incremental_query_7_day_window():

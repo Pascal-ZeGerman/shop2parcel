@@ -4764,3 +4764,1135 @@ async def test_imap_poll_start_notify_failure_resets_flag(hass, mock_imap_config
     assert coord._poll_in_progress is False, (
         "a start-notify failure must not leak _poll_in_progress=True"
     )
+
+
+# -------- Phase 27 Plan 02: seen-message-ID cache (base coordinator) --------
+
+
+@pytest.fixture()
+def _coord_with_store(hass, mock_config_entry):
+    """Return a GmailCoordinator with a no-op store (sync helper)."""
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+    return coord
+
+
+def test_seen_message_ids_init_empty(_coord_with_store):
+    """A fresh coordinator has an empty seen-message-ID cache."""
+    coord = _coord_with_store
+    assert hasattr(coord, "_seen_message_ids")
+    assert isinstance(coord._seen_message_ids, OrderedDict)
+    assert len(coord._seen_message_ids) == 0
+
+
+def test_mark_message_seen_adds_id(_coord_with_store):
+    """_mark_message_seen makes the ID present in the cache."""
+    coord = _coord_with_store
+    coord._mark_message_seen("msg_abc")
+    assert "msg_abc" in coord._seen_message_ids
+
+
+def test_mark_message_seen_idempotent(_coord_with_store):
+    """Re-marking an ID does not duplicate it."""
+    coord = _coord_with_store
+    coord._mark_message_seen("msg_x")
+    coord._mark_message_seen("msg_x")
+    assert list(coord._seen_message_ids.keys()).count("msg_x") == 1
+    assert len(coord._seen_message_ids) == 1
+
+
+def test_mark_message_seen_fifo_eviction(_coord_with_store):
+    """Adding beyond SEEN_MESSAGE_IDS_MAXLEN evicts the oldest ID (FIFO)."""
+    from custom_components.shop2parcel.const import SEEN_MESSAGE_IDS_MAXLEN
+
+    coord = _coord_with_store
+    # Fill to the max
+    for i in range(SEEN_MESSAGE_IDS_MAXLEN):
+        coord._mark_message_seen(f"msg_{i:05d}")
+    assert len(coord._seen_message_ids) == SEEN_MESSAGE_IDS_MAXLEN
+    # The first ID added should still be at the front
+    first_key = next(iter(coord._seen_message_ids))
+    assert first_key == "msg_00000"
+
+    # Adding one more should evict the oldest
+    coord._mark_message_seen("msg_NEW")
+    assert len(coord._seen_message_ids) == SEEN_MESSAGE_IDS_MAXLEN
+    assert "msg_00000" not in coord._seen_message_ids
+    assert "msg_NEW" in coord._seen_message_ids
+
+
+def test_store_snapshot_includes_seen_message_ids(_coord_with_store):
+    """_store_snapshot includes seen_message_ids key in insertion order."""
+    coord = _coord_with_store
+    coord._mark_message_seen("id_first")
+    coord._mark_message_seen("id_second")
+    snapshot = coord._store_snapshot()
+    assert "seen_message_ids" in snapshot
+    assert snapshot["seen_message_ids"] == ["id_first", "id_second"]
+
+
+async def test_seen_message_ids_round_trips_through_store(hass, mock_config_entry):
+    """seen_message_ids serializes and deserializes preserving order."""
+    mock_config_entry.add_to_hass(hass)
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        coord._mark_message_seen("alpha")
+        coord._mark_message_seen("beta")
+        snapshot = coord._store_snapshot()
+
+    # Now simulate a second coordinator loading from that snapshot
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2:
+        mock_store_cls2.return_value.async_load = AsyncMock(return_value=snapshot)
+        mock_store_cls2.return_value.async_delay_save = MagicMock()
+        coord2 = GmailCoordinator(hass, mock_config_entry)
+        await coord2._async_load_store()
+
+    assert list(coord2._seen_message_ids.keys()) == ["alpha", "beta"]
+
+
+async def test_load_store_without_seen_message_ids_key(hass, mock_config_entry):
+    """A v3 store with no seen_message_ids key loads cleanly with empty cache."""
+    mock_config_entry.add_to_hass(hass)
+    store_data = {"submitted_tracking_numbers": [], "quota_exhausted_until": None}
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=store_data)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert len(coord._seen_message_ids) == 0
+
+
+async def test_load_store_non_list_seen_message_ids_resets_and_warns(
+    hass, mock_config_entry, caplog
+):
+    """A non-list seen_message_ids value in the store resets to empty + emits WARNING."""
+    mock_config_entry.add_to_hass(hass)
+    store_data = {"submitted_tracking_numbers": [], "seen_message_ids": "not-a-list"}
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=store_data)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        with caplog.at_level(logging.WARNING):
+            await coord._async_load_store()
+
+    assert len(coord._seen_message_ids) == 0
+    assert any(
+        "seen_message_ids" in r.message for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+async def test_load_store_filters_non_str_seen_message_ids(hass, mock_config_entry):
+    """Non-str items in seen_message_ids are dropped; str items are kept."""
+    mock_config_entry.add_to_hass(hass)
+    store_data = {
+        "submitted_tracking_numbers": [],
+        "seen_message_ids": ["valid_id", 42, None, "another_valid"],
+    }
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=store_data)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    assert list(coord._seen_message_ids.keys()) == ["valid_id", "another_valid"]
+
+
+def test_storage_version_unchanged():
+    """STORAGE_VERSION must remain 3 (no bump for additive seen_message_ids key)."""
+    from custom_components.shop2parcel.coordinator import STORAGE_VERSION
+
+    assert STORAGE_VERSION == 3
+
+
+# -------- Phase 27 Plan 02: Gmail poll-loop seen-ID gate -------------------
+
+
+def _mock_oauth_ctx(hass_mock=None):
+    """Return a patch context that stubs OAuth2 token refresh for Gmail coordinator tests."""
+    return patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow")
+
+
+def _setup_mock_oauth(mock_oauth, *, access_token: str = "fake-access-token"):
+    """Configure the mock_oauth context with a valid token."""
+    mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+    mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+    mock_oauth.OAuth2Session.return_value.token = {
+        "access_token": access_token,
+        "refresh_token": "fake-refresh-token",
+        "expires_at": 9999999999.0,
+    }
+
+
+async def test_seen_id_gate_skips_already_seen_message(hass, mock_config_entry):
+    """A pre-seeded message ID is not fetched from Gmail (pre-loop filter)."""
+    mock_config_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=(
+            [{"id": "seen_id"}, {"id": "new_id"}],
+            "subject:(tracking)",
+        )
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": "new_id",
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/plain", "body": {"data": ""}},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        # Pre-seed one message as already seen
+        coord._mark_message_seen("seen_id")
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    # async_get_message must NOT be called for "seen_id", only for "new_id"
+    call_args = [call.args[1] for call in mock_gmail.async_get_message.call_args_list]
+    assert "seen_id" not in call_args
+    assert "new_id" in call_args
+
+
+async def test_seen_id_gate_skipped_in_debug_mode(hass):
+    """In debug_mode the seen-ID filter is bypassed; pre-seeded IDs are still fetched."""
+    from custom_components.shop2parcel.const import DOMAIN
+
+    debug_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "token": {
+                "access_token": "tok",
+                "refresh_token": "rtok",
+                "expires_in": 3600,
+            },
+            "api_key": "test-api-key",
+        },
+        options={
+            "poll_interval": 30,
+            "debug_mode": True,
+        },
+    )
+    debug_entry.add_to_hass(hass)
+
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=(
+            [{"id": "seen_in_debug"}],
+            "subject:(tracking)",
+        )
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": "seen_in_debug",
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/plain", "body": {"data": ""}},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+
+        coord = GmailCoordinator(hass, debug_entry)
+        await coord._async_load_store()
+        # Pre-seed the message as seen
+        coord._mark_message_seen("seen_in_debug")
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    # In debug mode, seen_in_debug must still be fetched
+    call_args = [call.args[1] for call in mock_gmail.async_get_message.call_args_list]
+    assert "seen_in_debug" in call_args
+
+
+async def test_processed_message_id_added_to_seen_cache_after_no_match(hass, mock_config_entry):
+    """A message that exits via no_match path is added to the seen cache."""
+    mock_config_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=([{"id": "msg_nomatch"}], "subject:(tracking)")
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": "msg_nomatch",
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/html", "body": {"data": "PGh0bWw+PC9odG1sPg=="}},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    assert "msg_nomatch" in coord._seen_message_ids
+
+
+# ---------------------------------------------------------------------------
+# Phase 27 Plan 03 Task 2: Ollama fallback gatekeeper on Stage-1 miss
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_stage2_entry() -> MockConfigEntry:
+    """MockConfigEntry with stage2 enabled (ollama_url in options)."""
+    from custom_components.shop2parcel.const import (
+        CONF_CUSTOM_FIELDS,
+        CONF_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT,
+        CONF_OLLAMA_URL,
+        CONF_QUEUE_MAXLEN,
+        DEFAULT_OLLAMA_MODEL,
+        DEFAULT_OLLAMA_TIMEOUT,
+        DEFAULT_QUEUE_MAXLEN,
+        DOMAIN,
+    )
+
+    return MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "auth_implementation": DOMAIN,
+            "token": {
+                "access_token": "fake-access-token",
+                "refresh_token": "fake-refresh-token",
+                "expires_at": 9999999999.0,
+                "token_type": "Bearer",
+                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+            },
+            "api_key": "test-parcelapp-key",
+        },
+        options={
+            CONF_OLLAMA_URL: "http://localhost:11434",
+            CONF_OLLAMA_MODEL: "qwen3.5:2b",
+            CONF_OLLAMA_TIMEOUT: 60,
+            CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+            CONF_CUSTOM_FIELDS: [],
+        },
+        unique_id="fallback@gmail.com",
+    )
+
+
+def _make_stage1_miss_poll(msg_id: str = "msg_miss"):
+    """Build mock gmail client + parser returning a Stage-1 miss for one message."""
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=([{"id": msg_id}], "subject:(tracking)")
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": msg_id,
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/html", "body": {"data": "PGh0bWw+PC9odG1sPg=="}},
+        }
+    )
+    return mock_gmail
+
+
+def _common_fallback_patches(mock_stage2_entry, mock_gmail):
+    """Return the common patch context for fallback gatekeeper tests."""
+    from unittest.mock import patch
+
+    return (
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>non-template body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+    )
+
+
+async def _build_fallback_coord(hass, entry, mock_gmail, parser_result):
+    """Construct and initialise a GmailCoordinator with fake gmail + Stage-1-miss parser."""
+    coord = GmailCoordinator(hass, entry)
+    await coord._async_load_store()
+    coord._email_client = mock_gmail
+    return coord
+
+
+async def test_fallback_valid_tracking_enqueues_stage2_job(hass, mock_stage2_entry):
+    """Phase 27 (convergence): Stage-1 miss + valid tracking -> Stage2Job enqueued, msg NOT
+    marked seen (it converges to seen on a later poll via the tracking-number dedup once the
+    worker has POSTed — marking at enqueue would lose deferred/QueueFull siblings)."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_valid")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>non-template body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2") as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        valid_result = Stage2Result(
+            locked={
+                "tracking_number": "1Z999AA10123456784",
+                "carrier_name": "UPS",
+                "order_name": "#1234",
+            },
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor.async_extract = AsyncMock(return_value=valid_result)
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        # Manually wire stage2 state (mirrors what async_setup_entry does)
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    # Valid tracking: _enqueue_stage2 must be called once
+    assert mock_enqueue.called, "Expected _enqueue_stage2 to be called for valid fallback tracking"
+    # Convergence: the message is NOT marked seen at enqueue — it is re-fetched next poll and
+    # marked seen via the dedup-skip branch once the worker has POSTed the tracking number.
+    assert "msg_fb_valid" not in coord._seen_message_ids
+
+
+async def test_fallback_queuefull_does_not_mark_seen(hass, mock_stage2_entry):
+    """Finding #1 (iter 2): when the Stage-2 queue is full the fallback enqueue returns False
+    (job dropped, no worker run). The message must NOT be marked seen — otherwise the
+    seen-ID gate filters it forever and the real shipment is lost. It must stay re-fetchable."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_qfull")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>non-template body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        # Simulate QueueFull: _enqueue_stage2 returns False.
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=False) as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1234",
+                },
+                custom={},
+                passes_used=1,
+                latency_ms=10.0,
+            )
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    assert mock_enqueue.called  # enqueue WAS attempted
+    # ...but it returned False (QueueFull), so the message stays re-fetchable.
+    assert "msg_fb_qfull" not in coord._seen_message_ids
+
+
+async def test_fallback_skips_already_submitted_tracking(hass, mock_stage2_entry):
+    """Finding #5 (iter 2): a fallback tracking number already in _submitted_tracking_numbers
+    must NOT be re-enqueued/re-POSTed (mirrors the main loop's dedup guard) — it is terminal,
+    so the message is marked seen without enqueuing."""
+    from custom_components.shop2parcel.const import normalize_tracking_number
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_dupe")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>non-template body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2") as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1234",
+                },
+                custom={},
+                passes_used=1,
+                latency_ms=10.0,
+            )
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Tracking number already forwarded in a prior poll.
+        coord._submitted_tracking_numbers[normalize_tracking_number("1Z999AA10123456784")] = None
+        await coord._async_update_data()
+
+    # Already submitted: must NOT enqueue, but the message is terminal → marked seen.
+    mock_enqueue.assert_not_called()
+    assert "msg_fb_dupe" in coord._seen_message_ids
+
+
+async def test_fallback_extractor_none_not_marked_seen(hass, mock_stage2_entry):
+    """Finding #523 (iter 3): when stage2 is enabled but _extractor is transiently None
+    (stop/reload race), a Stage-1-miss message must NOT be cached as seen — it must stay
+    re-fetchable so the gatekeeper runs once the extractor is restored."""
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_noextractor")
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = None  # stop/reload race: extractor torn down, flag still set
+        await coord._async_update_data()
+
+    assert "msg_fb_noextractor" not in coord._seen_message_ids
+
+
+async def test_fallback_unexpected_exception_does_not_abort_poll(hass, mock_stage2_entry):
+    """Finding #505 (iter 3): an unexpected (non-Ollama) error in fallback extraction must
+    not propagate out and abort the whole poll. The poll completes, a later message is still
+    processed, and the failing message is left un-cached for retry."""
+    mock_stage2_entry.add_to_hass(hass)
+    # Two messages: the first fails extraction unexpectedly, the second is a clean no-match.
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=([{"id": "msg_boom"}, {"id": "msg_ok"}], "subject:(tracking)")
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": "x",
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/html", "body": {"data": "PGh0bWw+PC9odG1sPg=="}},
+        }
+    )
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        # Unexpected, non-Ollama exception (e.g. a bug / aiohttp error) on the first extract.
+        mock_extractor.async_extract = AsyncMock(side_effect=RuntimeError("boom"))
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Must NOT raise — the poll completes despite the unexpected extraction error.
+        await coord._async_update_data()
+
+    # Both messages were processed (extractor called twice), and the failing message is
+    # left un-cached so it retries next poll.
+    assert mock_extractor.async_extract.await_count == 2
+    assert "msg_boom" not in coord._seen_message_ids
+
+
+async def test_stage2_hit_not_marked_seen_until_converged(hass, mock_stage2_entry):
+    """Convergence (findings #1/#594/#1516): a Stage-1-HIT stage2-enabled message is enqueued
+    but NEITHER marked seen NOR pinned in the in-flight gate — Stage-1 can be multi-shipment,
+    so pinning would lose a QueueFull sibling. It is re-fetched next poll and converges to
+    seen via the tracking-number dedup once the worker has POSTed."""
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_s1hit")
+    hit = ShipmentData(
+        tracking_number="1Z999AA10123456784",
+        carrier_name="UPS",
+        order_name="#1234",
+        message_id="msg_s1hit",
+        email_date=1700000000,
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(hit)
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        await coord._async_update_data()
+
+    mock_enqueue.assert_called_once()
+    # Stage-1 uses pure convergence: not persisted-seen AND not pinned in-flight (multi-shipment
+    # safe). It converges to seen on a later poll via the tracking-number dedup-skip branch.
+    assert "msg_s1hit" not in coord._seen_message_ids
+    assert "msg_s1hit" not in coord._inflight_message_ids
+
+
+async def test_fallback_enqueue_marks_inflight_not_seen(hass, mock_stage2_entry):
+    """Round-5: a fallback (single-shipment) enqueue pins the message in the in-memory in-flight
+    gate (so Ollama is not re-run on it every poll) but does NOT persist it as seen — it
+    converges to seen via the dedup-skip once the worker POSTs. Uses the real _enqueue_stage2."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_inflight")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1234",
+                },
+                custom={},
+                passes_used=1,
+                latency_ms=10.0,
+            )
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Provide a real queue so the real _enqueue_stage2 can put_nowait.
+        import asyncio as _asyncio
+
+        coord._stage2_queue = _asyncio.Queue(maxsize=100)
+        await coord._async_update_data()
+
+    assert "msg_fb_inflight" not in coord._seen_message_ids
+    assert "msg_fb_inflight" in coord._inflight_message_ids
+
+
+async def test_transient_failure_marks_inflight_not_seen(hass, mock_stage2_entry):
+    """Round-4 fix (#353/#314): a transient inline failure (here: no extractable body) must
+    NOT be permanently cached in _seen_message_ids — it goes to the in-memory in-flight gate
+    so a restart / FIFO eviction re-evaluates it and can recover a transient miss."""
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_nohtml")
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        # extract_html_body returns empty → no_html_body branch.
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="",
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_text_body",
+            return_value="",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        await coord._async_update_data()
+
+    assert "msg_nohtml" not in coord._seen_message_ids
+    assert "msg_nohtml" in coord._inflight_message_ids
+
+
+async def test_fallback_invalid_tracking_no_enqueue_but_cached(hass, mock_stage2_entry):
+    """Phase 27: Stage-1 miss + extractor returns null/invalid tracking -> no enqueue + msg cached."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_invalid")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>order confirm</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2") as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        null_result = Stage2Result(
+            locked={"tracking_number": None, "carrier_name": None, "order_name": None},
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor.async_extract = AsyncMock(return_value=null_result)
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    # No enqueue for invalid/null tracking
+    mock_enqueue.assert_not_called()
+    # But the message IS cached (genuine reject decision)
+    assert "msg_fb_invalid" in coord._seen_message_ids
+
+
+async def test_fallback_transient_error_not_cached(hass, mock_stage2_entry):
+    """Phase 27: Stage-1 miss + OllamaTransientError -> msg_id NOT cached (retried next poll)."""
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_transient")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(side_effect=OllamaTransientError("timeout"))
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    # Transient error: msg_id must NOT be cached (so it retries next poll)
+    assert "msg_fb_transient" not in coord._seen_message_ids
+
+
+async def test_fallback_failure_escalates_consecutive_streak(hass, mock_stage2_entry):
+    """Finding #2: a fallback Ollama failure must increment the consecutive-failure streak
+    and emit a stage2_failed event — the same loud-surface path the worker uses — instead
+    of being swallowed at DEBUG. With the subject-only query routing most extraction through
+    the fallback, a swallowed failure would mean a silent Ollama outage with no alert."""
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_escalate")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(side_effect=OllamaTransientError("timeout"))
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    # Failure surfaced: streak incremented, lifetime counter bumped, and an event emitted.
+    assert coord._stage2_consecutive_failures == 1
+    assert coord._diagnostics.stage2_failed_total == 1
+    assert any(e["outcome"] == "stage2_failed" for e in coord._diagnostics.scan_events)
+    # Still not cached — retried next poll.
+    assert "msg_fb_escalate" not in coord._seen_message_ids
+
+
+async def test_fallback_schema_error_not_cached(hass, mock_stage2_entry):
+    """Phase 27: Stage-1 miss + OllamaSchemaError -> msg_id NOT cached (same as transient)."""
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_fb_schema")
+    mock_extractor = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        mock_extractor.async_extract = AsyncMock(side_effect=OllamaSchemaError("malformed"))
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    assert "msg_fb_schema" not in coord._seen_message_ids
+
+
+async def test_fallback_per_poll_cap(hass, mock_stage2_entry):
+    """Phase 27: with 25 Stage-1-miss messages, exactly 10 fallback extractions run per poll."""
+    from custom_components.shop2parcel.const import MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    mock_extractor = AsyncMock()
+
+    # 25 messages all missing Stage-1
+    messages = [{"id": f"msg_cap_{i}"} for i in range(25)]
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(return_value=(messages, "subject:(tracking)"))
+    mock_gmail.async_get_message = AsyncMock(
+        side_effect=lambda _creds, msg_id: {
+            "id": msg_id,
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/html", "body": {"data": "PGh0bWw+PC9odG1sPg=="}},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2"),
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(
+            None, skip_reason="no_match"
+        )
+        null_result = Stage2Result(
+            locked={"tracking_number": None, "carrier_name": None, "order_name": None},
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor.async_extract = AsyncMock(return_value=null_result)
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        await coord._async_update_data()
+
+    # Only MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions should run
+    assert mock_extractor.async_extract.await_count == MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL, (
+        f"Expected {MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL} extractions, "
+        f"got {mock_extractor.async_extract.await_count}"
+    )
+    # The 15 cap-skipped messages must NOT be cached (so they retry next poll)
+    cached_cap_msgs = [mid for mid in coord._seen_message_ids if mid.startswith("msg_cap_")]
+    assert len(cached_cap_msgs) == MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL, (
+        f"Expected {MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL} cached msg IDs (only decided ones), "
+        f"got {len(cached_cap_msgs)}"
+    )
+
+
+async def test_fallback_counter_resets_each_poll(hass, mock_stage2_entry):
+    """Phase 27: _stage2_fallback_extractions_this_poll is reset to 0 at the start of each poll."""
+    mock_stage2_entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        # Simulate counter at cap from a previous poll
+        coord._stage2_fallback_extractions_this_poll = 10
+
+        # Calling _reset_stage2_poll_counters (called at start of each poll) must zero it
+        coord._reset_stage2_poll_counters()
+        assert coord._stage2_fallback_extractions_this_poll == 0
