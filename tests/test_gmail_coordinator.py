@@ -280,3 +280,196 @@ async def test_fallback_gate_pass_spaced_usps_uses_clean_form(hass, mock_stage2_
     assert coord._diagnostics.carrier_format_rejected_total == 0, (
         "carrier_format_rejected_total must remain 0 for a valid USPS tracking number"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 28 quick-260630-n3k Task 2 (WR-03): carrier-format gate before the
+# Gmail Stage-1 inline POST.
+# ---------------------------------------------------------------------------
+
+
+def _make_stage1_hit_poll(
+    msg_id: str,
+    tracking_number: str,
+    carrier_name: str = "UPS",
+) -> MagicMock:
+    """Build a mock GmailClient returning a Stage-1-hit message with the given TN."""
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        return_value=([{"id": msg_id}], "subject:(tracking)")
+    )
+    mock_gmail.async_get_message = AsyncMock(
+        return_value={
+            "id": msg_id,
+            "internalDate": "1700000000000",
+            "payload": {"mimeType": "text/html", "body": {"data": "PGh0bWw+PC9odG1sPg=="}},
+        }
+    )
+    return mock_gmail
+
+
+def _make_parse_result_hit(tracking_number: str, carrier_name: str = "UPS"):
+    """Build a ParseResult with a Stage-1 shipment hit."""
+    from custom_components.shop2parcel.api.email_parser import ParseResult
+
+    from custom_components.shop2parcel.api.email_parser import ShipmentData as SD
+
+    return ParseResult(
+        shipment=SD(
+            tracking_number=tracking_number,
+            carrier_name=carrier_name,
+            order_name="#test",
+            message_id="msg_hit",
+            email_date=1700000000,
+        ),
+        skip_reason=None,
+        strategy_used="html_template",
+        keyword_hits={
+            "tracking_regex": False,
+            "order_regex": False,
+            "carrier_regex": False,
+        },
+    )
+
+
+@pytest.fixture
+def mock_no_stage2_entry() -> MockConfigEntry:
+    """MockConfigEntry with Stage-2 DISABLED (no ollama_url in options)."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "auth_implementation": DOMAIN,
+            "token": {
+                "access_token": "fake-access-token",
+                "refresh_token": "fake-refresh-token",
+                "expires_at": 9999999999.0,
+                "token_type": "Bearer",
+                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+            },
+            "api_key": "test-parcelapp-key",
+        },
+        options={},  # no CONF_OLLAMA_URL → stage2_enabled stays False
+        unique_id="gmail-inline-gate@test.com",
+    )
+
+
+async def test_gmail_inline_rejects_malformed_tracking_no_post(
+    hass, mock_no_stage2_entry, caplog
+):
+    """WR-03 RED: Stage-1 shipment with tracking_number that fails validate_carrier_format
+    must NOT trigger async_add_delivery, must increment carrier_format_rejected_total by 1,
+    and must NOT write the value to _submitted_tracking_numbers.
+
+    RED: fails because there is currently no carrier-format gate before the inline POST —
+    the malformed TN reaches async_add_delivery.
+    """
+    mock_no_stage2_entry.add_to_hass(hass)
+    msg_id = "msg_wr03_reject"
+    mock_gmail = _make_stage1_hit_poll(msg_id, "NOTATRACKINGNUM")
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
+        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit(
+            "NOTATRACKINGNUM"
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_no_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        # stage2 disabled (default, no ollama_url set)
+
+        with caplog.at_level(logging.DEBUG):
+            await coord._async_update_data()
+
+    # (a) async_add_delivery must NEVER be called.
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+
+    # (b) rejection counter must have incremented by exactly 1.
+    assert coord._diagnostics.carrier_format_rejected_total == 1, (
+        f"Expected carrier_format_rejected_total=1, got "
+        f"{coord._diagnostics.carrier_format_rejected_total}"
+    )
+    assert coord._diagnostics.last_carrier_format_rejected_reason == "no_carrier_match"
+
+    # (c) the malformed TN must NOT be in _submitted_tracking_numbers.
+    assert all(
+        "NOTATRACKINGNUM" not in str(k) for k in coord._submitted_tracking_numbers
+    ), "Malformed TN must not be written to _submitted_tracking_numbers"
+
+    # (d) DEBUG-only: the cleaned value must not appear in INFO+ logs.
+    cleaned = "NOTATRACKINGNUM"
+    info_plus = [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert not any(cleaned in r.getMessage() for r in info_plus), (
+        f"Rejected value must not appear in INFO+ logs"
+    )
+
+
+async def test_gmail_inline_posts_clean_canonical_form(hass, mock_no_stage2_entry):
+    """WR-03 / D-03 RED: Stage-1 shipment with a strippable-separator valid TN must POST
+    the clean canonical form (no spaces) to async_add_delivery.
+
+    RED: fails because there is currently no gate to strip the separator before POSTing —
+    the raw spaced value is passed to async_add_delivery.
+    """
+    mock_no_stage2_entry.add_to_hass(hass)
+    spaced_ups = "1Z 999AA1 0123456784"
+    expected_clean = "1Z999AA10123456784"
+    msg_id = "msg_wr03_clean"
+    mock_gmail = _make_stage1_hit_poll(msg_id, spaced_ups)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
+        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit(spaced_ups)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_no_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    # async_add_delivery must be called with the CLEAN form (no spaces).
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args[1]
+    assert call_kwargs["tracking_number"] == expected_clean, (
+        f"Expected tracking_number='{expected_clean}', got {call_kwargs['tracking_number']!r}"
+    )
