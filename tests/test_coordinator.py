@@ -4270,9 +4270,9 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry)
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
 
-        # Seed one pending post
+        # Seed one pending post — use a real UPS tracking number that passes the strict gate.
         drain_shipment = ShipmentData(
-            tracking_number="DRAIN_TN_001",
+            tracking_number="1Z999AA10123456784",  # real UPS format — passes validate_carrier_format
             carrier_name="UPS",
             order_name="#8001",
             message_id="msg-drain-1",
@@ -4313,7 +4313,7 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry)
         coord3._last_forwarded_ts = coord._last_forwarded_ts
 
         already_added_drain = ShipmentData(
-            tracking_number="DRAIN_ALREADY_002",
+            tracking_number="1Z999AA10123456785",  # different real UPS number — passes gate
             carrier_name="UPS",
             order_name="#8002",
             message_id="msg-drain-2",

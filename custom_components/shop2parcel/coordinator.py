@@ -23,7 +23,7 @@ import re
 import time as _time
 from collections import OrderedDict, deque
 from contextlib import suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from typing import Any
@@ -38,7 +38,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api.carrier_codes import normalize_carrier
-from .api.email_parser import ShipmentData
+from .api.email_parser import ShipmentData, validate_carrier_format
 from .api.exceptions import (
     OllamaSchemaError,
     OllamaTransientError,
@@ -311,6 +311,11 @@ class PollStats:
     stage2_llm_latency_ms_min: float | None = None
     stage2_llm_latency_ms_max: float | None = None
     stage2_fence_retry_total: int = 0
+    # Phase 28 Plan 03 (R3/D-08): carrier-format rejection counter. In-memory,
+    # not persisted — resets to 0 on HA restart (same lifecycle as all other *_total fields).
+    carrier_format_rejected_total: int = 0
+    last_carrier_format_rejected_value: str | None = None  # CLEANED canonical form (D-06)
+    last_carrier_format_rejected_reason: str | None = None
 
     def record_llm_call(self, latency_ms: float, *, fence_retry: bool) -> None:
         """Accumulate one successful LLM call into the latency and retry counters."""
@@ -323,6 +328,16 @@ class PollStats:
             self.stage2_llm_latency_ms_max = latency_ms
         if fence_retry:
             self.stage2_fence_retry_total += 1
+
+    def record_carrier_format_rejection(self, clean_value: str, reason: str) -> None:
+        """Increment the carrier-format rejection counter and record the last cleaned value/reason.
+
+        Must only be called from HA-holding callers (coordinator.py) — not from merge.py (D-02).
+        Mirrors record_llm_call: in-memory accumulator, non-persisted (D-08).
+        """
+        self.carrier_format_rejected_total += 1
+        self.last_carrier_format_rejected_value = clean_value
+        self.last_carrier_format_rejected_reason = reason
 
 
 class Shop2ParcelStore(Store):
@@ -1193,7 +1208,32 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
                 break  # cap reached; remaining items wait for next poll
 
-            normalized_tn = normalize_tracking_number(merged_shipment.tracking_number)
+            # Phase 28 Plan 03 (D-04): defensive carrier-format re-gate before each drain POST.
+            # A pending item may have been queued before the strict gate was deployed, or may
+            # carry a malformed value that slipped through an earlier validation gap.
+            # On reject: discard the item (it will never pass — no retry benefit) and continue.
+            # On pass: use the CLEAN canonical form for both dedup key AND the POST body (D-03).
+            drain_tn_raw = merged_shipment.tracking_number or ""
+            drain_clean, drain_ok, drain_reject_reason = validate_carrier_format(drain_tn_raw)
+            if not drain_ok:
+                _LOGGER.debug(
+                    "Stage-2 drain: carrier-format gate rejected pending tn='%s' (reason=%s)"
+                    " — removing from _pending_posts without POST",
+                    drain_clean,
+                    drain_reject_reason,
+                )
+                self._diagnostics.record_carrier_format_rejection(
+                    drain_clean, drain_reject_reason or "no_carrier_match"
+                )
+                del self._pending_posts[storage_key]
+                continue
+
+            # Use the gate-clean form as the canonical tracking number for dedup AND POST (D-03).
+            # Replace the shipment's tracking_number with the clean form so the POST body
+            # and the dedup write both use the identical separator-free canonical string.
+            merged_shipment = dc_replace(merged_shipment, tracking_number=drain_clean)
+
+            normalized_tn = drain_clean  # gate-clean == dedup-clean (D-03, no normalize_tracking_number divergence)
             carrier_code = normalize_carrier(merged_shipment.carrier_name)
 
             _LOGGER.debug(
@@ -1368,7 +1408,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             )
 
             # MRG-02: merge Stage-2 result into Stage-1 shipment.
-            merged_shipment, conflicts = merge_llm_authoritative(job.shipment, stage2_result)
+            merged_shipment, conflicts, gate_rejections = merge_llm_authoritative(
+                job.shipment, stage2_result
+            )
+
+            # Phase 28 Plan 03 (R3/D-06/D-07): record carrier-format rejections that
+            # occurred on the MRG-04 promotion path inside merge.py.  The counter
+            # increment stays here (HA-holding caller) per the D-02 HA-free boundary.
+            for rej in gate_rejections:
+                self._diagnostics.record_carrier_format_rejection(
+                    rej["clean"], rej["reason"]
+                )
+                _LOGGER.debug(
+                    "Stage-2 worker: carrier-format gate rejected promotion of '%s' (reason=%s)",
+                    rej["clean"],
+                    rej["reason"],
+                )
 
             # MRG-03: emit exactly one stage2_conflict event if LLM disagreed.
             if conflicts:

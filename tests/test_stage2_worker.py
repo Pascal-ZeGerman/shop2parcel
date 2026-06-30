@@ -751,10 +751,15 @@ async def test_worker_does_not_swallow_cancelled_error_during_process_job(
 # ---------------------------------------------------------------------------
 
 
-async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_config_entry):
-    """I6 precondition: When stage1.tracking_number is None, _async_process_stage2_job
-    raises AssertionError — coordinators only enqueue emails with a resolved Stage-1
-    tracking number (I6 contract). Stage-2 promotion of None is a contract violation."""
+async def test_merge_stage1_none_gate_failing_stage2_no_post(hass, mock_stage2_config_entry):
+    """Phase 28 Plan 03 / MRG-04: When stage1.tracking_number is None AND stage2 returns a
+    non-carrier tracking number (gate-failing), the job produces NO POST.
+
+    The I6 AssertionError was replaced by the MRG-04 strict carrier-format gate.
+    A gate-failing Stage-2 value (e.g. 'STAGE2TN123456' — no carrier pattern match)
+    is silently discarded, merged.tracking_number stays None, and the skip-POST
+    guard (tracking_number is None → no POST) prevents the parcelapp call.
+    """
     from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
@@ -776,7 +781,8 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
 
-        # Stage-2 provides a tracking number; Stage-1 has None.
+        # Stage-2 provides a non-carrier tracking number; Stage-1 has None.
+        # "STAGE2TN123456" passes _SANITY_RE but fails the strict carrier-format gate.
         stage2_result = Stage2Result(
             locked={"tracking_number": "STAGE2TN123456", "carrier_name": None, "order_name": None},
             custom={},
@@ -790,7 +796,7 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
         await coord._async_load_store()
         await coord.async_start_stage2()
 
-        # Stage-1 tracking_number is None — stage2 should promote.
+        # Stage-1 tracking_number is None — MRG-04 strict gate fires on the promotion path.
         shipment = ShipmentData(
             tracking_number=None,
             carrier_name="UPS",
@@ -806,10 +812,10 @@ async def test_merge_promotes_stage2_value_when_stage1_none(hass, mock_stage2_co
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
         )
-        with pytest.raises(AssertionError, match="stage1.tracking_number must be non-None"):
-            await coord._async_process_stage2_job(job)
+        # No AssertionError raised — the gate replaces the old I6 assert.
+        await coord._async_process_stage2_job(job)
 
-        # Per I6 contract, POST must NOT be called when stage1.tracking_number is None.
+        # Gate rejected the non-carrier value → merged.tracking_number=None → skip-POST guard fires.
         mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
 
 
@@ -2856,7 +2862,7 @@ async def test_pending_post_not_re_extracted_on_drain(hass, mock_stage2_config_e
         # Pre-populate _pending_posts with an already-merged shipment.
         merged_shipment = _make_shipment(message_id="msg-pending-1")
         merged_shipment_updated = ShipmentData(
-            tracking_number="1ZPENDING123",
+            tracking_number="1Z999AA10123456784",  # real UPS format — passes strict gate
             carrier_name="UPS",
             order_name="#9001",
             message_id="msg-pending-1",
@@ -2914,9 +2920,19 @@ async def test_drain_posts_pending_when_quota_freed(hass, mock_stage2_config_ent
         coord._quota_exhausted_until = int(stdlib_time.time()) - 1
 
         # Populate 7 pending items — more than MAX_STAGE2_POSTS_PER_POLL (= 5).
+        # Use real UPS tracking numbers that pass the strict carrier-format gate.
+        _ups_drain_tns = [
+            "1Z999AA10123456784",
+            "1Z999AA10123456785",
+            "1Z999AA10123456786",
+            "1Z999AA10123456787",
+            "1Z999AA10123456788",
+            "1Z999AA10123456789",
+            "1Z999AA10123456790",
+        ]
         for i in range(7):
             shipment = ShipmentData(
-                tracking_number=f"1ZDRAIN{i:04d}",
+                tracking_number=_ups_drain_tns[i],
                 carrier_name="UPS",
                 order_name=f"#{9000 + i}",
                 message_id=f"msg-drain-{i}",
@@ -3222,7 +3238,7 @@ async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_st
 
         # Merge returns a shipment with tracking_number=None — this is the skip-POST scenario.
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [])
+        mock_merge.return_value = (none_shipment, [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -3266,7 +3282,7 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [])
+        mock_merge.return_value = (none_shipment, [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -3315,7 +3331,7 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [])
+        mock_merge.return_value = (none_shipment, [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
