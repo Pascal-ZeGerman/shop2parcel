@@ -32,23 +32,18 @@ This keeps the module HA-free per **D-02** and CONTEXT.md decisions
 ``Stage2Result.custom`` is propagated unconditionally into ``ShipmentData.custom_attributes``
 and surfaced as HA sensor attributes (FLD-03). Custom fields are never POSTed to parcelapp.net.
 
-``_SANITY_RE`` is retained (not deleted) because ``gmail_coordinator.py`` still
-imports it for the Stage-1 fallback path.  Plan 04 removes that import.
+All four Ollama-derived POST paths now go through the strict carrier-format gate
+(``validate_carrier_format``).  Phase 28 Plan 04 completed the fourth path —
+the ``gmail_coordinator.py`` Stage-1-miss inline fallback.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import replace
 
 from .api.email_parser import ShipmentData, validate_carrier_format
 from .const import LOCKED_OLLAMA_FIELDS
 from .extractors.types import Stage2Result
-
-# MRG-04 legacy: loose sanity regex retained for gmail_coordinator.py import.
-# Plan 04 removes the gmail_coordinator.py import and this definition.
-# DO NOT use _SANITY_RE in merge logic — validate_carrier_format is the active gate.
-_SANITY_RE = re.compile(r"^[A-Za-z0-9\- ]{6,40}$")
 
 
 def merge_llm_authoritative(

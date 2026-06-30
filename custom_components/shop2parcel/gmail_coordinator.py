@@ -19,7 +19,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api.carrier_codes import normalize_carrier
-from .api.email_parser import EmailParser, ParseResult, ShipmentData
+from .api.email_parser import EmailParser, ParseResult, ShipmentData, validate_carrier_format
 from .api.exceptions import (
     GmailAuthError,
     GmailTransientError,
@@ -55,7 +55,6 @@ from .coordinator import (
     _next_midnight_utc,
     _sanitise_parser_error,
 )
-from .api.email_parser import validate_carrier_format
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -502,10 +501,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     )
 
                     # Extract + validate the tracking number from the Ollama result.
-                    # Phase 28 Plan 04 (R1/R2/R3): strict carrier-format gate replaces
-                    # the loose _SANITY_RE check. validate_carrier_format strips internal
-                    # separators ([ -]) and uppercases before pattern-matching, then returns
-                    # the canonical clean form used for dedup + enqueue + ShipmentData (D-03).
+                    # Phase 28 Plan 04 (R1/R2/R3): strict carrier-format gate via
+                    # validate_carrier_format strips internal separators ([ -]) and
+                    # uppercases before pattern-matching, then returns the canonical
+                    # clean form used for dedup + enqueue + ShipmentData (D-03).
                     tn = (result_fb.locked.get("tracking_number") or "").strip()
                     fb_clean, fb_ok, fb_reason = validate_carrier_format(tn)
                     if not fb_ok:
@@ -515,7 +514,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         # This is a terminal decision (mirror the no-match branch below):
                         # mark seen so the gatekeeper does not re-run Ollama on this
                         # non-shipment email every poll.
-                        self._diagnostics.record_carrier_format_rejection(fb_clean, fb_reason)
+                        self._diagnostics.record_carrier_format_rejection(
+                            fb_clean, fb_reason or "no_carrier_match"
+                        )
                         _LOGGER.debug(
                             "Gmail message %s: fallback carrier-format gate rejected '%s' "
                             "(reason=%s) — cached as rejected",
@@ -584,10 +585,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                                 msg_id,
                                 fb_clean,
                             )
-                    # Note: the old `else` branch for `_SANITY_RE` non-match (soft reject /
-                    # no valid tracking) is now subsumed by `if not fb_ok:` above.
-                    # validate_carrier_format("") and validate_carrier_format(None) both
-                    # return ok=False (reason="empty") so the hard-reject path covers all cases.
+                    # Note: empty or non-carrier strings are handled by the `if not fb_ok:`
+                    # branch above (reason="empty" or "no_carrier_match") — no separate
+                    # soft-reject else-branch is needed.
                     continue
 
                 # stage2 enabled but the extractor is transiently unavailable (stop/reload
