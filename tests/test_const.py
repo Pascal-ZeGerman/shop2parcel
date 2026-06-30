@@ -173,3 +173,48 @@ def test_stage2_notify_cooldown_default():
     from custom_components.shop2parcel.const import STAGE2_NOTIFY_COOLDOWN_S
 
     assert STAGE2_NOTIFY_COOLDOWN_S == 3600
+
+
+# -------- Phase 28 Plan 02 R6: DEFAULT_GMAIL_QUERY full-body (no subject: operator) -
+
+
+def test_default_gmail_query_has_no_subject_operator():
+    """R6: DEFAULT_GMAIL_QUERY must not contain 'subject:' — query must be full-body.
+
+    Subject-only queries miss body-only carrier emails such as USPS Informed
+    Delivery digests where the tracking number appears only in the message body.
+    Removing the subject:(...) wrapper makes Gmail match against the full message.
+    The strict carrier-format pre-POST gate (Plans 01/03/04) is the backstop.
+    """
+    from custom_components.shop2parcel.const import DEFAULT_GMAIL_QUERY
+
+    assert "subject:" not in DEFAULT_GMAIL_QUERY
+
+
+def test_default_gmail_query_contains_all_8_keywords():
+    """R6: All 8 keywords must be present as tokens in DEFAULT_GMAIL_QUERY.
+
+    Keywords: tracking, shipped, shipment, delivery, delivered, parcel, package, order.
+    Each keyword is checked independently so that reordering does not break the test.
+    """
+    from custom_components.shop2parcel.const import DEFAULT_GMAIL_QUERY
+
+    required_keywords = [
+        "tracking",
+        "shipped",
+        "shipment",
+        "delivery",
+        "delivered",
+        "parcel",
+        "package",
+        "order",
+    ]
+    for keyword in required_keywords:
+        assert keyword in DEFAULT_GMAIL_QUERY, (
+            f"Keyword '{keyword}' missing from DEFAULT_GMAIL_QUERY: {DEFAULT_GMAIL_QUERY!r}"
+        )
+
+
+def test_normalize_tracking_number_unchanged_after_r6():
+    """D-03 regression: normalize_tracking_number still strip().upper() after R6 changes."""
+    assert normalize_tracking_number("  9400111899223765496892  ") == "9400111899223765496892"
