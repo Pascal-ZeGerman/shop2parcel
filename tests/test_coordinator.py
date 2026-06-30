@@ -5909,9 +5909,7 @@ def test_pollstats_carrier_format_rejection_counter_initial_value() -> None:
     RED: fails because PollStats does not yet have carrier_format_rejected_total.
     """
     stats = PollStats()
-    assert stats.carrier_format_rejected_total == 0, (
-        "carrier_format_rejected_total must start at 0"
-    )
+    assert stats.carrier_format_rejected_total == 0, "carrier_format_rejected_total must start at 0"
     assert stats.last_carrier_format_rejected_value is None
     assert stats.last_carrier_format_rejected_reason is None
 
@@ -5937,9 +5935,7 @@ def test_pollstats_record_carrier_format_rejection_increments_and_stores() -> No
     assert stats.last_carrier_format_rejected_value == "FAKECODE"
 
 
-async def test_worker_merge_path_carrier_gate_rejects_order_number(
-    hass, mock_stage2_entry, caplog
-):
+async def test_worker_merge_path_carrier_gate_rejects_order_number(hass, mock_stage2_entry, caplog):
     """R1/R3/D-06/D-07: Worker-merge path increments carrier_format_rejected_total by 1
     when Ollama returns a gate-failing tracking number on a Stage-1-non-None job,
     does NOT call async_add_delivery, and logs at DEBUG only.
@@ -6032,9 +6028,7 @@ async def test_worker_merge_path_carrier_gate_rejects_order_number(
     mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
 
     # At INFO+ level, no log record should contain the rejected (cleaned) value.
-    info_plus_records = [
-        r for r in caplog.records if r.levelno >= logging.INFO
-    ]
+    info_plus_records = [r for r in caplog.records if r.levelno >= logging.INFO]
     rejected_clean = "ORDER12345"
     assert not any(rejected_clean in r.getMessage() for r in info_plus_records), (
         f"Rejected value '{rejected_clean}' must not appear in INFO+ logs (DEBUG only)"

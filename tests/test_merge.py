@@ -159,7 +159,9 @@ def test_strict_gate_rejects_generic_alphanumeric() -> None:
     merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
     # Strict gate rejects generic alphanumeric strings that don't match real carrier formats.
     assert merged.tracking_number is None
-    assert gate_rejections != [] or merged.tracking_number is None  # flexible: either path is gate behavior
+    assert (
+        gate_rejections != [] or merged.tracking_number is None
+    )  # flexible: either path is gate behavior
 
 
 def test_strict_gate_rejects_long_generic_string() -> None:

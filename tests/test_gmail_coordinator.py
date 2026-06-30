@@ -105,9 +105,7 @@ def _make_parse_result_no_match():
 # ---------------------------------------------------------------------------
 
 
-async def test_fallback_gate_reject_order_number_no_enqueue(
-    hass, mock_stage2_entry, caplog
-):
+async def test_fallback_gate_reject_order_number_no_enqueue(hass, mock_stage2_entry, caplog):
     """R1/R3: Ollama fallback returns 'ORDER-12345' (gate-failing) -> no _enqueue_stage2 call,
     carrier_format_rejected_total increments by exactly 1, value appears only in DEBUG.
 
@@ -144,13 +142,9 @@ async def test_fallback_gate_reject_order_number_no_enqueue(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
             return_value="<html>order confirm body</html>",
         ),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.EmailParser"
-        ) as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch(
-            "custom_components.shop2parcel.coordinator.Shop2ParcelStore"
-        ) as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch.object(GmailCoordinator, "_enqueue_stage2") as mock_enqueue,
     ):
         _setup_mock_oauth(mock_oauth)
@@ -197,9 +191,7 @@ async def test_fallback_gate_reject_order_number_no_enqueue(
     )
 
 
-async def test_fallback_gate_pass_spaced_usps_uses_clean_form(
-    hass, mock_stage2_entry
-):
+async def test_fallback_gate_pass_spaced_usps_uses_clean_form(hass, mock_stage2_entry):
     """R2/D-03: Ollama fallback returns spaced USPS number -> enqueued; the value passed to
     _enqueue_stage2 is the separator-free canonical form (gate clean output), not the original
     spaced string.
@@ -241,13 +233,9 @@ async def test_fallback_gate_pass_spaced_usps_uses_clean_form(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
             return_value="<html>usps body</html>",
         ),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.EmailParser"
-        ) as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch(
-            "custom_components.shop2parcel.coordinator.Shop2ParcelStore"
-        ) as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
         patch.object(GmailCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue,
     ):
         _setup_mock_oauth(mock_oauth)
