@@ -1,4 +1,4 @@
-"""Shop2Parcel diagnostic_sensor — 6 diagnostic sensor entity classes (5 PollStats-based + ActivityLogSensor).
+"""Shop2Parcel diagnostic_sensor — 14 diagnostic sensor entity classes (Phase 28 Plan 05: +CarrierFormatRejectionsSensor).
 
 Phase 7 (DIAG-08, DIAG-09, DIAG-10):
 - D-09: All diagnostic sensors registered statically via sensor.py::async_setup_entry.
@@ -303,6 +303,36 @@ class OllamaParseQualitySensor(DiagnosticSensor):
         }
 
 
+class CarrierFormatRejectionsSensor(DiagnosticSensor):
+    """sensor.shop2parcel_carrier_format_rejections — total carrier-format gate rejections (R4).
+
+    native_value: cumulative count of tracking numbers rejected by the carrier-format gate
+    since last HA restart (reads PollStats.carrier_format_rejected_total).
+    extra_state_attributes: last rejected (cleaned) value and rejection reason for triage.
+    Non-persisted: resets on HA restart (D-08).
+    """
+
+    _attr_name = "Carrier Format Rejections"
+    _unique_id_suffix = "carrier_format_rejections"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.diagnostics.carrier_format_rejected_total
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        d = self.coordinator.diagnostics
+        return {
+            "description": (
+                "Total tracking numbers rejected by the carrier-format gate since last HA restart. "
+                "A non-zero count means Stage-2 extracted a value that did not match any known carrier pattern. "
+                "See last_rejected_value and last_rejected_reason for the most recent rejection."
+            ),
+            "last_rejected_value": d.last_carrier_format_rejected_value,
+            "last_rejected_reason": d.last_carrier_format_rejected_reason,
+        }
+
+
 class Stage2ConsecutiveFailuresSensor(DiagnosticSensor):
     """sensor.shop2parcel_stage2_consecutive_failures — current failure streak.
 
@@ -436,6 +466,7 @@ DIAGNOSTIC_SENSOR_UID_SUFFIXES: frozenset[str] = frozenset(
         Stage2Sensor._unique_id_suffix,
         OllamaLatencySensor._unique_id_suffix,
         OllamaParseQualitySensor._unique_id_suffix,
+        CarrierFormatRejectionsSensor._unique_id_suffix,
         Stage2ConsecutiveFailuresSensor._unique_id_suffix,
         EmailsSentToLLMSensor._unique_id_suffix,
         EmailsParsedByLLMSensor._unique_id_suffix,

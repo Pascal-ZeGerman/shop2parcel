@@ -8,7 +8,7 @@ Phase 26 Plan 03 (P26-ENT-01..03, P26-REMOVE-01):
     2. LastForwardedSensor        — TIMESTAMP device class; reads coordinator.last_forwarded_ts
     3. ParcelAppQuotaSensor       — estimate max(0, PARCELAPP_DAILY_LIMIT - used_today)
 
-Phase 7 (D-09/D-13): 13 static diagnostic sensors are still co-registered here.
+Phase 7 (D-09/D-13): 14 static diagnostic sensors are still co-registered here.
 "diagnostic_sensor" is not a built-in HA platform domain and cannot be used
 in PLATFORMS directly — sensors belonging to the "sensor" domain must be
 registered from sensor.py's async_setup_entry.
@@ -31,6 +31,7 @@ from .const import DOMAIN, PARCELAPP_DAILY_LIMIT
 from .coordinator import Shop2ParcelCoordinator
 from .diagnostic_sensor import (
     ActivityLogSensor,
+    CarrierFormatRejectionsSensor,
     EmailsMatchedSensor,
     EmailsParsedByLLMSensor,
     EmailsScannedSensor,
@@ -58,7 +59,7 @@ async def async_setup_entry(
     Pitfall 4: hass.data[DOMAIN][entry.entry_id] is a dict {"coordinator": ..., "cancel_cleanup": ...}
     after Phase 5 changes to __init__.py — use ["coordinator"] key, not bare access.
 
-    Phase 7 (D-09): 13 static diagnostic sensors co-registered here.
+    Phase 7 (D-09): 14 static diagnostic sensors co-registered here.
     Phase 26 Plan 03 (P26-ENT-01..03): 3 primary operational sensors registered here.
     """
     coordinator: Shop2ParcelCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
@@ -71,7 +72,7 @@ async def async_setup_entry(
     # Phase 26 Plan 03 (P26-ENT-01..03): 3 new primary operational sensors appended.
     async_add_entities(
         [
-            # 13 diagnostic sensors
+            # 14 diagnostic sensors
             EmailsScannedSensor(coordinator, entry),
             NewEmailsInspectedSensor(coordinator, entry),
             EmailsMatchedSensor(coordinator, entry),
@@ -81,6 +82,7 @@ async def async_setup_entry(
             Stage2Sensor(coordinator, entry),
             OllamaLatencySensor(coordinator, entry),
             OllamaParseQualitySensor(coordinator, entry),
+            CarrierFormatRejectionsSensor(coordinator, entry),
             Stage2ConsecutiveFailuresSensor(coordinator, entry),
             EmailsSentToLLMSensor(coordinator, entry),
             EmailsParsedByLLMSensor(coordinator, entry),
