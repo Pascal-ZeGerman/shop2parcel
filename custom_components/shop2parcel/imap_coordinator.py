@@ -9,6 +9,7 @@ from __future__ import annotations
 import html as _html_stdlib
 import logging
 import time
+from dataclasses import replace as dc_replace
 from datetime import UTC, datetime
 from typing import cast
 
@@ -18,7 +19,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api.carrier_codes import normalize_carrier
-from .api.email_parser import EmailParser, ParseResult, ShipmentData
+from .api.email_parser import EmailParser, ParseResult, ShipmentData, validate_carrier_format
 from .api.exceptions import (
     ImapAuthError,
     ImapTransientError,
@@ -395,6 +396,33 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     else:
                         _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_quota")
                     continue
+
+                # WR-02/WR-03 symmetry: Defensive carrier-format gate before the IMAP
+                # Stage-1 inline POST. Mirrors the drain re-gate (coordinator.py ~L1216),
+                # the worker re-gate (WR-02), and the Gmail inline gate (WR-03). A
+                # carrier-invalid value is terminal — it can never pass. On reject: record
+                # the counter, log at DEBUG only (D-07/T-28-09), and continue to the next
+                # shipment. IMAP has no msg_pending_retry/msg_enqueued flags and no
+                # post-loop _mark_message_seen call, so the handling is simply record + log
+                # + continue (mirrors the existing IMAP quota-skip / dedup-skip branches).
+                # On pass: rebind shipment to the gate-clean canonical form (D-03) so the
+                # POST body and the success-path dedup write both use the separator-free string.
+                im_clean, im_ok, im_reason = validate_carrier_format(shipment.tracking_number)
+                if not im_ok:
+                    self._diagnostics.record_carrier_format_rejection(
+                        im_clean, im_reason or "no_carrier_match"
+                    )
+                    _LOGGER.debug(
+                        "IMAP UID %s: carrier-format gate rejected tn='%s' (reason=%s)"
+                        " — skipping inline POST (terminal)",
+                        uid_str,
+                        im_clean,
+                        im_reason,
+                    )
+                    continue  # terminal — record + log + continue, no dedup write
+
+                # Rebind shipment to the gate-clean canonical form (D-03).
+                shipment = dc_replace(shipment, tracking_number=im_clean)  # type: ignore[arg-type]
 
                 carrier_code = normalize_carrier(shipment.carrier_name)
                 try:
