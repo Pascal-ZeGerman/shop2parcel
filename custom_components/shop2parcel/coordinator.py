@@ -23,7 +23,8 @@ import re
 import time as _time
 from collections import OrderedDict, deque
 from contextlib import suppress
-from dataclasses import asdict, dataclass, field, replace as dc_replace
+from dataclasses import asdict, dataclass, field
+from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from typing import Any
@@ -69,7 +70,6 @@ from .const import (
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_NOTIFY_COOLDOWN_S,
     STAGE2_NOTIFY_THRESHOLD,
-    normalize_tracking_number,
     stage2_cap_notification_id,
     stage2_failing_notification_id,
 )
@@ -1416,9 +1416,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # occurred on the MRG-04 promotion path inside merge.py.  The counter
             # increment stays here (HA-holding caller) per the D-02 HA-free boundary.
             for rej in gate_rejections:
-                self._diagnostics.record_carrier_format_rejection(
-                    rej["clean"], rej["reason"]
-                )
+                self._diagnostics.record_carrier_format_rejection(rej["clean"], rej["reason"])
                 _LOGGER.debug(
                     "Stage-2 worker: carrier-format gate rejected promotion of '%s' (reason=%s)",
                     rej["clean"],
