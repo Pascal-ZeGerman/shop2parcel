@@ -5896,3 +5896,264 @@ async def test_fallback_counter_resets_each_poll(hass, mock_stage2_entry):
         # Calling _reset_stage2_poll_counters (called at start of each poll) must zero it
         coord._reset_stage2_poll_counters()
         assert coord._stage2_fallback_extractions_this_poll == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 28 Plan 03 RED: PollStats rejection counter, worker/merge gate, drain re-gate
+# ---------------------------------------------------------------------------
+
+
+def test_pollstats_carrier_format_rejection_counter_initial_value() -> None:
+    """R3/D-08: PollStats starts with carrier_format_rejected_total == 0 and None last fields.
+
+    RED: fails because PollStats does not yet have carrier_format_rejected_total.
+    """
+    stats = PollStats()
+    assert stats.carrier_format_rejected_total == 0, (
+        "carrier_format_rejected_total must start at 0"
+    )
+    assert stats.last_carrier_format_rejected_value is None
+    assert stats.last_carrier_format_rejected_reason is None
+
+
+def test_pollstats_record_carrier_format_rejection_increments_and_stores() -> None:
+    """R3/D-08: record_carrier_format_rejection() increments total and stores last value/reason.
+
+    RED: fails because PollStats does not yet have record_carrier_format_rejection().
+    """
+    stats = PollStats()
+    stats.record_carrier_format_rejection("ORDER12345", "no_carrier_match")
+    assert stats.carrier_format_rejected_total == 1, (
+        "carrier_format_rejected_total must be 1 after one rejection"
+    )
+    assert stats.last_carrier_format_rejected_value == "ORDER12345", (
+        "last_carrier_format_rejected_value must be the CLEANED form"
+    )
+    assert stats.last_carrier_format_rejected_reason == "no_carrier_match"
+
+    # Second call accumulates total and overwrites last.
+    stats.record_carrier_format_rejection("FAKECODE", "no_carrier_match")
+    assert stats.carrier_format_rejected_total == 2
+    assert stats.last_carrier_format_rejected_value == "FAKECODE"
+
+
+async def test_worker_merge_path_carrier_gate_rejects_order_number(
+    hass, mock_stage2_entry, caplog
+):
+    """R1/R3/D-06/D-07: Worker-merge path increments carrier_format_rejected_total by 1
+    when Ollama returns a gate-failing tracking number on a Stage-1-non-None job,
+    does NOT call async_add_delivery, and logs at DEBUG only.
+
+    RED: fails because:
+    - carrier_format_rejected_total does not exist on PollStats
+    - merge.py still uses _SANITY_RE (not the strict gate), which PASSES ORDER-12345
+    """
+    from custom_components.shop2parcel.coordinator import Stage2Job
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        # Stage-1 has a valid non-None tracking number (coordinator precondition).
+        # Stage-2 extractor returns a gate-failing value on the tracking_number field.
+        # Since stage1.tracking_number="VALID_TN_STAGE1" is non-None, this is a conflict path —
+        # but we test the case where stage2 returns "ORDER-12345" which differs from stage1.
+        # In the NEW merge behavior, validate_carrier_format is also applied to the Stage-1-None
+        # promotion path. For the worker test, we want to confirm the gate-reject counter fires.
+        # We construct a job where stage1.tracking_number is a valid carrier tracking number AND
+        # stage2 returns "ORDER-12345". The conflict path keeps stage1 — gate is NOT applied there.
+        # So for the GATE to fire in the worker, we need stage1.tracking_number to be effectively
+        # None (so stage2 would promote) — but the I6 assert must be relaxed in GREEN.
+        #
+        # Alternative: test via Stage2Result where stage2 provides "ORDER-12345" as the ONLY TN
+        # candidate (stage1 tn=None is the promotion path). After GREEN removes the assert,
+        # the gate fires and the rejection counter increments.
+        stage2_result = Stage2Result(
+            locked={"tracking_number": "ORDER-12345", "carrier_name": "UPS", "order_name": "#1"},
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=stage2_result)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        # Stage-1 tracking_number=None triggers the promotion path.
+        # After GREEN: the I6 assert is replaced by MRG-04 strict gate logic.
+        shipment = ShipmentData(
+            tracking_number=None,
+            carrier_name="UPS",
+            order_name="#1",
+            message_id="msg-gate-reject",
+            email_date=1700000000,
+        )
+        job = Stage2Job(
+            storage_key="order-12345-key",
+            normalized_tn="ORDER12345",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-gate-msg",
+            meta={"subject": "Your order", "from": "test@example.com"},
+        )
+
+        with caplog.at_level(logging.INFO):
+            # In GREEN this will NOT raise AssertionError; in RED it may raise AssertionError
+            # OR the function call will complete but the rejection counter won't exist.
+            # Either way the assertions below will FAIL in RED.
+            try:
+                await coord._async_process_stage2_job(job)
+            except AssertionError:
+                pass  # In RED the I6 assert fires — the post-call assertions still fail
+
+    # The gate rejection counter must have incremented by exactly 1.
+    assert coord._diagnostics.carrier_format_rejected_total == 1, (
+        "carrier_format_rejected_total must be 1 after worker-merge gate rejection"
+    )
+    # No POST should have been made for the rejected tracking number.
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+
+    # At INFO+ level, no log record should contain the rejected (cleaned) value.
+    info_plus_records = [
+        r for r in caplog.records if r.levelno >= logging.INFO
+    ]
+    rejected_clean = "ORDER12345"
+    assert not any(rejected_clean in r.getMessage() for r in info_plus_records), (
+        f"Rejected value '{rejected_clean}' must not appear in INFO+ logs (DEBUG only)"
+    )
+
+
+async def test_drain_defensive_regate_drops_gate_failing_item(hass, mock_stage2_entry, caplog):
+    """R1/R3/D-04: The drain defensively re-gates each pending post before POSTing.
+
+    A pending item whose tracking_number fails validate_carrier_format must be REMOVED
+    from _pending_posts and NOT POSTed. The rejection counter increments by 1.
+
+    RED: fails because _async_drain_pending_posts does not yet call validate_carrier_format.
+    """
+    mock_stage2_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+
+        # Seed a gate-failing pending post: "ORDER-12345" does not match any carrier pattern.
+        gate_failing_shipment = ShipmentData(
+            tracking_number="ORDER-12345",
+            carrier_name="UPS",
+            order_name="#fail",
+            message_id="msg-drain-gate",
+            email_date=1700000001,
+        )
+        coord._pending_posts = {"drain_gate_fail_key": gate_failing_shipment}
+        coord._quota_exhausted_until = None
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        with caplog.at_level(logging.INFO):
+            await coord._async_drain_pending_posts()
+
+    # Item must be removed from pending posts (not left for retry — it will never pass).
+    assert "drain_gate_fail_key" not in coord._pending_posts, (
+        "Gate-failing pending item must be removed from _pending_posts"
+    )
+    # No POST must have been made.
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+    # Rejection counter must have incremented.
+    assert coord._diagnostics.carrier_format_rejected_total == 1, (
+        "carrier_format_rejected_total must be 1 after drain gate rejection"
+    )
+    # At INFO+ level, no log record should contain the cleaned rejected value.
+    rejected_clean = "ORDER12345"
+    info_plus_records = [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert not any(rejected_clean in r.getMessage() for r in info_plus_records), (
+        f"Rejected value '{rejected_clean}' must not appear in INFO+ logs (DEBUG only)"
+    )
+
+
+async def test_drain_defensive_regate_posts_clean_form_for_valid_item(hass, mock_stage2_entry):
+    """R2/D-03: A pending item with a valid spaced tracking number is POSTed in clean form.
+
+    The drain's re-gate must strip separators and POST the canonical clean form to parcelapp.
+
+    RED: fails because the drain does not yet call validate_carrier_format.
+    """
+    mock_stage2_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+
+        # USPS number with internal spaces — passes strict gate with clean form "94001111222233334444 55" stripped.
+        spaced_tn = "9400 1111 2222 3333 4444 55"
+        clean_tn = "940011112222333344445" + "5"  # separator-stripped form
+        # Correct clean form: remove all spaces -> "940011112222333344445" — wait:
+        # "9400 1111 2222 3333 4444 55" -> strip spaces -> "9400111122223333444455"
+        clean_tn = spaced_tn.replace(" ", "")  # "9400111122223333444455"
+
+        valid_shipment = ShipmentData(
+            tracking_number=spaced_tn,
+            carrier_name="USPS",
+            order_name="#valid",
+            message_id="msg-drain-valid",
+            email_date=1700000002,
+        )
+        coord._pending_posts = {"drain_valid_key": valid_shipment}
+        coord._quota_exhausted_until = None
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        await coord._async_drain_pending_posts()
+
+    # The POST must use the clean (separator-free) form, not the original spaced form.
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
+    posted_tn = call_kwargs.get("tracking_number", "")
+    assert " " not in posted_tn, f"Posted tracking number must have no spaces, got: {posted_tn!r}"
+    assert posted_tn == clean_tn, (
+        f"Drain must POST the clean canonical form '{clean_tn}', got '{posted_tn}'"
+    )

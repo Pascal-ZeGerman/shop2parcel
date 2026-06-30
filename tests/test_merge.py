@@ -295,3 +295,75 @@ def test_shipmentdata_default_custom_attributes_is_empty_dict() -> None:
     """FLD-03 Pitfall 1: Positional 5-arg ShipmentData construction still works; default is {}."""
     s = ShipmentData("1Z" + "A" * 16, "UPS", "#1234", "msg1", 1700000000)
     assert s.custom_attributes == {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 28 Plan 03 RED: MRG-04 strict carrier-format gate tests
+# ---------------------------------------------------------------------------
+# These tests FAIL until Task 2 (GREEN) because:
+# (a) merge_llm_authoritative currently returns a 2-tuple, not 3-tuple
+# (b) the strict validate_carrier_format gate is not yet wired into MRG-04
+# (c) the I6 assertion blocks the Stage-1-None promotion path
+# ---------------------------------------------------------------------------
+
+
+def test_mrg04_strict_gate_rejects_order_number() -> None:
+    """R1/R2: ORDER-12345 on the Stage-1-None promotion path is rejected by validate_carrier_format.
+
+    The merged tracking_number must stay None (not promoted), no conflict entry is emitted,
+    and a gate_rejections signal is returned so the caller can count the rejection.
+    RED: fails because merge_llm_authoritative returns a 2-tuple and _SANITY_RE
+    (not the strict gate) is active — ORDER-12345 passes _SANITY_RE.
+    """
+    # Use a shipment with a valid non-None tracking_number for all other fields.
+    # We are testing Stage-2 returning a BAD tracking_number on a job where stage1
+    # tracking_number is non-None but the Stage-2 proposes a gate-failing override.
+    # In the new MRG-04 design: when stage1.tracking_number IS non-None and stage2.tracking_number
+    # is a gate-failing value, the stage1 value is preserved AND a gate rejection is signaled.
+    # To exercise the pure "promotion path" (stage1 tn=None), the I6 assert must be relaxed.
+    # This test is written for the GREEN state: stage1.tracking_number=None, stage2="ORDER-12345".
+    stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
+    result = _make_result(locked={"tracking_number": "ORDER-12345"})
+
+    # RED: will fail with AssertionError("stage1.tracking_number must be non-None") before
+    # even reaching the 3-tuple unpacking.  That IS the expected RED failure.
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)  # type: ignore[misc]
+
+    assert merged.tracking_number is None, (
+        "Carrier-format gate must discard ORDER-12345 — merged tracking_number stays None"
+    )
+    assert not any(c.get("field") == "tracking_number" for c in conflicts), (
+        "A gate-rejected value must NOT generate a conflict entry"
+    )
+    assert len(gate_rejections) == 1, "Exactly one gate rejection must be signaled"
+    assert gate_rejections[0]["clean"] == "ORDER12345"
+    assert gate_rejections[0]["reason"] == "no_carrier_match"
+
+
+def test_mrg04_strict_gate_passes_usps_with_separators() -> None:
+    """R2/D-03: A USPS number with internal spaces on the promotion path passes the strict gate.
+
+    The promoted tracking_number must be the clean separator-free canonical form (no spaces).
+    RED: fails because merge_llm_authoritative returns a 2-tuple and stage1.tracking_number=None
+    triggers the AssertionError before the gate is reached.
+    """
+    stage1 = _make_shipment(tracking_number=None)  # type: ignore[arg-type]
+    # USPS domestic IMpb — passes _looks_like_tracking() after separator strip.
+    spaced_usps = "9400 1111 2222 3333 4444 55"
+    result = _make_result(locked={"tracking_number": spaced_usps})
+
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)  # type: ignore[misc]
+
+    # The clean form has no spaces.
+    assert merged.tracking_number == "940011112222333344445"[:-1] + "5", (
+        "Promoted value must be the separator-free canonical form"
+    )
+    # More explicit assertion: no spaces/hyphens remain.
+    assert " " not in (merged.tracking_number or ""), (
+        "Promoted tracking_number must contain no space separators"
+    )
+    assert "-" not in (merged.tracking_number or ""), (
+        "Promoted tracking_number must contain no hyphen separators"
+    )
+    assert gate_rejections == [], "Passing USPS number must produce no gate rejections"
+    assert conflicts == []
