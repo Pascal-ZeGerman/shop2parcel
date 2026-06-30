@@ -311,7 +311,6 @@ def _make_stage1_hit_poll(
 def _make_parse_result_hit(tracking_number: str, carrier_name: str = "UPS"):
     """Build a ParseResult with a Stage-1 shipment hit."""
     from custom_components.shop2parcel.api.email_parser import ParseResult
-
     from custom_components.shop2parcel.api.email_parser import ShipmentData as SD
 
     return ParseResult(
@@ -353,9 +352,7 @@ def mock_no_stage2_entry() -> MockConfigEntry:
     )
 
 
-async def test_gmail_inline_rejects_malformed_tracking_no_post(
-    hass, mock_no_stage2_entry, caplog
-):
+async def test_gmail_inline_rejects_malformed_tracking_no_post(hass, mock_no_stage2_entry, caplog):
     """WR-03 RED: Stage-1 shipment with tracking_number that fails validate_carrier_format
     must NOT trigger async_add_delivery, must increment carrier_format_rejected_total by 1,
     and must NOT write the value to _submitted_tracking_numbers.
@@ -380,17 +377,13 @@ async def test_gmail_inline_rejects_malformed_tracking_no_post(
             return_value="<html>shipping body</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
-        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         _setup_mock_oauth(mock_oauth)
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
-        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit(
-            "NOTATRACKINGNUM"
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit("NOTATRACKINGNUM")
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_no_stage2_entry)
@@ -412,15 +405,15 @@ async def test_gmail_inline_rejects_malformed_tracking_no_post(
     assert coord._diagnostics.last_carrier_format_rejected_reason == "no_carrier_match"
 
     # (c) the malformed TN must NOT be in _submitted_tracking_numbers.
-    assert all(
-        "NOTATRACKINGNUM" not in str(k) for k in coord._submitted_tracking_numbers
-    ), "Malformed TN must not be written to _submitted_tracking_numbers"
+    assert all("NOTATRACKINGNUM" not in str(k) for k in coord._submitted_tracking_numbers), (
+        "Malformed TN must not be written to _submitted_tracking_numbers"
+    )
 
     # (d) DEBUG-only: the cleaned value must not appear in INFO+ logs.
     cleaned = "NOTATRACKINGNUM"
     info_plus = [r for r in caplog.records if r.levelno >= logging.INFO]
     assert not any(cleaned in r.getMessage() for r in info_plus), (
-        f"Rejected value must not appear in INFO+ logs"
+        "Rejected value must not appear in INFO+ logs"
     )
 
 
@@ -450,9 +443,7 @@ async def test_gmail_inline_posts_clean_canonical_form(hass, mock_no_stage2_entr
             return_value="<html>shipping body</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"
-        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         _setup_mock_oauth(mock_oauth)

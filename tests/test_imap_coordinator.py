@@ -17,7 +17,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.shop2parcel.const import DOMAIN
 from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -101,26 +100,20 @@ async def test_imap_inline_rejects_malformed_tracking_no_post(
     raw_msg = _make_imap_message(uid=1, tracking_number="NOTATRACKINGNUM")
 
     with (
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.ImapClient"
-        ) as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
         patch(
             "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
             return_value="<html>shipping body</html>",
         ),
         patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.ParcelAppClient"
-        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
-        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(
-            "NOTATRACKINGNUM"
-        )
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result("NOTATRACKINGNUM")
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
@@ -144,9 +137,9 @@ async def test_imap_inline_rejects_malformed_tracking_no_post(
     )
 
     # (c) the malformed TN must NOT be written to _submitted_tracking_numbers.
-    assert all(
-        "NOTATRACKINGNUM" not in str(k) for k in coord._submitted_tracking_numbers
-    ), "Malformed TN must not be written to _submitted_tracking_numbers"
+    assert all("NOTATRACKINGNUM" not in str(k) for k in coord._submitted_tracking_numbers), (
+        "Malformed TN must not be written to _submitted_tracking_numbers"
+    )
 
     # (d) rejected value must not appear in INFO+ logs (DEBUG-only per D-07/T-28-09).
     cleaned = "NOTATRACKINGNUM"
@@ -171,17 +164,13 @@ async def test_imap_inline_posts_clean_canonical_form(hass, mock_imap_no_stage2_
     raw_msg = _make_imap_message(uid=2, tracking_number=spaced_ups)
 
     with (
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.ImapClient"
-        ) as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
         patch(
             "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
             return_value="<html>shipping body</html>",
         ),
         patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
-        patch(
-            "custom_components.shop2parcel.imap_coordinator.ParcelAppClient"
-        ) as mock_parcel_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
