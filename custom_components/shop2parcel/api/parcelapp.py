@@ -31,6 +31,50 @@ _LOGGER = logging.getLogger(__name__)
 ADD_DELIVERY_URL = "https://api.parcel.app/external/add-delivery/"
 VIEW_DELIVERIES_URL = "https://api.parcel.app/external/deliveries/"
 
+_ALREADY_ADDED_MSG = "You have already added this delivery to the app"
+_NO_JSON = object()  # Sentinel: body could not be decoded as JSON.
+
+
+async def _read_error_body(resp: aiohttp.ClientResponse) -> object:
+    """Decode the response body for error extraction.
+
+    Returns the parsed JSON value on success, or the _NO_JSON sentinel when the
+    body is not valid JSON (parse error or wrong content-type).
+
+    Privacy: raw body is never logged — callers only log resp.status.
+    """
+    try:
+        return await resp.json(content_type=None)
+    except (ValueError, aiohttp.ContentTypeError):  # fmt: skip
+        return _NO_JSON
+
+
+def _raise_from_error_body(data: object) -> None:
+    """Resolve error_message from a decoded body and raise the appropriate error.
+
+    Both the 400 branch and the new 2xx success:false branch call this helper so
+    there is a single source of truth for message extraction and exception routing.
+
+    Raises ParcelAppAlreadyAddedError for the documented already-added message;
+    raises ParcelAppInvalidTrackingError for all other cases (including malformed bodies).
+
+    Privacy: data is never logged — callers must preserve status-only logging.
+    """
+    if data is _NO_JSON:
+        raise ParcelAppInvalidTrackingError("Bad request (non-JSON body)")
+    msg = "Bad request"
+    if isinstance(data, dict):
+        msg_value = data.get("error_message")
+        if isinstance(msg_value, str) and msg_value.strip():
+            msg = msg_value
+        # else: keep default — covers None, non-string, empty/whitespace string
+    elif data is not None:
+        # Parsed but not a dict (e.g. a JSON list)
+        msg = "Bad request (unexpected JSON shape)"
+    if msg == _ALREADY_ADDED_MSG:
+        raise ParcelAppAlreadyAddedError(msg)
+    raise ParcelAppInvalidTrackingError(msg)
+
 
 class ParcelAppClient:
     """Async client for parcelapp.net external API.
@@ -92,26 +136,16 @@ class ParcelAppClient:
                         pass  # Non-JSON or wrong content-type body — reset_at stays None.
                     raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
                 if resp.status == 400:
-                    msg = "Bad request"
-                    try:
-                        data = await resp.json(content_type=None)
-                        if isinstance(data, dict):
-                            msg_value = data.get("error_message")
-                            if isinstance(msg_value, str) and msg_value.strip():
-                                msg = msg_value
-                            # else: keep default — covers None, non-string, empty string
-                        else:
-                            msg = "Bad request (unexpected JSON shape)"
-                    except (ValueError, aiohttp.ContentTypeError):  # fmt: skip
-                        msg = "Bad request (non-JSON body)"
-                    if msg == "You have already added this delivery to the app":
-                        raise ParcelAppAlreadyAddedError(msg)
-                    raise ParcelAppInvalidTrackingError(msg)
+                    _raise_from_error_body(await _read_error_body(resp))
                 if resp.status >= 500:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 if 400 <= resp.status < 500:
                     raise ParcelAppTransientError(f"Unexpected client error: HTTP {resp.status}")
-                resp.raise_for_status()
+                # 2xx path: assert success field — a success:false body is a rejected add.
+                # Read body once; if success is not True, route via the shared error helper.
+                raw_2xx = await _read_error_body(resp)
+                if isinstance(raw_2xx, dict) and raw_2xx.get("success") is not True:
+                    _raise_from_error_body(raw_2xx)
         except (TimeoutError, aiohttp.ClientConnectionError) as err:
             raise ParcelAppTransientError(f"Network error: {err}") from err
 
