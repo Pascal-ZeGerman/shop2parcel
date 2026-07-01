@@ -3795,3 +3795,140 @@ async def test_worker_posts_clean_canonical_form(hass, mock_stage2_config_entry)
     assert call_kwargs["tracking_number"] == expected_clean, (
         f"Expected tracking_number='{expected_clean}', got {call_kwargs['tracking_number']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LOH-SUMMARY: description precedence order_summary → order_name → tracking_number
+# ---------------------------------------------------------------------------
+
+
+async def test_description_uses_order_summary_when_present(hass, mock_stage2_config_entry):
+    """LOH-SUMMARY: When Stage-2 provides order_summary, async_add_delivery receives
+    description=order_summary at the worker POST site (coordinator.py:1547).
+    """
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        # Stage-2 result includes order_summary — description must equal this.
+        stage2_result = Stage2Result(
+            locked={
+                "tracking_number": "1Z999AA10123456784",
+                "carrier_name": "UPS",
+                "order_name": "#1234",
+                "order_summary": "Target — Coffee maker",
+            },
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=stage2_result)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        shipment = ShipmentData(
+            tracking_number="1Z999AA10123456784",
+            carrier_name="UPS",
+            order_name="#1234",
+            message_id="msg1",
+            email_date=1700000000,
+        )
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+        )
+        await coord._async_process_stage2_job(job)
+
+        # LOH-SUMMARY: description must equal order_summary (highest priority).
+        call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
+        assert call_kwargs["description"] == "Target — Coffee maker"
+
+
+async def test_description_falls_back_to_order_name_when_no_summary(hass, mock_stage2_config_entry):
+    """LOH-SUMMARY: When order_summary is absent/None, description falls back to order_name
+    (preserving the existing behavior for no-summary paths).
+    """
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        # Stage-2 result: order_summary is None — description must fall back to order_name.
+        stage2_result = Stage2Result(
+            locked={
+                "tracking_number": "1Z999AA10123456784",
+                "carrier_name": "UPS",
+                "order_name": "#1234",
+                "order_summary": None,
+            },
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=stage2_result)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        shipment = ShipmentData(
+            tracking_number="1Z999AA10123456784",
+            carrier_name="UPS",
+            order_name="#1234",
+            message_id="msg1",
+            email_date=1700000000,
+        )
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+        )
+        await coord._async_process_stage2_job(job)
+
+        # LOH-SUMMARY: no order_summary → falls back to order_name.
+        call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
+        assert call_kwargs["description"] == "#1234"

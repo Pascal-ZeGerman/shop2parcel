@@ -464,3 +464,76 @@ async def test_gmail_inline_posts_clean_canonical_form(hass, mock_no_stage2_entr
     assert call_kwargs["tracking_number"] == expected_clean, (
         f"Expected tracking_number='{expected_clean}', got {call_kwargs['tracking_number']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LOH-SUMMARY: Gmail Stage-1 inline POST description fallback
+# ---------------------------------------------------------------------------
+
+
+async def test_gmail_stage1_inline_post_description_falls_back_to_order_name(
+    hass, mock_no_stage2_entry
+):
+    """LOH-SUMMARY: Gmail Stage-1 inline POST (no Stage-2 summary, raw ShipmentData).
+
+    When order_summary is None (Stage-1-only path), description must fall back to
+    order_name — the existing behavior is preserved at gmail_coordinator.py:775.
+    """
+    from custom_components.shop2parcel.api.email_parser import ParseResult, ShipmentData
+
+    mock_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    msg_id = "msg_loh_inline"
+    mock_gmail = _make_stage1_hit_poll(msg_id, tn)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        # Stage-1 shipment — order_summary is None (default)
+        stage1_shipment = ShipmentData(
+            tracking_number=tn,
+            carrier_name="UPS",
+            order_name="#1234",
+            message_id=msg_id,
+            email_date=1700000000,
+        )
+        parse_result = ParseResult(
+            shipment=stage1_shipment,
+            skip_reason=None,
+            strategy_used="html_template",
+            keyword_hits={
+                "tracking_regex": True,
+                "order_regex": True,
+                "carrier_regex": True,
+            },
+        )
+        mock_parser_cls.return_value.parse.return_value = parse_result
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_no_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    # LOH-SUMMARY: order_summary is None → description falls back to order_name.
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
+    assert call_kwargs["description"] == "#1234"
