@@ -24,7 +24,7 @@ from custom_components.shop2parcel.api.exceptions import (
 from custom_components.shop2parcel.api.ollama_client import (
     OllamaClient,  # noqa: F401  (used by AsyncMock(spec=...) and type-annotation tests)
 )
-from custom_components.shop2parcel.const import LOCKED_OLLAMA_FIELDS
+from custom_components.shop2parcel.const import LOCKED_FIELD_DESCRIPTIONS, LOCKED_OLLAMA_FIELDS
 from custom_components.shop2parcel.extractors.ollama_extractor import (
     OllamaExtractor,
     build_prompt,
@@ -775,6 +775,82 @@ async def test_logging_no_content_leak(caplog, mock_client, sample_stage1, shopi
         assert "1Z999AA10123456784" not in msg
         assert "<<<EMAIL>>>" not in msg
         assert "shopify.com" not in msg
+
+
+# ---------------------------------------------------------------------------
+# LOH-SUMMARY: order_summary as 4th locked field — schema, prompt, split routing
+# ---------------------------------------------------------------------------
+
+
+def test_build_schema_includes_order_summary_in_required():
+    """LOH-SUMMARY: build_schema required list includes order_summary (4th locked field).
+
+    With an empty custom field_list, schema["required"] == list(LOCKED_OLLAMA_FIELDS)
+    which now has length 4 including order_summary.
+    """
+    schema = build_schema([])
+    assert "order_summary" in schema["required"]
+    assert schema["required"] == list(LOCKED_OLLAMA_FIELDS)
+    assert len(schema["required"]) == 4
+
+
+def test_build_schema_order_summary_has_bespoke_description():
+    """LOH-SUMMARY: order_summary property description is bespoke (mentions merchant),
+    not the auto-description phrasing 'extracted from the email'.
+    """
+    field_list = [(name, LOCKED_FIELD_DESCRIPTIONS.get(name)) for name in LOCKED_OLLAMA_FIELDS]
+    schema = build_schema(field_list)
+    desc = schema["properties"]["order_summary"]["description"]
+    # Bespoke description mentions composition (merchant) rather than verbatim extraction.
+    assert "merchant" in desc.lower()
+    # The auto-description phrasing must NOT be used for order_summary.
+    assert "extracted from the email" not in desc
+
+
+def test_build_prompt_order_summary_has_composition_wording(mock_client):
+    """LOH-SUMMARY: build_prompt renders a bullet for order_summary with composition wording.
+
+    The bespoke description licenses combining merchant and item/contents into a single
+    string and instructs returning null when neither is derivable.
+    """
+    field_list = [(name, LOCKED_FIELD_DESCRIPTIONS.get(name)) for name in LOCKED_OLLAMA_FIELDS]
+    prompt = build_prompt(prose="sample text", links=[], field_list=field_list)
+    # The order_summary bullet must be present.
+    assert "order_summary" in prompt
+    # The bespoke description mentions merchant.
+    assert "merchant" in prompt.lower()
+    # And it covers the null-when-neither-derivable case.
+    assert "null" in prompt.lower()
+
+
+def test_split_and_coerce_routes_order_summary_to_locked(mock_client):
+    """LOH-SUMMARY: _split_and_coerce routes order_summary into the locked dict."""
+    extractor = OllamaExtractor(client=mock_client, field_list=[])
+    raw = {
+        "tracking_number": "1Z999AA10123456784",
+        "carrier_name": "UPS",
+        "order_name": "#1234",
+        "order_summary": "Target — Coffee maker",
+    }
+    locked, custom = extractor._split_and_coerce(raw)
+    assert "order_summary" in locked
+    assert locked["order_summary"] == "Target — Coffee maker"
+    assert "order_summary" not in custom
+
+
+def test_split_and_coerce_order_summary_null_in_locked(mock_client):
+    """LOH-SUMMARY: order_summary=null (None) in model output lands in locked as None."""
+    extractor = OllamaExtractor(client=mock_client, field_list=[])
+    raw = {
+        "tracking_number": "1Z999AA10123456784",
+        "carrier_name": "UPS",
+        "order_name": "#1234",
+        "order_summary": None,
+    }
+    locked, custom = extractor._split_and_coerce(raw)
+    assert "order_summary" in locked
+    assert locked["order_summary"] is None
+    assert "order_summary" not in custom
 
 
 async def test_two_debug_lines_per_call(caplog, mock_client, sample_stage1, shopify_mini_html):

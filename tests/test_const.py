@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from custom_components.shop2parcel.const import (
+    LOCKED_FIELD_DESCRIPTIONS,
     LOCKED_OLLAMA_FIELDS,
     normalize_tracking_number,
 )
@@ -63,17 +64,43 @@ def test_locked_ollama_fields_is_tuple():
     assert isinstance(LOCKED_OLLAMA_FIELDS, tuple)
 
 
-def test_locked_ollama_fields_has_exactly_three_entries():
-    """FLD-01 + D-06: exactly three locked fields, no more, no less."""
-    assert len(LOCKED_OLLAMA_FIELDS) == 3
+def test_locked_ollama_fields_has_exactly_four_entries():
+    """FLD-01 + D-06: exactly four locked fields — tracking_number, carrier_name,
+    order_name, and order_summary (LOH-SUMMARY).
+    """
+    assert len(LOCKED_OLLAMA_FIELDS) == 4
 
 
 def test_locked_ollama_fields_order_and_values():
-    """D-06: order is (tracking_number, carrier_name, order_name); order-sensitive
-    because build_schema emits required = list(LOCKED_OLLAMA_FIELDS) and JSON
-    Schema ``required`` array order is observable downstream.
+    """D-06: order is (tracking_number, carrier_name, order_name, order_summary);
+    order-sensitive because build_schema emits required = list(LOCKED_OLLAMA_FIELDS)
+    and JSON Schema ``required`` array order is observable downstream.
     """
-    assert LOCKED_OLLAMA_FIELDS == ("tracking_number", "carrier_name", "order_name")
+    assert LOCKED_OLLAMA_FIELDS == (
+        "tracking_number",
+        "carrier_name",
+        "order_name",
+        "order_summary",
+    )
+
+
+def test_locked_field_descriptions_maps_order_summary_to_bespoke_str():
+    """LOH-SUMMARY: LOCKED_FIELD_DESCRIPTIONS maps order_summary to a non-empty str."""
+    assert isinstance(LOCKED_FIELD_DESCRIPTIONS, dict)
+    assert "order_summary" in LOCKED_FIELD_DESCRIPTIONS
+    desc = LOCKED_FIELD_DESCRIPTIONS["order_summary"]
+    assert isinstance(desc, str)
+    assert len(desc) > 0
+
+
+def test_locked_field_descriptions_does_not_contain_other_locked_fields():
+    """LOH-SUMMARY: only order_summary has a bespoke description; the other three locked
+    fields are absent so they keep the None/auto-description behavior.
+    """
+    for name in ("tracking_number", "carrier_name", "order_name"):
+        assert name not in LOCKED_FIELD_DESCRIPTIONS, (
+            f"{name!r} must not appear in LOCKED_FIELD_DESCRIPTIONS"
+        )
 
 
 def test_locked_ollama_fields_entries_are_strings():
@@ -134,7 +161,12 @@ def test_phase17_existing_constants_unaffected():
 
     assert DOMAIN == "shop2parcel"
     assert CONF_POLL_INTERVAL == "poll_interval"
-    assert LOCKED_OLLAMA_FIELDS == ("tracking_number", "carrier_name", "order_name")
+    assert LOCKED_OLLAMA_FIELDS == (
+        "tracking_number",
+        "carrier_name",
+        "order_name",
+        "order_summary",
+    )
 
 
 # -------- Phase 21 Plan 02: FAIL-04 notification ID helper + threshold constants ---
