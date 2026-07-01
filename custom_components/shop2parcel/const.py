@@ -152,11 +152,33 @@ def normalize_tracking_number(tracking_number: str) -> str:
 #   * Phase 20 merge_llm_authoritative (locked-vs-custom routing)
 # Order is observable downstream — JSON Schema ``required`` array semantics
 # depend on declared order for some validators (D-06).
-LOCKED_OLLAMA_FIELDS: tuple[str, str, str] = (
+# LOH-SUMMARY: order_summary is the 4th locked field. Its prompt/schema description
+# is bespoke (composition-licensed) and comes from LOCKED_FIELD_DESCRIPTIONS below;
+# the other three fields keep the None/auto-description behavior.
+LOCKED_OLLAMA_FIELDS: tuple[str, str, str, str] = (
     "tracking_number",
     "carrier_name",
     "order_name",
+    "order_summary",
 )
+
+# LOH-SUMMARY: Bespoke descriptions for locked fields that require composition
+# instructions rather than the verbatim-extract auto-description. Only fields
+# listed here carry a custom description; all others resolve to None and use
+# _auto_description(name) in build_schema / build_prompt.
+LOCKED_FIELD_DESCRIPTIONS: dict[str, str] = {
+    "order_summary": (
+        "A short human-readable summary combining the merchant/store name and the "
+        'ordered item(s), e.g. "Target — Coffee maker". '
+        "Exception to the verbatim-extraction rule: you MAY compose this string "
+        "by combining information from the email rather than copying it verbatim. "
+        'Use "<merchant> — <item(s)>" when both are known; use whichever '
+        "is present if only one is derivable. "
+        "Return null if neither the merchant nor the ordered contents are derivable "
+        "from the email. "
+        "Do NOT copy tracking numbers or order numbers into this field."
+    ),
+}
 
 # Phase 17: Ollama Stage-2 configuration constants.
 # CONF_OLLAMA_URL: user-supplied Ollama server base URL (required for Stage 2;

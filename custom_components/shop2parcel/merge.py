@@ -53,7 +53,7 @@ def merge_llm_authoritative(
     """Merge Stage-2 LLM result into Stage-1 ShipmentData.
 
     Iterates ``LOCKED_OLLAMA_FIELDS`` (``tracking_number``, ``carrier_name``,
-    ``order_name``). For each field, applies **MRG-03** routing:
+    ``order_name``, ``order_summary``). For each field, applies **MRG-03** routing:
 
     1. **Stage-1 is None** — accept Stage-2 value (after **MRG-04** strict carrier-
        format gate for ``tracking_number``; value may still be ``None`` if Stage-2
@@ -137,7 +137,7 @@ def merge_llm_authoritative(
 
     # dataclasses.replace() produces a new ShipmentData; email_date (int) and
     # message_id (str) pass through unchanged from stage1.
-    # overrides contains only str | None values for the three locked string fields.
+    # overrides contains str | None values for all four locked fields.
     # mypy cannot resolve the **dict[str, str | None] spread against ShipmentData's
     # typed keyword-only replace() overload — the runtime values are always valid.
     merged: ShipmentData = replace(stage1, **overrides)  # type: ignore[arg-type]

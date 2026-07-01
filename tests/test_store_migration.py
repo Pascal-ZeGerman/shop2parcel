@@ -316,7 +316,7 @@ async def test_shipments_saved_to_store_after_poll(
         "persisted_shipments must contain the shipment keyed by message_id"
     )
     entry = materialized["persisted_shipments"]["MSG_NEW"]
-    # custom_attributes is included in asdict() output since Phase 21 Plan 01 added it to ShipmentData.
+    # custom_attributes is included since Phase 21 Plan 01; order_summary since LOH-SUMMARY.
     assert entry == {
         "tracking_number": "TN_NEW",
         "carrier_name": "UPS",
@@ -324,6 +324,7 @@ async def test_shipments_saved_to_store_after_poll(
         "message_id": "MSG_NEW",
         "email_date": 1700000000,
         "custom_attributes": {},
+        "order_summary": None,
     }, f"persisted_shipments entry has wrong fields: {entry!r}"
 
 
@@ -1036,3 +1037,178 @@ async def test_phase26_counters_persist_across_restart(
     assert coord2._last_forwarded_ts == 1700000000, "last_forwarded_ts must be restored from store"
     assert coord2._used_today == 3, "used_today must be restored from store"
     assert coord2._used_today_date == "2026-06-24", "used_today_date must be restored from store"
+
+
+# ---------------------------------------------------------------------------
+# CR-01: order_summary round-trip through _async_load_store (LOH-SUMMARY)
+# ---------------------------------------------------------------------------
+
+
+async def test_load_store_restores_order_summary_in_persisted_shipments() -> None:
+    """CR-01 / LOH-SUMMARY: order_summary serialised by asdict() must survive a
+    store round-trip through _async_load_store into _restored_shipments.
+
+    RED: fails until both ShipmentData reconstruction calls in _async_load_store
+    include ``order_summary=entry.get("order_summary") or None``.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {
+                "msg_with_summary": {
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1001",
+                    "message_id": "msg_with_summary",
+                    "email_date": 1700000000,
+                    "custom_attributes": {},
+                    "order_summary": "Target — Coffee maker",
+                },
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert "msg_with_summary" in coordinator._restored_shipments, (
+        "persisted_shipments entry with order_summary must be loaded"
+    )
+    restored = coordinator._restored_shipments["msg_with_summary"]
+    assert restored.order_summary == "Target — Coffee maker", (
+        f"order_summary must survive store round-trip; got {restored.order_summary!r}"
+    )
+
+
+async def test_load_store_restores_order_summary_in_pending_posts() -> None:
+    """CR-01 / LOH-SUMMARY: order_summary must survive a store round-trip through
+    _async_load_store into _pending_posts (the drain path).
+
+    RED: fails until the pending_posts reconstruction block also includes
+    ``order_summary=entry.get("order_summary") or None``.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "pending_posts": {
+                "drain_key_1": {
+                    "tracking_number": "9400111899223397614437",
+                    "carrier_name": "USPS",
+                    "order_name": "#2002",
+                    "message_id": "drain_msg_1",
+                    "email_date": 1700000001,
+                    "custom_attributes": {},
+                    "order_summary": "Amazon — Running shoes",
+                },
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert "drain_key_1" in coordinator._pending_posts, (
+        "pending_posts entry with order_summary must be loaded into _pending_posts"
+    )
+    pending = coordinator._pending_posts["drain_key_1"]
+    assert pending.order_summary == "Amazon — Running shoes", (
+        f"order_summary must survive pending_posts round-trip; got {pending.order_summary!r}"
+    )
+
+
+async def test_load_store_order_summary_absent_defaults_to_none_persisted() -> None:
+    """CR-01 backward-compat: persisted_shipments entry without order_summary key
+    (pre-LOH store) must load with order_summary=None — not rejected/skipped.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {
+                "old_entry": {
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1001",
+                    "message_id": "old_entry",
+                    "email_date": 1700000000,
+                    # no order_summary key — pre-LOH record
+                },
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert "old_entry" in coordinator._restored_shipments, (
+        "Pre-LOH entry without order_summary must still be loaded (backward-compat)"
+    )
+    assert coordinator._restored_shipments["old_entry"].order_summary is None, (
+        "Missing order_summary key must default to None, not raise or skip the entry"
+    )
+
+
+async def test_load_store_order_summary_absent_defaults_to_none_pending_posts() -> None:
+    """CR-01 backward-compat: pending_posts entry without order_summary key
+    (pre-LOH store) must load with order_summary=None — not rejected/skipped.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "pending_posts": {
+                "old_drain_key": {
+                    "tracking_number": "9400111899223397614437",
+                    "carrier_name": "USPS",
+                    "order_name": "#2002",
+                    "message_id": "old_drain_msg",
+                    "email_date": 1700000001,
+                    # no order_summary key — pre-LOH record
+                },
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert "old_drain_key" in coordinator._pending_posts, (
+        "Pre-LOH pending_posts entry without order_summary must still be loaded"
+    )
+    assert coordinator._pending_posts["old_drain_key"].order_summary is None, (
+        "Missing order_summary key in pending_posts must default to None"
+    )

@@ -1249,7 +1249,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 await parcel_client.async_add_delivery(
                     tracking_number=merged_shipment.tracking_number,
                     carrier_code=carrier_code,
-                    description=merged_shipment.order_name or merged_shipment.tracking_number,
+                    description=merged_shipment.order_summary
+                    or merged_shipment.order_name
+                    or merged_shipment.tracking_number,
                 )
                 posted_2xx = True  # genuine 2xx response — gate for _record_forward
             except ParcelAppAuthError as err:
@@ -1544,7 +1546,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             await parcel_client.async_add_delivery(
                 tracking_number=merged_shipment.tracking_number,
                 carrier_code=carrier_code,
-                description=merged_shipment.order_name or merged_shipment.tracking_number,
+                description=merged_shipment.order_summary
+                or merged_shipment.order_name
+                or merged_shipment.tracking_number,
             )
         except ParcelAppAuthError as err:
             raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
@@ -1700,6 +1704,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 restored[msg_id] = ShipmentData(
                     **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
                     custom_attributes=_safe_custom_attributes(entry),
+                    order_summary=entry.get("order_summary") or None,
                 )
             except TypeError as err:
                 _LOGGER.warning(
@@ -1734,6 +1739,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 restored_pending[storage_key] = ShipmentData(
                     **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
                     custom_attributes=_safe_custom_attributes(entry),
+                    order_summary=entry.get("order_summary") or None,
                 )
             except TypeError as err:
                 _LOGGER.warning(

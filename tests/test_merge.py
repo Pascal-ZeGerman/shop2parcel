@@ -311,6 +311,40 @@ def test_merge_returns_immutable_shipmentdata_via_replace() -> None:
     assert stage1.custom_attributes == {}
 
 
+# ---------------------------------------------------------------------------
+# LOH-SUMMARY: order_summary locked field threading through merge
+# ---------------------------------------------------------------------------
+
+
+def test_merge_order_summary_from_locked_lands_on_merged() -> None:
+    """LOH-SUMMARY: Stage-2 locked order_summary is threaded onto merged.order_summary
+    via the existing replace() loop — no merge.py code change needed once ShipmentData
+    owns the field.
+    """
+    stage1 = _make_shipment()
+    result = _make_result(locked={"order_summary": "Target — Coffee maker"})
+    merged, _, _gate = merge_llm_authoritative(stage1, result)
+    assert merged.order_summary == "Target — Coffee maker"
+
+
+def test_merge_absent_order_summary_in_locked_stays_none() -> None:
+    """LOH-SUMMARY: When result.locked has no order_summary (or None), merged.order_summary
+    is None — Stage-1 order_summary is always None, so the or-chain preserves current behavior.
+    """
+    stage1 = _make_shipment()
+    result = _make_result(locked={})
+    merged, _, _gate = merge_llm_authoritative(stage1, result)
+    assert merged.order_summary is None
+
+
+def test_merge_order_summary_none_in_locked_stays_none() -> None:
+    """LOH-SUMMARY: Explicit None in result.locked["order_summary"] keeps merged.order_summary None."""
+    stage1 = _make_shipment()
+    result = _make_result(locked={"order_summary": None})
+    merged, _, _gate = merge_llm_authoritative(stage1, result)
+    assert merged.order_summary is None
+
+
 def test_shipmentdata_default_custom_attributes_is_empty_dict() -> None:
     """FLD-03 Pitfall 1: Positional 5-arg ShipmentData construction still works; default is {}."""
     s = ShipmentData("1Z" + "A" * 16, "UPS", "#1234", "msg1", 1700000000)

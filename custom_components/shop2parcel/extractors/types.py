@@ -5,8 +5,10 @@ module so Phases 18/20/21 can import without circular dependencies on
 the OllamaExtractor class itself.
 
 The locked/custom split mirrors Phase 21's sensor surfacing: ``locked``
-holds the three parcelapp-required fields (POSTed to parcelapp.net),
-``custom`` holds user-extensible fields that surface as
+holds the four locked fields (``tracking_number``, ``carrier_name``,
+``order_name``, ``order_summary``). The first three are POSTed to
+parcelapp.net; ``order_summary`` is the description source only and is
+never POSTed. ``custom`` holds user-extensible fields that surface as
 ``extra_state_attributes`` on the Stage-2 sensor — never POSTed.
 
 No HA imports (D-01/D-03 extended to extractors/).
@@ -21,10 +23,13 @@ from dataclasses import dataclass
 class Stage2Result:
     """Structured output from OllamaExtractor.async_extract (D-04).
 
-    locked: the 3 parcelapp-required fields keyed by LOCKED_OLLAMA_FIELDS —
-        ``tracking_number``, ``carrier_name``, ``order_name``. Values are
-        strings or ``None`` (D-05: ``None`` is the canonical "model declined
-        to extract" signal — empty string is coerced to ``None`` upstream).
+    locked: the 4 locked fields keyed by LOCKED_OLLAMA_FIELDS —
+        ``tracking_number``, ``carrier_name``, ``order_name``,
+        ``order_summary``. The first three are POSTed to parcelapp.net;
+        ``order_summary`` is the description source only — never POSTed.
+        Values are strings or ``None`` (D-05: ``None`` is the canonical
+        "model declined to extract" signal — empty string is coerced to
+        ``None`` upstream).
     custom: user-extensible fields keyed by the names provided in
         Phase-17's options-flow textarea. Same string-or-None value
         contract. Surfaced as sensor attributes by Phase 21, not POSTed.

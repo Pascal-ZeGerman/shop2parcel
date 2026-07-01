@@ -54,6 +54,61 @@ async def test_add_delivery_success(client):
 
 
 # ---------------------------------------------------------------------------
+# async_add_delivery — 2xx success-field routing
+# ---------------------------------------------------------------------------
+
+
+async def test_add_delivery_200_success_false_invalid_tracking_raises(client):
+    """Test A: 200 with success:false + error_message → ParcelAppInvalidTrackingError."""
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=200,
+            payload={"success": False, "error_message": "Invalid tracking"},
+        )
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert "Invalid tracking" in str(exc_info.value)
+
+
+async def test_add_delivery_200_success_false_already_added_raises(client):
+    """Test B: 200 with success:false + already-added message → ParcelAppAlreadyAddedError."""
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=200,
+            payload={
+                "success": False,
+                "error_message": "You have already added this delivery to the app",
+            },
+        )
+        with pytest.raises(ParcelAppAlreadyAddedError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert "You have already added this delivery to the app" in str(exc_info.value)
+
+
+async def test_add_delivery_200_success_false_no_error_message_raises_with_default(client):
+    """Test C: 200 with success:false + no error_message → ParcelAppInvalidTrackingError with 'Bad request'."""
+    with aioresponses() as mock:
+        mock.post(
+            ADD_DELIVERY_URL,
+            status=200,
+            payload={"success": False},
+        )
+        with pytest.raises(ParcelAppInvalidTrackingError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert str(exc_info.value) == "Bad request"
+
+
+async def test_add_delivery_200_success_true_returns_none(client):
+    """Test D (regression guard): 200 with success:true → returns None, no exception."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=200, payload={"success": True})
+        result = await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
 # async_add_delivery — auth errors
 # ---------------------------------------------------------------------------
 
