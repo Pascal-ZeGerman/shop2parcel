@@ -1309,3 +1309,104 @@ async def test_model_field_dropdown_includes_stored_model_not_in_tags(hass, mock
     assert stored_model in option_values, (
         f"Stored model '{stored_model}' must be included in dropdown options even if not in /api/tags"
     )
+
+
+# ---------------------------------------------------------------------------
+# QUICK-260630-tfz: gmail_query optional — empty/whitespace coerced to DEFAULT_GMAIL_QUERY
+# ---------------------------------------------------------------------------
+
+_GMAIL_BASE_INPUT = {
+    CONF_POLL_INTERVAL: 30,
+    CONF_RESCAN_WINDOW_DAYS: DEFAULT_RESCAN_WINDOW_DAYS,
+    CONF_DEBUG_MODE: False,
+    CONF_OLLAMA_URL: "",  # empty URL skips async_get_tags call
+    CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+    CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+    CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+}
+
+
+async def test_gmail_query_empty_string_persists_default(hass, mock_config_entry):
+    """Test A (QUICK-260630-tfz): submitting gmail_query="" persists DEFAULT_GMAIL_QUERY, not "".
+
+    An empty string matches ALL Gmail messages, causing a full-inbox scan
+    (DoS against Gmail API quota and the HA event loop — T-tfz-01).
+    The submit handler must coerce "" to DEFAULT_GMAIL_QUERY before create_entry.
+    """
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: ""}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
+    assert result["data"][CONF_GMAIL_QUERY] == DEFAULT_GMAIL_QUERY, (
+        f"Empty gmail_query must be coerced to DEFAULT_GMAIL_QUERY ({DEFAULT_GMAIL_QUERY!r}), "
+        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
+    )
+
+
+async def test_gmail_query_whitespace_persists_default(hass, mock_config_entry):
+    """Test B (QUICK-260630-tfz): submitting gmail_query="   " persists DEFAULT_GMAIL_QUERY.
+
+    Whitespace-only strings are semantically empty and would produce a broken
+    Gmail query — they must be coerced to DEFAULT_GMAIL_QUERY at write time.
+    """
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: "   "}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
+    assert result["data"][CONF_GMAIL_QUERY] == DEFAULT_GMAIL_QUERY, (
+        f"Whitespace-only gmail_query must be coerced to DEFAULT_GMAIL_QUERY ({DEFAULT_GMAIL_QUERY!r}), "
+        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
+    )
+
+
+async def test_gmail_query_non_empty_preserved_verbatim(hass, mock_config_entry):
+    """Test C (QUICK-260630-tfz): submitting a non-empty gmail_query persists it unchanged.
+
+    The coercion must only fire for empty/whitespace inputs — real user queries
+    must not be silently replaced with the default.
+    """
+    handler, fake_entry = _make_handler_with_options(options={})
+    custom_query = "from:shopify"
+    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: custom_query}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
+    assert result["data"][CONF_GMAIL_QUERY] == custom_query, (
+        f"Non-empty gmail_query must be persisted verbatim ({custom_query!r}), "
+        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
+    )
+
+
+async def test_gmail_query_schema_accepts_empty_string(hass, mock_config_entry):
+    """Test D (QUICK-260630-tfz): the schema must accept gmail_query="" (no vol.Invalid raised).
+
+    The current schema uses vol.Required + vol.Length(min=1) which rejects "".
+    After the change, vol.Optional + vol.Length(max=500) (no min=1) must allow
+    it through — the DoS risk is handled by write-time coercion, not schema rejection.
+    """
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=None)
+    schema = result["data_schema"]
+    # Calling the schema with gmail_query="" must NOT raise vol.Invalid.
+    schema(
+        {
+            CONF_POLL_INTERVAL: 30,
+            CONF_GMAIL_QUERY: "",
+            CONF_RESCAN_WINDOW_DAYS: DEFAULT_RESCAN_WINDOW_DAYS,
+            CONF_OLLAMA_URL: "",
+            CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+            CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+        }
+    )
