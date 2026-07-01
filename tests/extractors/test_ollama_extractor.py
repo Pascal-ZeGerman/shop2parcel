@@ -365,7 +365,7 @@ def test_invalid_field_name_dropped(mock_client, caplog):
     Two invalid names ('BadName!' uppercase + punctuation; '9starts_with_digit'
     must start with a letter) plus one valid name. Asserts:
       * 2 WARNING lines logged, one per invalid name.
-      * ``extractor._fields`` contains the 3 locked entries + only 'ok_name'.
+      * ``extractor._fields`` contains the 4 locked entries + only 'ok_name'.
     """
     with caplog.at_level(logging.WARNING):
         extractor = OllamaExtractor(
@@ -380,8 +380,8 @@ def test_invalid_field_name_dropped(mock_client, caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
 
-    # 3 locked + 1 valid custom = 4 entries.
-    assert len(extractor._fields) == 4
+    # 4 locked + 1 valid custom = 5 entries (LOH-SUMMARY: order_summary is the 4th locked field).
+    assert len(extractor._fields) == 5
     field_names = [name for name, _desc in extractor._fields]
     assert field_names[: len(LOCKED_OLLAMA_FIELDS)] == list(LOCKED_OLLAMA_FIELDS)
     assert "ok_name" in field_names
@@ -442,13 +442,18 @@ def test_custom_field_collision_dropped(mock_client, caplog):
     assert "collides" in msg
     assert "tracking_number" in msg
 
-    # No duplicate — exactly 3 locked entries, no extras.
+    # No duplicate — exactly 4 locked entries, no extras (LOH-SUMMARY: order_summary is 4th).
     assert len(extractor._fields) == len(LOCKED_OLLAMA_FIELDS)
     field_names = [name for name, _desc in extractor._fields]
     assert field_names == list(LOCKED_OLLAMA_FIELDS)
     # The collision-source description is never persisted.
-    for _name, desc in extractor._fields:
-        assert desc is None
+    # Non-order_summary locked fields must have None (auto-description behavior).
+    # order_summary has its bespoke description from LOCKED_FIELD_DESCRIPTIONS (LOH-SUMMARY).
+    for name, desc in extractor._fields:
+        if name == "order_summary":
+            assert desc is not None and isinstance(desc, str)
+        else:
+            assert desc is None
 
 
 # ---------------------------------------------------------------------------
@@ -509,10 +514,13 @@ async def test_async_extract_returns_locked_plus_custom(
     result = await extractor.async_extract(shopify_mini_html, sample_stage1)
 
     assert isinstance(result, Stage2Result)
+    # LOH-SUMMARY: order_summary is now the 4th locked field; model response does not include it
+    # so it coerces to None in locked (D-05 canonical-None path).
     assert result.locked == {
         "tracking_number": "1Z999AA10123456784",
         "carrier_name": "UPS",
         "order_name": "#1234",
+        "order_summary": None,
     }
     assert result.custom == {"estimated_delivery": "2026-06-15"}
     assert result.passes_used == 1
@@ -552,10 +560,12 @@ async def test_empty_string_coerced_to_none(mock_client, sample_stage1, shopify_
     extractor = OllamaExtractor(client=mock_client, field_list=[])
     result = await extractor.async_extract(shopify_mini_html, sample_stage1)
 
+    # LOH-SUMMARY: order_summary is the 4th locked field; absent from mock → None.
     assert result.locked == {
         "tracking_number": None,
         "carrier_name": "UPS",
         "order_name": None,
+        "order_summary": None,
     }
 
 

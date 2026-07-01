@@ -47,6 +47,11 @@ class ShipmentData:
     custom_attributes: dict[str, str | None] = field(
         default_factory=dict
     )  # FLD-03: user-added Stage-2 extraction fields; surfaced as sensor attributes, never POSTed
+    # LOH-SUMMARY: Stage-2 LLM merchant+contents summary; the parcelapp description source;
+    # never POSTed as a tracking field. Defaults None so all existing positional/keyword
+    # constructors remain valid (non-breaking). Populated only by merge_llm_authoritative
+    # (via the locked-field replace loop) or by the gmail Stage-2 fallback ShipmentData builder.
+    order_summary: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
