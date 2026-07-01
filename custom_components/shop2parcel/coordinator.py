@@ -1704,6 +1704,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 restored[msg_id] = ShipmentData(
                     **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
                     custom_attributes=_safe_custom_attributes(entry),
+                    order_summary=entry.get("order_summary") or None,
                 )
             except TypeError as err:
                 _LOGGER.warning(
@@ -1738,6 +1739,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 restored_pending[storage_key] = ShipmentData(
                     **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
                     custom_attributes=_safe_custom_attributes(entry),
+                    order_summary=entry.get("order_summary") or None,
                 )
             except TypeError as err:
                 _LOGGER.warning(
