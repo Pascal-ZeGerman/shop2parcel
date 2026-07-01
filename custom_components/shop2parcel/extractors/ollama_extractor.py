@@ -243,7 +243,7 @@ class OllamaExtractor:
         extractor never sees ``url`` / ``model`` / ``timeout`` — those are
         the client's concern (OLLM-01 / OLLM-02 / OLLM-03).
       field_list: sequence of ``(name, description)`` tuples for custom
-        fields. The 3 locked fields are added automatically and always
+        fields. The 4 locked fields are added automatically and always
         come first in ``self._fields``. Custom fields that fail the
         snake_case regex (``^[a-z][a-z0-9_]{0,31}$``) or that collide
         with a locked field are silently dropped with a
@@ -275,7 +275,7 @@ class OllamaExtractor:
     ) -> list[tuple[str, str | None]]:
         """Return ``[locked..., valid_custom...]`` with D-07 rules applied.
 
-        Order: the 3 locked fields (each as ``(name, None)``) come first,
+        Order: the 4 locked fields (each as ``(name, description | None)``) come first,
         followed by user-supplied entries that pass:
 
           1. ``_FIELD_NAME_RE.fullmatch(name)`` — invalid name -> WARNING
