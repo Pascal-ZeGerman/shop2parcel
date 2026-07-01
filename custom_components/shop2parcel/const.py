@@ -169,10 +169,10 @@ LOCKED_OLLAMA_FIELDS: tuple[str, str, str, str] = (
 LOCKED_FIELD_DESCRIPTIONS: dict[str, str] = {
     "order_summary": (
         "A short human-readable summary combining the merchant/store name and the "
-        "ordered item(s), e.g. \"Target — Coffee maker\". "
+        'ordered item(s), e.g. "Target — Coffee maker". '
         "Exception to the verbatim-extraction rule: you MAY compose this string "
         "by combining information from the email rather than copying it verbatim. "
-        "Use \"<merchant> — <item(s)>\" when both are known; use whichever "
+        'Use "<merchant> — <item(s)>" when both are known; use whichever '
         "is present if only one is derivable. "
         "Return null if neither the merchant nor the ordered contents are derivable "
         "from the email. "

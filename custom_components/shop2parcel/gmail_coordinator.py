@@ -554,6 +554,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                             message_id=msg_id,
                             email_date=email_date,
                             custom_attributes=result_fb.custom,
+                            order_summary=result_fb.locked.get("order_summary"),
                         )
                         enqueued = self._enqueue_stage2(
                             fb_clean,
@@ -772,7 +773,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     await parcel_client.async_add_delivery(
                         tracking_number=shipment.tracking_number,
                         carrier_code=carrier_code,
-                        description=shipment.order_name or shipment.tracking_number,
+                        description=shipment.order_summary
+                        or shipment.order_name
+                        or shipment.tracking_number,
                     )
                 except ParcelAppAuthError as err:
                     raise ConfigEntryAuthFailed("parcelapp.net auth error") from err

@@ -114,14 +114,16 @@ async def test_settings_shows_form(hass, mock_config_entry):
 
 
 async def test_settings_locked_fields_placeholder(hass, mock_config_entry):
-    """CFG-03: description_placeholders['locked_fields'] is 'tracking_number, carrier_name, order_name'."""
+    """CFG-03: description_placeholders['locked_fields'] includes all 4 locked fields
+    (LOH-SUMMARY: order_summary is now the 4th locked field).
+    """
     handler, fake_entry = _make_handler_with_options(options={})
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
     ):
         result = await handler.async_step_settings(user_input=None)
     assert result["description_placeholders"]["locked_fields"] == (
-        "tracking_number, carrier_name, order_name"
+        "tracking_number, carrier_name, order_name, order_summary"
     )
 
 

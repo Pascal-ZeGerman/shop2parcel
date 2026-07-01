@@ -1249,7 +1249,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 await parcel_client.async_add_delivery(
                     tracking_number=merged_shipment.tracking_number,
                     carrier_code=carrier_code,
-                    description=merged_shipment.order_name or merged_shipment.tracking_number,
+                    description=merged_shipment.order_summary
+                    or merged_shipment.order_name
+                    or merged_shipment.tracking_number,
                 )
                 posted_2xx = True  # genuine 2xx response — gate for _record_forward
             except ParcelAppAuthError as err:
@@ -1544,7 +1546,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             await parcel_client.async_add_delivery(
                 tracking_number=merged_shipment.tracking_number,
                 carrier_code=carrier_code,
-                description=merged_shipment.order_name or merged_shipment.tracking_number,
+                description=merged_shipment.order_summary
+                or merged_shipment.order_name
+                or merged_shipment.tracking_number,
             )
         except ParcelAppAuthError as err:
             raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
