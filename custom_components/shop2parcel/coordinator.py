@@ -68,6 +68,7 @@ from .const import (
     MAX_STAGE2_POSTS_PER_POLL,
     MAX_SUBMITTED_TRACKING_NUMBERS,
     SEEN_MESSAGE_IDS_MAXLEN,
+    STAGE2_MSG_QUARANTINE_THRESHOLD,
     STAGE2_NOTIFY_COOLDOWN_S,
     STAGE2_NOTIFY_THRESHOLD,
     stage2_cap_notification_id,
@@ -450,6 +451,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # failures and re-enqueues anything the (also-lost) queue had pending. The worker
         # RELEASES an entry on any retry-discard so a deferred job is re-fetched next poll.
         self._inflight_message_ids: OrderedDict[str, None] = OrderedDict()
+        # Poison-message quarantine: per-message consecutive Stage-2 failure counts,
+        # keyed by raw Gmail message ID. In-memory only (session-scoped). When a count
+        # reaches STAGE2_MSG_QUARANTINE_THRESHOLD the worker stops releasing that message
+        # for re-fetch, breaking the observed infinite retry loop. FIFO-bounded so a long
+        # run of distinct failing messages cannot grow it without bound.
+        self._stage2_msg_failures: OrderedDict[str, int] = OrderedDict()
         self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
@@ -583,6 +590,41 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         if job.raw_msg_id is not None:
             self._inflight_message_ids.pop(job.raw_msg_id, None)
+
+    def _register_stage2_msg_failure(self, job: Stage2Job) -> bool:
+        """Track consecutive Stage-2 failures per message; return True to quarantine.
+
+        Increments the per-message failure count (keyed by raw_msg_id). Once it reaches
+        STAGE2_MSG_QUARANTINE_THRESHOLD the caller must NOT release the message's in-flight
+        entry, leaving it in the session-scoped skip set so the poll gate stops re-fetching
+        it — this breaks the observed infinite retry loop where one pathological email
+        re-failed every poll cycle for hours.
+
+        Returns False (keep retrying) for jobs without a raw_msg_id (IMAP path has no
+        in-flight gate to quarantine) and for messages still under the threshold. The
+        counter is in-memory only, so a restart clears it and a transient Ollama outage
+        self-heals instead of permanently poisoning legitimate shipment emails.
+        """
+        raw_id = job.raw_msg_id
+        if raw_id is None:
+            return False
+        count = self._stage2_msg_failures.get(raw_id, 0) + 1
+        if count >= STAGE2_MSG_QUARANTINE_THRESHOLD:
+            self._stage2_msg_failures.pop(raw_id, None)
+            _LOGGER.warning(
+                "Stage-2 worker: quarantining message %s ('%s' from '%s') after %d "
+                "consecutive extraction failures; skipping it until restart",
+                raw_id,
+                job.meta.get("subject", ""),
+                job.meta.get("from", ""),
+                count,
+            )
+            return True
+        self._stage2_msg_failures[raw_id] = count
+        self._stage2_msg_failures.move_to_end(raw_id)
+        while len(self._stage2_msg_failures) > SEEN_MESSAGE_IDS_MAXLEN:
+            self._stage2_msg_failures.popitem(last=False)
+        return False
 
     def _maybe_reset_used_today(self) -> None:
         """Reset used_today to 0 on UTC date rollover.
@@ -1401,6 +1443,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # not touch control flow; existing discard+return below remain unchanged).
                 self._record_stage2_failure(job, err)
                 self._stage2_enqueued_keys.discard(normalized_tn)
+                if self._register_stage2_msg_failure(job):
+                    # Poison-message quarantine: leave the message in the in-flight
+                    # skip set (do NOT release) so the poll gate stops re-fetching it,
+                    # breaking the infinite retry loop. Session-scoped; restart re-tries.
+                    return
                 self._release_inflight(job)  # re-fetch next poll (not lost)
                 return
 

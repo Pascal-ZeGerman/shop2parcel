@@ -124,6 +124,15 @@ STAGE2_NOTIFY_THRESHOLD: int = 3
 STAGE2_NOTIFY_COOLDOWN_S: int = 3600
 STAGE2_FAILING_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_failing"
 
+# Poison-message quarantine: after STAGE2_MSG_QUARANTINE_THRESHOLD consecutive
+# extraction failures on the SAME Gmail message, the worker stops releasing it
+# for re-fetch and leaves it in the in-memory in-flight skip set for the rest of
+# the session — breaking the observed infinite retry loop where one pathological
+# email re-failed every poll cycle for hours. Session-scoped only (never
+# persisted) so a transient Ollama outage self-heals on restart instead of
+# permanently poisoning legitimate shipment emails.
+STAGE2_MSG_QUARANTINE_THRESHOLD: int = 5
+
 
 def stage2_failing_notification_id(entry_id: str) -> str:
     """Return the persistent-notification ID for Stage-2 consecutive-failure events.
