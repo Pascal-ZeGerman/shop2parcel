@@ -25,7 +25,9 @@ from custom_components.shop2parcel.api.ollama_client import (
     OllamaClient,  # noqa: F401  (used by AsyncMock(spec=...) and type-annotation tests)
 )
 from custom_components.shop2parcel.const import LOCKED_FIELD_DESCRIPTIONS, LOCKED_OLLAMA_FIELDS
-from custom_components.shop2parcel.extractors.ollama_extractor import (
+from custom_components.shop2parcel.extractors.ollama_extractor import (  # noqa: F401 (constants used below)
+    MAX_LINKS,
+    MAX_PROSE_CHARS,
     OllamaExtractor,
     build_prompt,
     build_schema,
@@ -199,6 +201,34 @@ def test_preprocess_html_dedups_hrefs():
     _prose, links = preprocess_html(html)
     # Three distinct URLs, in first-occurrence document order.
     assert links == ["https://x.com/a", "https://x.com/b", "https://x.com/c"]
+
+
+def test_preprocess_html_truncates_pathological_prose():
+    """A pathological email (huge prose) is capped to MAX_PROSE_CHARS.
+
+    Stage-2 timeout-loop fix: an oversized non-shipment email (e.g. a job
+    alert) produces a prompt that overruns the Ollama request timeout on a
+    slow CPU server. Truncating prose bounds prompt-eval work (deferred D-02).
+    """
+    huge = "word " * (MAX_PROSE_CHARS)  # far exceeds the char cap
+    html = f"<html><body><p>{huge}</p></body></html>"
+    prose, _links = preprocess_html(html)
+    assert len(prose) <= MAX_PROSE_CHARS
+
+
+def test_preprocess_html_caps_link_count():
+    """A pathological email with many links keeps only the first MAX_LINKS.
+
+    Job-alert emails carry dozens of distinct URLs; a real shipping email has
+    a handful. Capping the link list bounds the LINKS block token count.
+    """
+    anchors = "".join(f'<a href="https://x.com/{i}">L{i}</a>' for i in range(MAX_LINKS + 25))
+    html = f"<html><body>{anchors}</body></html>"
+    _prose, links = preprocess_html(html)
+    assert len(links) == MAX_LINKS
+    # Order preserved: the first MAX_LINKS distinct hrefs are kept.
+    assert links[0] == "https://x.com/0"
+    assert links[-1] == f"https://x.com/{MAX_LINKS - 1}"
 
 
 def test_preprocess_html_handles_no_anchors():
