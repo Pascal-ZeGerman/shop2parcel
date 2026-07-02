@@ -19,6 +19,7 @@ from custom_components.shop2parcel.const import (
     DEFAULT_OLLAMA_TIMEOUT,
     DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
+    STAGE2_MSG_QUARANTINE_THRESHOLD,
 )
 from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator, Stage2Job
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
@@ -1011,6 +1012,104 @@ async def test_ollama_transient_no_post_no_dedup(hass, mock_stage2_config_entry)
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
         # FAIL-03: Tracking number must NOT be written to dedup store.
         assert job.normalized_tn not in coord._submitted_tracking_numbers
+
+
+async def test_poison_message_quarantined_after_threshold(hass, mock_stage2_config_entry):
+    """After STAGE2_MSG_QUARANTINE_THRESHOLD consecutive failures on the same
+    message, the worker stops releasing it for re-fetch (breaks the infinite
+    retry loop). Sub-threshold failures still release it for retry.
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            side_effect=OllamaTransientError("timeout")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        raw_id = "poison-msg-1"
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id=f"gmail:{raw_id}",
+            meta={"subject": "New job(s) match your search", "from": "careers@x.com"},
+            raw_msg_id=raw_id,
+        )
+
+        for i in range(STAGE2_MSG_QUARANTINE_THRESHOLD):
+            # Each poll cycle re-marks the message in-flight before draining its job.
+            coord._mark_inflight(raw_id)
+            await coord._async_process_stage2_job(job)
+            if i < STAGE2_MSG_QUARANTINE_THRESHOLD - 1:
+                # Sub-threshold: released so the next poll re-fetches it.
+                assert raw_id not in coord._inflight_message_ids
+
+        # At threshold: quarantined — left in the in-flight skip set so the poll
+        # gate skips it for the rest of the session.
+        assert raw_id in coord._inflight_message_ids
+
+
+async def test_imap_job_without_raw_msg_id_never_quarantined(hass, mock_stage2_config_entry):
+    """A job with no raw_msg_id (IMAP path) has no in-flight gate to quarantine;
+    it must keep releasing on every failure, never getting stuck.
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            side_effect=OllamaTransientError("timeout")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        job = Stage2Job(
+            storage_key="1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="imap:42",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            raw_msg_id=None,
+        )
+
+        for _ in range(STAGE2_MSG_QUARANTINE_THRESHOLD + 2):
+            await coord._async_process_stage2_job(job)
+
+        # No raw_msg_id → nothing ever added to the in-flight skip set.
+        assert "imap:42" not in coord._inflight_message_ids
 
 
 async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):

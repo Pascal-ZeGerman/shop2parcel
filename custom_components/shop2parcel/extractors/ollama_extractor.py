@@ -51,6 +51,15 @@ from .types import Stage2Result
 
 _LOGGER = logging.getLogger(__name__)
 
+# D-02 truncation cap (Stage-2 timeout-loop fix). A legitimate shipping email
+# has short prose and a handful of unique tracking URLs; a pathological
+# non-shipment email (e.g. a job alert) can carry tens of thousands of chars
+# and dozens of links. Left uncapped, that oversized prompt overruns the
+# Ollama request timeout on a slow CPU server and re-fails every poll cycle.
+# ~8000 chars ≈ 2000 tokens — generous headroom for real shipping emails.
+MAX_PROSE_CHARS = 8000
+MAX_LINKS = 20
+
 # D-07: snake_case, 1-32 chars, must start with a letter. Compiled once at
 # module scope (mirrors api/email_parser.py _TRACKING_PATTERNS convention).
 # Anchors are NOT included in the pattern — ``re.Pattern.fullmatch`` already
@@ -128,8 +137,10 @@ def preprocess_html(html: str) -> tuple[str, list[str]]:
         (header CTA, body CTA, footer link); dedup saves tokens without
         information loss.
 
-    No truncation cap (D-02 — pathological-email risk deferred to Phase 21
-    diagnostics).
+    Prose is capped at ``MAX_PROSE_CHARS`` and the link list at ``MAX_LINKS``
+    (D-02 pathological-email defense): an oversized non-shipment email would
+    otherwise produce a prompt that overruns the Ollama request timeout on a
+    slow CPU server and re-fails every poll cycle.
 
     Mirrors ``email_parser.py:127-151`` BS4-href idiom: ``find_all("a",
     href=True)`` plus the ``isinstance(href, str)`` guard for the bs4 typing
@@ -145,7 +156,7 @@ def preprocess_html(html: str) -> tuple[str, list[str]]:
         soup = BeautifulSoup(html, "lxml")
     except Exception as err:  # noqa: BLE001
         raise OllamaSchemaError(f"HTML preprocessing failed: {type(err).__name__}") from err
-    prose = soup.get_text(separator=" ", strip=True)
+    prose = soup.get_text(separator=" ", strip=True)[:MAX_PROSE_CHARS]
 
     seen: set[str] = set()
     links: list[str] = []
@@ -157,6 +168,8 @@ def preprocess_html(html: str) -> tuple[str, list[str]]:
             continue
         seen.add(href)
         links.append(href)
+        if len(links) >= MAX_LINKS:
+            break
 
     return prose, links
 
