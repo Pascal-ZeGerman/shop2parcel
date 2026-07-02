@@ -38,6 +38,13 @@ _LOGGER = logging.getLogger(__name__)
 GENERATE_PATH = "/api/generate"
 TAGS_PATH = "/api/tags"
 
+# Cap the number of tokens the model may generate per extraction. A tracking
+# extraction response is a small JSON object; without this bound a
+# grammar-constrained generation on a pathological non-shipment email can run
+# until num_ctx is exhausted and overrun the request timeout on a slow CPU
+# Ollama server (observed: same email timing out every poll cycle for hours).
+_NUM_PREDICT = 256
+
 # Module-level compiled fence-strip regex (R-03). Used only in Pass 2
 # of the parse pipeline (Pitfall 1) — Pass 1 normalizes the raw text
 # directly without any fence handling. The pattern matches both
@@ -168,7 +175,7 @@ class OllamaClient:
             # in `thinking` and leave `response` empty — observed in UAT against
             # qwen3.5:2b. See Ollama /api/generate `think` parameter.
             "format": schema,
-            "options": {"temperature": 0, "num_ctx": 4096},
+            "options": {"temperature": 0, "num_ctx": 4096, "num_predict": _NUM_PREDICT},
             "keep_alive": "5m",
         }
         _LOGGER.debug("Ollama generate: model=%s prompt_len=%d", self._model, len(prompt))

@@ -103,10 +103,34 @@ async def test_request_body_shape(client):
     # must land in `response`, not `thinking`. UAT against qwen3.5:2b showed
     # the empty-response gap when thinking is enabled.
     assert body["format"] == schema
-    assert body["options"] == {"temperature": 0, "num_ctx": 4096}
+    assert body["options"] == {"temperature": 0, "num_ctx": 4096, "num_predict": 256}
     assert body["keep_alive"] == "5m"
     assert body["model"] == "qwen3.5:2b"
     assert body["prompt"] == "test prompt"
+
+
+@pytest.mark.asyncio
+async def test_request_body_caps_generation_length(client):
+    """Generation is bounded by num_predict so a runaway extraction cannot
+    exceed the request timeout (Stage-2 poison-message timeout loop fix).
+
+    Without a num_predict cap, a grammar-constrained generation on a
+    pathological non-shipment email can run until num_ctx is exhausted; on a
+    slow CPU Ollama server that overruns the aiohttp total timeout and raises
+    OllamaTransientError every poll cycle.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+    }
+    envelope = {"response": '{"ok": true}', "done": True}
+    with aioresponses() as mock:
+        mock.post(GENERATE_URL, payload=envelope, status=200)
+        await client.async_generate("test prompt", schema)
+        requests = mock.requests[("POST", yarl.URL(GENERATE_URL))]
+        body = requests[0].kwargs["json"]
+    assert body["options"]["num_predict"] == 256
 
 
 # ---------------------------------------------------------------------------
