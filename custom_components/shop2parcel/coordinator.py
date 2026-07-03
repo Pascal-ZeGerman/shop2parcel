@@ -1645,14 +1645,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._release_inflight(job)  # re-fetch next poll (dry-run defer)
             return  # no POST, no dedup write, no pending_posts write, no store save
 
-        # Defensive skip-POST guard (finding #1327): under current code merged_shipment.tracking_number
-        # is never None — Stage-1 hits and prefetched fallback jobs carry a validated non-None
-        # number, and merge_llm_authoritative asserts a non-None Stage-1 number and keeps it (a
-        # None-tracking Stage-1 job trips that assertion and is handled by the worker's outer
-        # except, never reaching here). This guard is therefore not expected to fire in
-        # production; it remains as a cheap belt-and-braces check so a future merge/fallback
-        # change can never POST a None tracking number to parcelapp. It does NOT release the
-        # in-flight ID: a genuine no-data result is terminal (converges to seen), not a retry.
+        # Defensive skip-POST guard (finding #1327, comment corrected per IN-02): under
+        # current code merged_shipment.tracking_number is never None —
+        # ShipmentData.tracking_number is typed non-Optional str, Stage-1 hits and
+        # prefetched fallback jobs carry a validated non-None number, and
+        # merge_llm_authoritative contains no assert: its promotion path keeps the
+        # original Stage-1 value whenever Stage-2 declines (or MRG-04 discards), so it
+        # never downgrades the field to None. This guard is therefore unreachable under
+        # the current types; it remains as a cheap belt-and-braces check so a future
+        # merge/fallback/type change can never POST a None tracking number to parcelapp.
+        # It does NOT release the in-flight ID: a genuine no-data result is terminal
+        # (converges to seen), not a retry.
         if merged_shipment.tracking_number is None:
             self._emit_scan_event(
                 message_id=job.message_id,
