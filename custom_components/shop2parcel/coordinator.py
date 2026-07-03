@@ -1068,7 +1068,18 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         assert self.config_entry is not None
         raw = self.config_entry.options.get(CONF_QUEUE_MAXLEN, DEFAULT_QUEUE_MAXLEN)
-        maxlen = max(1, min(256, int(raw)))
+        try:
+            maxlen = max(1, min(256, int(raw)))
+        except (TypeError, ValueError):
+            # IN-05: a corrupt option (non-numeric string, None, list, ...) must not
+            # abort entry setup — fall back to the default with a WARNING, mirroring
+            # the _valid_nonneg_int discipline used for store hydration (ASVS V5).
+            _LOGGER.warning(
+                "queue_maxlen option is not a valid integer (type=%s); using default %d",
+                type(raw).__name__,
+                DEFAULT_QUEUE_MAXLEN,
+            )
+            maxlen = DEFAULT_QUEUE_MAXLEN
         self._stage2_queue = asyncio.Queue(maxsize=maxlen)
         self._stage2_enqueued_keys = set()
         _LOGGER.debug("Stage-2 queue constructed with maxsize=%d", maxlen)
@@ -1081,8 +1092,27 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         client = OllamaClient(session=session, base_url=url, model=model, timeout=timeout)
 
         # Phase 19 D-04: parse field_list from options (once at setup; never per-job).
+        # IN-05: type-guard the whole structure — a non-list option or a dict entry
+        # missing 'name' previously raised (TypeError iterating / KeyError on
+        # f["name"]) and aborted entry setup; skip malformed entries with a WARNING
+        # instead. Non-str names are dropped downstream by
+        # OllamaExtractor._validate_fields (api-review IN-05).
         raw_fields = self.config_entry.options.get(CONF_CUSTOM_FIELDS, [])
-        field_list = [(f["name"], f.get("description")) for f in raw_fields if isinstance(f, dict)]
+        if not isinstance(raw_fields, list):
+            _LOGGER.warning(
+                "custom_fields option is not a list (type=%s); ignoring custom fields",
+                type(raw_fields).__name__,
+            )
+            raw_fields = []
+        field_list: list[tuple[str, str | None]] = []
+        for f in raw_fields:
+            if not isinstance(f, dict) or "name" not in f:
+                _LOGGER.warning(
+                    "Skipping malformed custom field entry (type=%s, missing 'name')",
+                    type(f).__name__,
+                )
+                continue
+            field_list.append((f["name"], f.get("description")))
         self._extractor = OllamaExtractor(client=client, field_list=field_list)
 
         # Phase 19 D-02: spawn worker after queue and extractor are ready (QUE-04).

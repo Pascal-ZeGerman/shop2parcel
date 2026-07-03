@@ -196,6 +196,53 @@ async def test_queue_maxsize_clamped(hass, mock_stage2_config_entry):
         assert coord3._stage2_queue.maxsize == DEFAULT_QUEUE_MAXLEN
 
 
+async def test_start_stage2_survives_corrupt_options(hass, mock_stage2_config_entry, caplog):
+    """IN-05 (coordinators): corrupt queue_maxlen / custom_fields options must not
+    abort async_start_stage2 (entry setup) — default gracefully with a WARNING."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        hass.config_entries.async_update_entry(
+            mock_stage2_config_entry,
+            options={
+                CONF_OLLAMA_URL: "http://localhost:11434",
+                CONF_QUEUE_MAXLEN: "not-a-number",
+                "custom_fields": [
+                    {"description": "missing name key"},
+                    "not-a-dict",
+                    {"name": "valid_field", "description": "ok"},
+                ],
+            },
+        )
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        with caplog.at_level(logging.WARNING):
+            await coord.async_start_stage2()
+
+        # Queue constructed with the default maxlen despite the corrupt option.
+        assert coord._stage2_queue is not None
+        assert coord._stage2_queue.maxsize == DEFAULT_QUEUE_MAXLEN
+        # Extractor constructed; the valid custom field survived, junk was skipped.
+        assert coord._extractor is not None
+        field_names = [name for name, _desc in coord._extractor._fields]
+        assert "valid_field" in field_names
+        assert "queue_maxlen option is not a valid integer" in caplog.text
+        assert "malformed custom field entry" in caplog.text
+
+        await coord.async_stop_stage2()
+
+
 # ---------------------------------------------------------------------------
 # Test 4: async_stop_stage2 clears all state (QUE-01 lifecycle)
 # ---------------------------------------------------------------------------
