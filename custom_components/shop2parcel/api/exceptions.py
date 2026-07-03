@@ -2,24 +2,46 @@
 
 No HA imports. The coordinator (Phase 4) is the only layer
 that translates these to ConfigEntryAuthFailed / UpdateFailed.
+
+IN-07: every service has a base class (GmailError, ParcelAppError, ImapError,
+OllamaError) and the concrete taxonomy derives from it. Callers keep matching
+the concrete classes in their except-ladders; the bases exist so a future
+subclass (as happened with ParcelAppAlreadyAddedError) has a safe per-service
+fallback tier instead of falling through to a BLE001 catch-all.
 """
 
 from __future__ import annotations
 
 
-class GmailAuthError(Exception):
+class GmailError(Exception):
+    """Base class for all Gmail client errors (IN-07)."""
+
+
+class ParcelAppError(Exception):
+    """Base class for all parcelapp.net client errors (IN-07)."""
+
+
+class ImapError(Exception):
+    """Base class for all IMAP client errors (IN-07)."""
+
+
+class OllamaError(Exception):
+    """Base class for all Ollama client/extractor errors (IN-07)."""
+
+
+class GmailAuthError(GmailError):
     """OAuth2 token expired or revoked — coordinator raises ConfigEntryAuthFailed."""
 
 
-class GmailTransientError(Exception):
+class GmailTransientError(GmailError):
     """Network failure or Gmail 5xx — coordinator raises UpdateFailed, retries next poll."""
 
 
-class ParcelAppAuthError(Exception):
+class ParcelAppAuthError(ParcelAppError):
     """Invalid api-key — coordinator raises ConfigEntryAuthFailed."""
 
 
-class ParcelAppQuotaError(Exception):
+class ParcelAppQuotaError(ParcelAppError):
     """HTTP 429 — 20/day add-delivery quota exhausted.
 
     reset_at is None unless the API provides a timestamp in the 429 body.
@@ -31,11 +53,11 @@ class ParcelAppQuotaError(Exception):
         self.reset_at = reset_at
 
 
-class ParcelAppTransientError(Exception):
+class ParcelAppTransientError(ParcelAppError):
     """Network failure or parcelapp 5xx — coordinator logs and retries next poll."""
 
 
-class ParcelAppInvalidTrackingError(Exception):
+class ParcelAppInvalidTrackingError(ParcelAppError):
     """HTTP 400 — bad tracking number or carrier code.
 
     Coordinator logs and skips. Does NOT count as a forwarding success.
@@ -43,7 +65,7 @@ class ParcelAppInvalidTrackingError(Exception):
     """
 
 
-class ParcelAppAlreadyAddedError(Exception):
+class ParcelAppAlreadyAddedError(ParcelAppError):
     """HTTP 400 with error_message 'You have already added this delivery to the app'.
 
     Coordinator treats this as an idempotent success: the tracking number is already
@@ -52,15 +74,15 @@ class ParcelAppAlreadyAddedError(Exception):
     """
 
 
-class ImapAuthError(Exception):
+class ImapAuthError(ImapError):
     """IMAP login failure (bad credentials, account locked) — coordinator raises ConfigEntryAuthFailed."""
 
 
-class ImapTransientError(Exception):
+class ImapTransientError(ImapError):
     """IMAP connection failure, timeout, socket error — coordinator raises UpdateFailed."""
 
 
-class OllamaTransientError(Exception):
+class OllamaTransientError(OllamaError):
     """Network failure or Ollama 5xx — coordinator/extractor logs and retries next poll.
 
     Phase 15 OLLM-04: raised by OllamaClient on connection errors, timeouts, and
@@ -68,7 +90,7 @@ class OllamaTransientError(Exception):
     """
 
 
-class OllamaSchemaError(Exception):
+class OllamaSchemaError(OllamaError):
     """Ollama response cannot be parsed as JSON object after normalize + fence-strip fallback.
 
     Phase 15 OLLM-05/OLLM-06: raised by normalize_llm_payload when no `{` or `}` is
