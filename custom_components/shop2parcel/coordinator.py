@@ -22,7 +22,6 @@ import logging
 import re
 import time as _time
 from collections import OrderedDict, deque
-from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta
@@ -1175,23 +1174,44 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # CancelledError and TimeoutError are suppressed so unload never raises (QUE-05).
         if self._stage2_worker_task is not None and not self._stage2_worker_task.done():
             self._stage2_worker_task.cancel()
-            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            try:
                 await asyncio.wait_for(self._stage2_worker_task, timeout=5.0)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+            except Exception as err:  # noqa: BLE001
+                # IN-06: a worker that died with a non-CancelledError exception
+                # re-raises here when awaited; the QUE-05 contract says on-unload
+                # never raises, so log loudly and continue the teardown.
+                _LOGGER.error(
+                    "Stage-2 worker raised during shutdown (suppressed to honour "
+                    "QUE-05 'unload never raises'): %s",
+                    err,
+                    exc_info=True,
+                )
         self._stage2_worker_task = None
         self._extractor = None  # release OllamaClient / aiohttp session reference
 
-        # Step 2 (Phase 18 CR-02): drain and reset queue, preserving maxsize.
+        # IN-03: clear the enabled flag FIRST so a poll racing this teardown routes
+        # away from the enqueue seam, and so diagnostics never report Stage-2 as
+        # enabled on a stopped coordinator. A reload constructs a fresh coordinator
+        # and async_setup_entry re-derives the flag from options.
+        self._diagnostics.stage2_enabled = False
+
+        # Step 2 (Phase 18 CR-02, reworked per IN-03): drain the queue, then null it.
+        # Recreating a live workerless queue here let a poll that raced teardown keep
+        # enqueueing jobs nothing would ever drain, and email_processing_active
+        # (queue depth > 0) read True indefinitely. The None sentinel is handled by
+        # stage2_queue_depth and _enqueue_stage2; the old "preserve maxsize" recreate
+        # is obsolete — a reload rebuilds the queue in async_start_stage2 from options.
         if self._stage2_queue is None:
             return
-        prev_maxsize = self._stage2_queue.maxsize
         while not self._stage2_queue.empty():
             try:
                 self._stage2_queue.get_nowait()
                 self._stage2_queue.task_done()
             except asyncio.QueueEmpty:
                 break
-        # CR-02: preserve maxsize so backpressure invariant holds after a reload.
-        self._stage2_queue = asyncio.Queue(maxsize=prev_maxsize)
+        self._stage2_queue = None
         self._stage2_enqueued_keys.clear()
         # CR-02: gate on debug mode too (DBG-03 zero-store-writes) — this save fires
         # on every unload path, including a failed-first-refresh teardown.
@@ -1243,6 +1263,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # another message). Return False — THIS call did not create a job, so the caller
             # must not pin its message in-flight under a job it does not own (finding #674).
             return False
+        if self._stage2_queue is None:
+            # IN-03: stop/teardown race — async_stop_stage2 nulled the queue while a
+            # poll was still iterating. Drop this enqueue; the message stays
+            # re-fetchable and re-enqueues after the next (re)start.
+            _LOGGER.debug("Stage-2 queue is stopped — dropping enqueue for %s", normalized_tn)
+            return False
         job = Stage2Job(
             storage_key=storage_key,
             normalized_tn=normalized_tn,
@@ -1253,7 +1279,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             prefetched_result=prefetched_result,
             raw_msg_id=raw_msg_id,
         )
-        assert self._stage2_queue is not None
         try:
             self._stage2_queue.put_nowait(job)
         except asyncio.QueueFull:
@@ -1290,12 +1315,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         task_done() in finally: ensures queue.join() (if used in tests) never hangs.
         """
-        assert self.config_entry is not None
-        assert self._stage2_queue is not None
+        if self.config_entry is None or self._stage2_queue is None:
+            # IN-06: startup invariant violated (worker spawned on a torn-down
+            # coordinator). The former bare asserts crashed the background task and
+            # the AssertionError re-raised at unload await time, violating QUE-05
+            # ("on-unload never raises"); exit cleanly instead.
+            _LOGGER.error("Stage-2 worker started without config entry or queue — exiting")
+            return
+        # IN-03/IN-06: bind a local reference — async_stop_stage2 nulls
+        # self._stage2_queue during teardown, and the cancelled worker may still
+        # execute its finally-block after that point.
+        queue = self._stage2_queue
         _LOGGER.debug("Stage-2 worker started for entry %s", self.config_entry.entry_id)
         try:
             while True:
-                job: Stage2Job = await self._stage2_queue.get()
+                job: Stage2Job = await queue.get()
                 normalized_tn = job.normalized_tn
                 try:
                     # D-07 / IMAP parity: drain runs on the base class — ImapCoordinator
@@ -1330,7 +1364,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     self._stage2_enqueued_keys.discard(normalized_tn)
                     self._release_inflight(job)  # re-fetch next poll (not lost)
                 finally:
-                    self._stage2_queue.task_done()
+                    queue.task_done()
         except asyncio.CancelledError:
             _LOGGER.debug("Stage-2 worker cancelled — exiting cleanly")
             raise

@@ -280,12 +280,32 @@ async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
         )
         coord._stage2_queue.put_nowait(job)
         coord._stage2_enqueued_keys.add("1Z999AA10123456784")
+        coord._diagnostics.stage2_enabled = True
         assert not coord._stage2_queue.empty()
         assert len(coord._stage2_enqueued_keys) == 1
 
         await coord.async_stop_stage2()
-        assert coord._stage2_queue.empty() is True
+        # IN-03: stop nulls the queue (no live workerless queue), clears the
+        # in-flight keys, resets stage2_enabled, and email_processing_active
+        # can no longer read True from a stale queue depth.
+        assert coord._stage2_queue is None
         assert len(coord._stage2_enqueued_keys) == 0
+        assert coord._diagnostics.stage2_enabled is False
+        assert coord.stage2_queue_depth == 0
+        assert coord.email_processing_active is False
+
+        # IN-03: an enqueue racing the teardown is dropped gracefully (no assert crash).
+        assert (
+            coord._enqueue_stage2(
+                "1Z999AA10123456785",
+                "key-after-stop",
+                shipment,
+                "<html/>",
+                message_id="late-msg",
+                meta={"subject": "late", "from": "t@example.com"},
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------

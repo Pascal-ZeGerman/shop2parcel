@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -409,6 +410,77 @@ async def test_no_worker_leak_after_3_reloads(hass, mock_stage2_config_entry):
         leaked = [t for t in asyncio.all_tasks() if t.get_name() == "shop2parcel_stage2_worker"]
         assert len(leaked) == 0, f"Leaked worker tasks: {leaked}"
         assert coord._stage2_worker_task is None
+
+
+async def test_async_stop_stage2_swallows_worker_crash_exception(hass, mock_stage2_config_entry):
+    """IN-06: a worker task that died with a non-CancelledError exception (e.g.
+    AssertionError) re-raises when awaited during shutdown — async_stop_stage2
+    must swallow it (QUE-05: on-unload never raises) and finish the teardown."""
+    mock_stage2_config_entry.add_to_hass(hass)
+
+    async def _crashing_worker():
+        raise AssertionError("worker invariant blew up")
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch.object(
+            Shop2ParcelCoordinator,
+            "_async_stage2_worker",
+            side_effect=_crashing_worker,
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        # Keep a handle: async_stop_stage2 nulls coord._stage2_worker_task.
+        worker_task = coord._stage2_worker_task
+        # Give the crashing worker a tick to fail; retrieve the exception so the
+        # event loop does not log an unretrieved-exception warning.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert worker_task is not None and worker_task.done()
+
+        # Must NOT raise despite the dead task re-raising AssertionError on await.
+        await coord.async_stop_stage2()
+        assert coord._stage2_worker_task is None
+        assert coord._stage2_queue is None
+
+
+async def test_worker_exits_cleanly_without_queue(hass, mock_stage2_config_entry, caplog):
+    """IN-06: the worker started without a queue/config-entry exits with an ERROR
+    log instead of crashing on a bare assert."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        # No async_start_stage2 → _stage2_queue is None.
+        with caplog.at_level(logging.ERROR):
+            await coord._async_stage2_worker()
+        assert "without config entry or queue" in caplog.text
 
 
 async def test_async_stop_stage2_safe_when_worker_never_started(hass, mock_stage2_config_entry):
