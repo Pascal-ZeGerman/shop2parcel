@@ -30,6 +30,7 @@ Locked decisions:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -75,8 +76,15 @@ from .const import (
 )
 from .extractors.ollama_extractor import _FIELD_NAME_RE
 
+_LOGGER = logging.getLogger(__name__)
+
 _OLLAMA_LOCALHOST_URL = "http://localhost:11434"
 _OLLAMA_PROBE_TIMEOUT = 1.0
+# IN-04: /api/tags is a lightweight model-list call; the stored
+# CONF_OLLAMA_TIMEOUT (up to 300 s) is sized for generation requests. Using it
+# here would let a hung Ollama server freeze the options dialog for minutes on
+# every render and submit.
+_OLLAMA_TAGS_TIMEOUT = 10.0
 
 
 class OptionsFlowHandler(OptionsFlowWithReload):
@@ -101,18 +109,19 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         - async_get_tags raises OllamaTransientError (server unreachable / non-200)
         - async_get_tags returns an empty list
 
-        T-j6w-01: the stored CONF_OLLAMA_TIMEOUT bounds the fetch; a slow/
-        unreachable server fails fast into the text fallback rather than hanging
-        the HA options-flow render.
+        T-j6w-01 / IN-04: the short _OLLAMA_TAGS_TIMEOUT bounds the fetch; a
+        slow/unreachable server fails fast into the text fallback rather than
+        hanging the HA options-flow render for the full stored request timeout.
         """
         effective_url = url.strip()
         if not effective_url:
             return str
 
         session = async_get_clientsession(self.hass)
-        timeout = self.config_entry.options.get(CONF_OLLAMA_TIMEOUT, DEFAULT_OLLAMA_TIMEOUT)
         try:
-            tags: list[str] = await OllamaClient.async_get_tags(session, effective_url, timeout)
+            tags: list[str] = await OllamaClient.async_get_tags(
+                session, effective_url, _OLLAMA_TAGS_TIMEOUT
+            )
         except OllamaTransientError:
             # T-j6w-03: swallow server error detail; surface only as text fallback.
             return str
@@ -120,10 +129,13 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         if not tags:
             return str
 
-        # Ensure the currently-stored model is always in the options list so the
+        # Ensure the explicitly-stored model is always in the options list so the
         # current value pre-selects correctly even when the server list has changed.
-        stored_model = self.config_entry.options.get(CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
-        if stored_model not in tags:
+        # IN-07: only an ACTUALLY stored model is injected (no DEFAULT fallback) —
+        # the submit handler accepts exactly this injected value, keeping the
+        # dropdown and the save-time validation consistent.
+        stored_model = self.config_entry.options.get(CONF_OLLAMA_MODEL)
+        if stored_model and stored_model not in tags:
             tags = [stored_model, *tags]
 
         return SelectSelector(
@@ -309,16 +321,33 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             url = user_input.get(CONF_OLLAMA_URL, "").strip()
             if url:
                 session = async_get_clientsession(self.hass)
-                timeout = user_input.get(CONF_OLLAMA_TIMEOUT, DEFAULT_OLLAMA_TIMEOUT)
+                # IN-04: short fixed timeout — the stored CONF_OLLAMA_TIMEOUT (up
+                # to 300 s) would freeze the submit on a hung server.
                 try:
-                    tags = await OllamaClient.async_get_tags(session, url, timeout)
+                    tags = await OllamaClient.async_get_tags(session, url, _OLLAMA_TAGS_TIMEOUT)
                 except OllamaTransientError:
                     errors["base"] = "ollama_cannot_connect"
                 else:
                     model = user_input.get(CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
                     if model not in tags:
-                        errors["base"] = "ollama_model_not_found"
-                        description_placeholders["missing_model"] = model
+                        # IN-07: the dropdown deliberately offers the stored model
+                        # even when the live server no longer lists it (see
+                        # _build_ollama_model_field). Rejecting that same value
+                        # here would strand the user — unable to save ANY setting
+                        # until the model is re-pulled. Accept it with a warning;
+                        # reject everything else (typos, not-yet-pulled models).
+                        stored_model = self.config_entry.options.get(CONF_OLLAMA_MODEL)
+                        if stored_model is not None and model == stored_model:
+                            _LOGGER.warning(
+                                "Ollama model %s is not currently available on %s; "
+                                "keeping the stored selection — Stage-2 extraction "
+                                "will fail until the model is pulled again",
+                                model,
+                                url,
+                            )
+                        else:
+                            errors["base"] = "ollama_model_not_found"
+                            description_placeholders["missing_model"] = model
             if not errors:
                 # Strip whitespace from URL before persisting (WR-01).
                 user_input[CONF_OLLAMA_URL] = user_input.get(CONF_OLLAMA_URL, "").strip()

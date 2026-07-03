@@ -30,10 +30,15 @@ def test_strings_init_menu_options(strings):
 
 
 def test_strings_settings_step(strings):
-    """Test 2: settings step has title and description containing {locked_fields}."""
+    """Test 2: settings step has title and description containing both placeholders.
+
+    IN-02: {stage2_status} is computed on every render in async_step_settings —
+    it must actually be referenced by the description or it never reaches the UI.
+    """
     settings_step = strings["options"]["step"]["settings"]
     assert settings_step["title"] == "Shop2Parcel Settings"
     assert "{locked_fields}" in settings_step["description"]
+    assert "{stage2_status}" in settings_step["description"]
 
 
 def test_strings_settings_data_keys(strings):
