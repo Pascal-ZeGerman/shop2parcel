@@ -8,6 +8,7 @@ from __future__ import annotations
 import email
 import imaplib
 import logging
+import re
 import ssl
 from collections.abc import Callable
 from typing import Any, NoReturn
@@ -15,6 +16,18 @@ from typing import Any, NoReturn
 from .exceptions import ImapAuthError, ImapTransientError
 
 _LOGGER = logging.getLogger(__name__)
+
+# WR-11: volume bounds for the per-poll fetch. Without them, a broad search
+# over a busy mailbox (worse in debug mode, which forces a 365-day window)
+# fetches every matching message body — attachments included — into memory in
+# one executor call: hundreds of MB on a Raspberry-Pi-class HA host.
+# MAX_MESSAGES_PER_POLL: newest N UIDs are kept when the SEARCH over-returns.
+# MAX_MESSAGE_BYTES: messages larger than this are skipped entirely; the size
+# is read via a cheap RFC822.SIZE fetch BEFORE downloading the full body.
+MAX_MESSAGES_PER_POLL = 100
+MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+
+_RFC822_SIZE_RE = re.compile(rb"RFC822\.SIZE (\d+)")
 
 
 class ImapClient:
@@ -137,6 +150,17 @@ class ImapClient:
 
             uid_list = data[0].decode().split()
             _LOGGER.debug("IMAP SEARCH returned %d UIDs for folder %s", len(uid_list), "INBOX")
+            # WR-11: cap the number of messages fetched per poll. IMAP UIDs
+            # ascend with arrival order, so the LAST entries are the newest.
+            if len(uid_list) > MAX_MESSAGES_PER_POLL:
+                _LOGGER.warning(
+                    "IMAP SEARCH returned %d UIDs; processing only the newest %d "
+                    "this poll (narrow the search criteria or rescan window to "
+                    "cover older mail)",
+                    len(uid_list),
+                    MAX_MESSAGES_PER_POLL,
+                )
+                uid_list = uid_list[-MAX_MESSAGES_PER_POLL:]
             results: list[dict[str, Any]] = []
 
             for uid_str in uid_list:
@@ -144,6 +168,19 @@ class ImapClient:
                     uid_int = int(uid_str)
                 except ValueError:
                     _LOGGER.warning("IMAP server returned non-integer UID %r; skipping", uid_str)
+                    continue
+                # WR-11: check the message size via RFC822.SIZE before pulling the
+                # full body — a single huge message (large attachments) must not be
+                # loaded into memory at all. Fail-open: if the size cannot be read
+                # or parsed, proceed with the normal fetch.
+                size = _message_size(conn, uid_str)
+                if size is not None and size > MAX_MESSAGE_BYTES:
+                    _LOGGER.warning(
+                        "IMAP message UID %s is %d bytes (> %d byte cap); skipping",
+                        uid_str,
+                        size,
+                        MAX_MESSAGE_BYTES,
+                    )
                     continue
                 typ, msg_data = conn.uid("FETCH", uid_str, "(BODY.PEEK[])")
                 if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
@@ -176,6 +213,26 @@ class ImapClient:
                     conn.logout()
                 except Exception as logout_err:  # noqa: BLE001
                     _LOGGER.debug("IMAP logout failed (ignored): %s", logout_err)
+
+
+def _message_size(conn: imaplib.IMAP4, uid_str: str) -> int | None:
+    """Return the RFC822.SIZE of a message, or None when it cannot be determined.
+
+    WR-11: a cheap metadata-only FETCH issued before the full BODY.PEEK[] so
+    oversized messages (large attachments) are never downloaded. Returns None
+    (fail-open) on a non-OK response or an unparsable size — a metadata quirk
+    must not block legitimate shipment mail.
+    """
+    typ, size_data = conn.uid("FETCH", uid_str, "(RFC822.SIZE)")
+    if typ != "OK" or not size_data:
+        return None
+    for item in size_data:
+        raw = item[0] if isinstance(item, tuple) else item
+        if isinstance(raw, bytes):
+            match = _RFC822_SIZE_RE.search(raw)
+            if match:
+                return int(match.group(1))
+    return None
 
 
 def _classify_imap_error(err: Exception) -> NoReturn:

@@ -731,6 +731,125 @@ async def test_fetch_shipping_emails_forwards_verify_tls():
 
 
 # ---------------------------------------------------------------------------
+# WR-11 — per-poll fetch bounds (message count cap + size cap)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_caps_uid_list_at_newest_100(caplog):
+    """WR-11: a SEARCH returning more than MAX_MESSAGES_PER_POLL UIDs is capped
+    to the newest 100 (highest UIDs) with a WARNING."""
+    import logging  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        MAX_MESSAGES_PER_POLL,
+        ImapClient,
+    )
+
+    raw = b"Subject: shipped\r\n\r\nbody"
+    uids = list(range(1, 151))  # 150 UIDs, ascending = oldest → newest
+    body_fetched: list[str] = []
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [" ".join(str(u) for u in uids).encode()])
+        if command == "FETCH" and args[1] == "(RFC822.SIZE)":
+            return ("OK", [f"{args[0]} (UID {args[0]} RFC822.SIZE 512)".encode()])
+        if command == "FETCH":
+            body_fetched.append(args[0])
+            return ("OK", _fetch_tuple(raw))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"150"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with caplog.at_level(logging.WARNING):
+            results = client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+    assert len(results) == MAX_MESSAGES_PER_POLL
+    # Newest 100 = UIDs 51..150.
+    assert [r["uid"] for r in results] == list(range(51, 151))
+    assert body_fetched == [str(u) for u in range(51, 151)]
+    assert any("processing only the newest" in r.getMessage() for r in caplog.records)
+
+
+def test_fetch_skips_oversized_message(caplog):
+    """WR-11: a message whose RFC822.SIZE exceeds the 5 MB cap is skipped with a
+    WARNING and its full body is never fetched."""
+    import logging  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    raw = b"Subject: shipped\r\n\r\nbody"
+    body_fetched: list[str] = []
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"101 102"])
+        if command == "FETCH" and args[1] == "(RFC822.SIZE)":
+            size = 10_000_000 if args[0] == "101" else 512  # 101 is ~10 MB
+            return ("OK", [f"{args[0]} (UID {args[0]} RFC822.SIZE {size})".encode()])
+        if command == "FETCH":
+            body_fetched.append(args[0])
+            return ("OK", _fetch_tuple(raw))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"2"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with caplog.at_level(logging.WARNING):
+            results = client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+    assert [r["uid"] for r in results] == [102], "oversized message must be skipped"
+    assert body_fetched == ["102"], "full body of the oversized message must never be fetched"
+    assert any("byte cap" in r.getMessage() for r in caplog.records)
+
+
+def test_fetch_size_check_fails_open():
+    """WR-11: an unparsable / non-OK RFC822.SIZE response must NOT block the message —
+    the normal body fetch proceeds (fail-open)."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    raw = b"Subject: shipped\r\n\r\nbody"
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"101"])
+        if command == "FETCH" and args[1] == "(RFC822.SIZE)":
+            return ("NO", [b"size fetch not supported"])
+        if command == "FETCH":
+            return ("OK", _fetch_tuple(raw))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"1"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        results = client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    assert [r["uid"] for r in results] == [101]
+
+
+# ---------------------------------------------------------------------------
 # extract_text_body_imap / extract_html_body_imap — body extraction
 # ---------------------------------------------------------------------------
 
