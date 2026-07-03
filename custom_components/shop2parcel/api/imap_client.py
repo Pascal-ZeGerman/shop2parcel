@@ -123,6 +123,18 @@ class ImapClient:
                 conn = imaplib.IMAP4(host, port, timeout=30)
                 if tls_mode == "starttls":
                     conn.starttls(ssl_context=ssl_context)
+                else:
+                    # IN-06: tls_mode="none" is a supported config value, but the
+                    # LOGIN below sends the credentials over a plaintext socket —
+                    # make the risk visible instead of failing silently.
+                    _LOGGER.warning(
+                        "IMAP connection to %s:%s uses no TLS — credentials are "
+                        "being sent unencrypted. Switch TLS Mode to 'ssl' or "
+                        "'starttls' unless this server is on a fully trusted "
+                        "local network.",
+                        host,
+                        port,
+                    )
 
             _LOGGER.debug("IMAP connecting to %s:%s", host, port)
             conn.login(username, password)

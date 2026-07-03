@@ -731,6 +731,70 @@ async def test_fetch_shipping_emails_forwards_verify_tls():
 
 
 # ---------------------------------------------------------------------------
+# IN-06 — cleartext LOGIN warning for tls_mode="none"
+# ---------------------------------------------------------------------------
+
+
+def test_tls_mode_none_logs_cleartext_warning(caplog):
+    """IN-06: tls_mode='none' must log a WARNING that credentials go out unencrypted."""
+    import logging  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with caplog.at_level(logging.WARNING):
+            client._fetch_sync(
+                "imap.example.com", 143, "u", "p", "none", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+    assert any("sent unencrypted" in r.getMessage() for r in caplog.records), (
+        "cleartext LOGIN must be surfaced with a WARNING"
+    )
+
+
+def test_tls_modes_ssl_and_starttls_do_not_log_cleartext_warning(caplog):
+    """IN-06 regression guard: encrypted modes must NOT emit the cleartext warning."""
+    import logging  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_ssl_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_ssl_conn.login.return_value = ("OK", [b"logged in"])
+    mock_ssl_conn.select.return_value = ("OK", [b"0"])
+    mock_ssl_conn.uid.return_value = ("OK", [None])
+    mock_ssl_conn.logout.return_value = ("BYE", [b"bye"])
+
+    mock_plain_conn = MagicMock(spec=imaplib.IMAP4)
+    mock_plain_conn.starttls.return_value = ("OK", [b"tls started"])
+    mock_plain_conn.login.return_value = ("OK", [b"logged in"])
+    mock_plain_conn.select.return_value = ("OK", [b"0"])
+    mock_plain_conn.uid.return_value = ("OK", [None])
+    mock_plain_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with (
+        patch("imaplib.IMAP4_SSL", return_value=mock_ssl_conn),
+        patch("imaplib.IMAP4", return_value=mock_plain_conn),
+    ):
+        client = ImapClient(_inline_executor)
+        with caplog.at_level(logging.WARNING):
+            client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+            client._fetch_sync(
+                "imap.example.com", 143, "u", "p", "starttls", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+    assert not any("sent unencrypted" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # WR-11 — per-poll fetch bounds (message count cap + size cap)
 # ---------------------------------------------------------------------------
 
