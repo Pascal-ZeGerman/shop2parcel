@@ -119,9 +119,11 @@ async def async_get_config_entry_diagnostics(
         )
         raw_data = None
     data = raw_data or {}
-    sorted_shipments = sorted(data.values(), key=lambda s: s.email_date or 0, reverse=True)
-    recent_shipments: list[dict[str, Any]] = []
-    for i, shipment in enumerate(sorted_shipments[:10]):
+    # IN-09: filter out corrupt (non-dataclass) values BEFORE sorting — a bad
+    # value would otherwise crash the sort key (AttributeError on .email_date)
+    # before the guard could run, turning the diagnostics download into a 500.
+    shipments: list[Any] = []
+    for i, shipment in enumerate(data.values()):
         if not dataclasses.is_dataclass(shipment) or isinstance(shipment, type):
             _LOGGER.error(
                 "coordinator.data contains a non-dataclass value at index %d (type: %s) "
@@ -130,7 +132,17 @@ async def async_get_config_entry_diagnostics(
                 type(shipment).__name__,
             )
             continue
-        recent_shipments.append(dataclasses.asdict(shipment))
+        shipments.append(shipment)
+
+    def _email_date_key(shipment: Any) -> float:
+        """Sort key tolerant of missing/None/non-numeric email_date values."""
+        value = getattr(shipment, "email_date", 0) or 0
+        return value if isinstance(value, (int, float)) else 0
+
+    sorted_shipments = sorted(shipments, key=_email_date_key, reverse=True)
+    recent_shipments: list[dict[str, Any]] = [
+        dataclasses.asdict(shipment) for shipment in sorted_shipments[:10]
+    ]
 
     return {
         "config": config,
