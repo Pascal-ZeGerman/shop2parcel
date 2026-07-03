@@ -119,6 +119,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         # Success path: HA's base coordinator dispatches listeners after we return, so just
         # reset the flag here — no redundant dispatch (finding 7).
         self._poll_in_progress = False
+        # Quick-260703-mac (C): mark the first refresh done on the success return only.
+        # A poll that raises stays "first" until one clean pass completes, so the bootstrap
+        # window guard remains active across any transient first-poll failures.
+        self._first_refresh_done = True
         return result
 
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
@@ -451,6 +455,25 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # dedup guard and marks it seen then. Marking per-message at enqueue while work
                 # is per-shipment is what lost deferred/QueueFull jobs (findings #1/#594), so
                 # the tracking-number dedup converges the seen-ID instead of optimistic marking.
+
+                # Quick-260703-mac (A): first-refresh skip guard.
+                # On the bootstrap first refresh (inside HA's 300 s stage-2 global timeout)
+                # inline Ollama calls can overrun the window and cancel setup. Skip them here
+                # — Stage-1 regex already ran above; Stage-1-miss messages are left UN-marked
+                # (identical to the extractor-unavailable path below) so the next poll
+                # re-inspects and runs inline fallback normally. Stage-1 HIT enqueue is on a
+                # separate path and is unaffected.
+                if (
+                    self._diagnostics.stage2_enabled
+                    and not debug_mode
+                    and not self._first_refresh_done
+                ):
+                    _LOGGER.debug(
+                        "Gmail message %s: inline fallback deferred — first refresh not yet complete",
+                        msg_id,
+                    )
+                    continue  # leave UN-marked; re-inspected on the next poll
+
                 if (
                     self._diagnostics.stage2_enabled
                     and not debug_mode
@@ -476,6 +499,23 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                                 msg_id,
                                 self._stage2_fallback_extractions_this_poll,
                                 MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
+                            )
+                            continue  # do NOT cache (retry next poll)
+
+                        # Quick-260703-mac (B): per-poll wall-clock budget check.
+                        # Checked between extractions (a single in-flight call can still run up
+                        # to ollama_timeout). Budget-deferred messages are left UN-marked so
+                        # they are retried on the next poll — same as the cap's continue path.
+                        # Inside the result_fb is None branch so a prefetch-cache reuse
+                        # (already-computed, no new Ollama call) is not blocked.
+                        if (
+                            self._stage2_fallback_inline_deadline is not None
+                            and time.monotonic() >= self._stage2_fallback_inline_deadline
+                        ):
+                            _LOGGER.debug(
+                                "Gmail message %s: inline fallback wall-clock budget exhausted"
+                                " — deferring to next poll",
+                                msg_id,
                             )
                             continue  # do NOT cache (retry next poll)
 
