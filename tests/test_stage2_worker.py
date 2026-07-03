@@ -3841,6 +3841,67 @@ async def test_prefetched_result_skips_reextraction(hass, mock_stage2_config_ent
         await coord.async_stop_stage2()
 
 
+async def test_cap_skip_caches_prefetched_result_for_gatekeeper(hass, mock_stage2_config_entry):
+    """IN-07: when the worker cap-skips a job carrying a prefetched fallback result,
+    the result must be cached by raw message ID so the gatekeeper's re-fetch next
+    poll reuses it instead of running a SECOND Ollama pass on the same body."""
+    from custom_components.shop2parcel.const import MAX_STAGE2_POSTS_PER_POLL
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        prefetched = Stage2Result(
+            locked={
+                "tracking_number": "1Z999AA10123456784",
+                "carrier_name": "UPS",
+                "order_name": "#1234",
+            },
+            custom={},
+            passes_used=1,
+            latency_ms=12.0,
+        )
+        job = Stage2Job(
+            storage_key="msg_capped",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="gmail:msg_capped",
+            meta={"subject": "test", "from": "test@example.com"},
+            prefetched_result=prefetched,
+            raw_msg_id="msg_capped",
+        )
+        # Force the cap-skip branch.
+        coord._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
+        await coord._async_process_stage2_job(job)
+
+        # No POST, no extraction — and the prefetched result is preserved for the
+        # gatekeeper keyed by the raw message ID.
+        mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+        mock_extractor_cls.return_value.async_extract.assert_not_called()
+        assert coord._fallback_prefetch_cache.get("msg_capped") is prefetched
+
+        await coord.async_stop_stage2()
+
+
 async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stage2_config_entry):
     """Finding #501 (iter 4): the worker must not POST a tracking number that is already in
     _submitted_tracking_numbers (e.g. the drain just POSTed a quota-deferred copy of it before

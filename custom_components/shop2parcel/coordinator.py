@@ -81,6 +81,12 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 3
 
+# IN-07: bound for the fallback-prefetch cache (cap-deferred Stage2Results held
+# across polls so the gatekeeper does not re-run Ollama on the same body).
+# Cap-skips per poll are bounded by the queue size (≤ 256), so a small FIFO
+# bound is ample; entries are popped on reuse.
+_FALLBACK_PREFETCH_CACHE_MAXLEN = 100
+
 # Required fields and expected types for persisted_shipments store entries.
 # Used by _async_load_store to validate each entry before reconstructing ShipmentData.
 # Defined module-level for reuse and static-analysis visibility.
@@ -466,6 +472,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # from every poll's re-parse, so blocking at the enqueue seam is what actually
         # stops their retry loop. In-memory only — a restart clears it (self-healing).
         self._stage2_quarantined_tns: OrderedDict[str, None] = OrderedDict()
+        # IN-07: session-scoped cache of fallback-prefetched Stage2Results whose job
+        # the worker cap-skipped, keyed by raw Gmail message ID. The gatekeeper pops
+        # this cache before calling the extractor, so a cap-deferred fallback job is
+        # NOT re-run through Ollama on the re-fetch poll (previously the
+        # prefetched_result was simply discarded — doubling inference per capped
+        # job). FIFO-bounded at _FALLBACK_PREFETCH_CACHE_MAXLEN; in-memory only.
+        self._fallback_prefetch_cache: OrderedDict[str, Any] = OrderedDict()
         self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
@@ -1583,6 +1596,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
+            # IN-07: preserve the fallback's already-computed extraction across the
+            # cap-defer — discarding it made the gatekeeper run a SECOND Ollama pass
+            # on the same body next poll. The gatekeeper pops this cache before
+            # extracting (gmail_coordinator fallback path).
+            if job.prefetched_result is not None and job.raw_msg_id is not None:
+                self._fallback_prefetch_cache[job.raw_msg_id] = job.prefetched_result
+                while len(self._fallback_prefetch_cache) > _FALLBACK_PREFETCH_CACHE_MAXLEN:
+                    self._fallback_prefetch_cache.popitem(last=False)
             self._release_inflight(job)  # re-fetch next poll (cap-deferred, not lost)
             return  # no extractor, no POST, no dedup write
 

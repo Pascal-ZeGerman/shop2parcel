@@ -537,3 +537,134 @@ async def test_gmail_stage1_inline_post_description_falls_back_to_order_name(
     mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
     call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
     assert call_kwargs["description"] == "#1234"
+
+
+# ---------------------------------------------------------------------------
+# IN-07: fallback prefetch cache + matched/found diagnostics
+# ---------------------------------------------------------------------------
+
+
+async def test_fallback_cache_hit_skips_extractor_and_cap(hass, mock_stage2_entry):
+    """IN-07: a cap-deferred prefetched result cached by the worker must be reused by
+    the gatekeeper on the re-fetch poll — no second Ollama call, no cap slot consumed,
+    and the job is enqueued carrying the cached result."""
+    mock_stage2_entry.add_to_hass(hass)
+    msg_id = "msg_cache_hit"
+    mock_gmail = _make_stage1_miss_poll(msg_id)
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock()  # must never be awaited
+
+    cached_result = Stage2Result(
+        locked={
+            "tracking_number": "1Z999AA10123456784",
+            "carrier_name": "UPS",
+            "order_name": "#1001",
+        },
+        custom={},
+        passes_used=1,
+        latency_ms=10.0,
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Simulate the worker's cap-skip having cached the prefetched result.
+        coord._fallback_prefetch_cache[msg_id] = cached_result
+
+        await coord._async_update_data()
+
+    # No second Ollama pass; no cap slot / LLM attempt consumed.
+    mock_extractor.async_extract.assert_not_awaited()
+    assert coord._stage2_fallback_extractions_this_poll == 0
+    assert coord._diagnostics.stage2_llm_attempts_total == 0
+    # The cached result is consumed (popped) and handed to the enqueue.
+    assert msg_id not in coord._fallback_prefetch_cache
+    mock_enqueue.assert_called_once()
+    assert mock_enqueue.call_args.kwargs["prefetched_result"] is cached_result
+    # IN-07 (a): fallback-found shipments count in the matched/found diagnostics.
+    assert coord._diagnostics.emails_matched_total == 1
+    assert coord._diagnostics.tracking_numbers_found_total == 1
+    assert coord._diagnostics.last_poll_found[0]["tracking_number"] == "1Z999AA10123456784"
+
+
+async def test_fallback_enqueue_counts_matched_found_diagnostics(hass, mock_stage2_entry):
+    """IN-07 (a): a fallback-found shipment (fresh extraction path) must bump
+    emails_matched / tracking_numbers_found / last_poll_found on enqueue."""
+    mock_stage2_entry.add_to_hass(hass)
+    msg_id = "msg_fb_diag"
+    mock_gmail = _make_stage1_miss_poll(msg_id)
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(
+        return_value=Stage2Result(
+            locked={
+                "tracking_number": "1Z999AA10123456784",
+                "carrier_name": "UPS",
+                "order_name": "#1001",
+            },
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=True),
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+
+        await coord._async_update_data()
+
+    assert coord._diagnostics.emails_matched_total == 1
+    assert coord._diagnostics.last_poll_emails_matched == 1
+    assert coord._diagnostics.tracking_numbers_found_total == 1
+    found = coord._diagnostics.last_poll_found
+    assert len(found) == 1
+    assert found[0]["tracking_number"] == "1Z999AA10123456784"
+    assert found[0]["message_id"] == msg_id
