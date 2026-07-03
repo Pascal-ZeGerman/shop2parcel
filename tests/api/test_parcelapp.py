@@ -214,6 +214,27 @@ async def test_add_delivery_reset_at_past_falls_back_to_none(client):
         assert exc_info.value.reset_at is None
 
 
+async def test_add_delivery_payload_error_maps_to_transient(client):
+    """WR-04: aiohttp.ClientPayloadError (connection lost mid-body — a ClientError
+    but NOT a ClientConnectionError) must map to ParcelAppTransientError instead
+    of escaping the taxonomy and aborting the whole poll cycle."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, exception=aiohttp.ClientPayloadError("mid-body"))
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+
+
+async def test_get_deliveries_payload_error_maps_to_transient(client):
+    """WR-04: same guarantee for the view-deliveries GET."""
+    with aioresponses() as mock:
+        mock.get(
+            f"{VIEW_DELIVERIES_URL}?filter_mode=recent",
+            exception=aiohttp.ClientPayloadError("mid-body"),
+        )
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_get_deliveries()
+
+
 async def test_add_delivery_reset_at_clamped_to_24h(client):
     """WR-05/WR-07 (user decision): an absurd far-future reset_at must not pause
     forwarding indefinitely — it is clamped to at most 24 hours from now."""

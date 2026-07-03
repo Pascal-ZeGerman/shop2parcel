@@ -189,7 +189,11 @@ class ParcelAppClient:
                 raw_2xx = await _read_error_body(resp)
                 if isinstance(raw_2xx, dict) and raw_2xx.get("success") is not True:
                     _raise_from_error_body(raw_2xx)
-        except (TimeoutError, aiohttp.ClientConnectionError) as err:
+        except (TimeoutError, aiohttp.ClientError) as err:
+            # WR-04: catch the aiohttp base class — ClientPayloadError (connection
+            # lost mid-body) subclasses ClientError but NOT ClientConnectionError,
+            # and previously escaped the documented ParcelApp exception taxonomy,
+            # aborting the whole poll cycle instead of a per-message transient skip.
             raise ParcelAppTransientError(f"Network error: {err}") from err
 
     async def async_get_deliveries(self, filter_mode: str = "recent") -> list[dict]:
@@ -219,5 +223,6 @@ class ParcelAppClient:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 return data.get("deliveries", [])
-        except (TimeoutError, aiohttp.ClientConnectionError) as err:
+        except (TimeoutError, aiohttp.ClientError) as err:
+            # WR-04: catch the aiohttp base class (see async_add_delivery note).
             raise ParcelAppTransientError(f"Network error: {err}") from err
