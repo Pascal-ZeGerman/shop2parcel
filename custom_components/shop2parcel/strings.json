@@ -150,7 +150,8 @@
       "ollama_cannot_connect": "Cannot connect to the Ollama server. Check the URL and port, and ensure Ollama is running.",
       "ollama_model_not_found": "Model {missing_model} not found on the Ollama server. Run: ollama pull {missing_model}",
       "invalid_field_name": "Invalid field name. Use lowercase letters, digits, and underscores. Must start with a letter (max 32 chars).",
-      "locked_field_collision": "This field name is reserved and cannot be used as a custom field."
+      "locked_field_collision": "This field name is reserved and cannot be used as a custom field.",
+      "invalid_imap_search": "IMAP search criteria must not contain control characters (such as line breaks)."
     }
   },
   "issues": {

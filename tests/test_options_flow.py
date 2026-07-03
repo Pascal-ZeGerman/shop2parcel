@@ -656,6 +656,27 @@ async def test_options_flow_imap_saves_verify_tls_false(hass, mock_imap_config_e
     assert result["data"][CONF_IMAP_VERIFY_TLS] is False
 
 
+async def test_options_flow_imap_search_rejects_control_chars(hass, mock_imap_config_entry):
+    """WR-01: an imap_search containing CR/LF is rejected at entry time with a field error."""
+    handler, fake_entry = _make_imap_handler_with_options(options={})
+    user_input = {
+        CONF_POLL_INTERVAL: 60,
+        CONF_IMAP_SEARCH: 'SUBJECT "shipped"\r\nUID STORE 1 +FLAGS \\Deleted',
+        CONF_IMAP_VERIFY_TLS: True,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "",
+        CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "form", "control characters must NOT create an entry"
+    assert result["errors"] == {CONF_IMAP_SEARCH: "invalid_imap_search"}
+
+
 async def test_options_flow_gmail_still_shows_gmail_query(hass, mock_config_entry):
     """Phase 9 backwards compatibility: Gmail entry options form still shows gmail_query field."""
     handler, fake_entry = _make_handler_with_options(options={})

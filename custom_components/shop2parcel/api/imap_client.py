@@ -120,6 +120,15 @@ class ImapClient:
             if ok != "OK":
                 raise ImapTransientError(f"Failed to select INBOX: {ok}")
 
+            # WR-01: imaplib._command concatenates string args as raw bytes and
+            # appends CRLF with NO sanitization — a search string containing
+            # \r\n would inject arbitrary pipelined IMAP commands (e.g. STORE/
+            # EXPUNGE), silently breaking the D-09 read-only guarantee. Reject
+            # ALL control characters at the client boundary (defense-in-depth;
+            # the options flow rejects the same class at entry time).
+            if any(ord(c) < 32 or ord(c) == 127 for c in search_criteria):
+                raise ImapTransientError("search_criteria contains control characters")
+
             uid_arg = f"SINCE {since_date} {search_criteria}"
 
             typ, data = conn.uid("SEARCH", uid_arg)

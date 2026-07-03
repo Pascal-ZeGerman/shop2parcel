@@ -298,6 +298,13 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             )
 
         if user_input is not None:
+            # WR-01: reject control characters (CR/LF/NUL, ...) in the IMAP search
+            # string at entry time — imaplib performs no CRLF sanitization, so an
+            # embedded \r\n would inject pipelined IMAP commands. The client
+            # boundary re-checks in ImapClient._fetch_sync as defense-in-depth.
+            imap_search = user_input.get(CONF_IMAP_SEARCH)
+            if imap_search is not None and any(ord(c) < 32 or ord(c) == 127 for c in imap_search):
+                errors[CONF_IMAP_SEARCH] = "invalid_imap_search"
             url = user_input.get(CONF_OLLAMA_URL, "").strip()
             if url:
                 session = async_get_clientsession(self.hass)

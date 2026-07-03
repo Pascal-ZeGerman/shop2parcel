@@ -559,6 +559,64 @@ def test_logout_failure_is_swallowed():
 
 
 # ---------------------------------------------------------------------------
+# WR-01 — control characters in search_criteria (IMAP command injection)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "injected",
+    [
+        'SUBJECT "shipped"\r\nUID STORE 1 +FLAGS \\Deleted',  # CRLF pipelining
+        'SUBJECT "shipped"\nEXPUNGE',  # bare LF
+        'SUBJECT "shipped"\x00',  # NUL
+        '\tSUBJECT "shipped"',  # other C0 control char
+    ],
+)
+def test_search_criteria_with_control_chars_raises(injected):
+    """WR-01: control characters in search_criteria must raise before any SEARCH is issued.
+
+    imaplib appends raw CRLF to command strings with no sanitization — an
+    embedded \\r\\n injects pipelined commands (STORE/EXPUNGE), breaking the
+    D-09 read-only guarantee.
+    """
+    from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(ImapTransientError, match="control characters"):
+            client._fetch_sync("imap.example.com", 993, "u", "p", "ssl", injected, "8-May-2026")
+
+    # The injected string must never reach the server.
+    mock_conn.uid.assert_not_called()
+
+
+def test_search_criteria_without_control_chars_passes():
+    """WR-01 regression guard: a normal search string still reaches SEARCH unchanged."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    mock_conn.uid.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # CR-01 — TLS certificate verification
 # ---------------------------------------------------------------------------
 
