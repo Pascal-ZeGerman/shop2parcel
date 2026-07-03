@@ -1755,6 +1755,33 @@ async def test_fail_02_emits_stage2_failed_event_on_worker_outer_exception(coord
     assert "generic crash" in evt["error_msg"]
 
 
+async def test_fail_02_error_msg_is_sanitized_and_truncated(coord_for_fail_tests):
+    """WR-03: stage2_failed error_msg must be HTML-stripped and capped at 100 chars.
+
+    OllamaSchemaError messages can embed raw model output derived from email
+    bodies (arbitrary third-party content/PII); scan events flow into
+    recorder-persisted sensor attributes and the diagnostics download, so this
+    site must apply the same _sanitise_parser_error treatment as every other
+    error_msg site (W9/P11-WR-04 convention).
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError
+
+    coord = coord_for_fail_tests
+    job = _make_job()
+    # Simulate a schema error carrying raw model/email-derived HTML content.
+    err = OllamaSchemaError(
+        "unexpected output: <div class='track'>jane.doe@example.com ordered pills</div> " * 20
+    )
+
+    coord._record_stage2_failure(job, err)
+
+    evt = coord.diagnostics.scan_events[-1]
+    error_msg = evt["error_msg"]
+    assert len(error_msg) <= 100, "error_msg must be truncated to 100 chars"
+    assert "<" not in error_msg, f"HTML tag leaked into error_msg: {error_msg!r}"
+    assert ">" not in error_msg, f"HTML tag leaked into error_msg: {error_msg!r}"
+
+
 # ---------------------------------------------------------------------------
 # FAIL-04: threshold notification + cooldown + re-fire
 # ---------------------------------------------------------------------------

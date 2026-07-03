@@ -724,12 +724,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         # FAIL-02: append stage2_failed activity event with error metadata.
         # Use kwarg tracking_number= (not normalized_tn=) per _emit_scan_event signature (Pitfall 5).
+        # WR-03: sanitize like every other error_msg site — OllamaSchemaError
+        # messages can embed raw model output derived from email bodies, and
+        # scan events land in recorder-persisted sensor attributes and the
+        # diagnostics download (same class of leak as W9/P11-WR-04).
         self._emit_scan_event(
             message_id=message_id,
             meta=meta,
             outcome="stage2_failed",
             tracking_number=normalized_tn,
-            extra={"error_type": type(err).__name__, "error_msg": str(err)},
+            extra={"error_type": type(err).__name__, "error_msg": _sanitise_parser_error(err)},
         )
 
         # DIAG-02: lifetime failure counters; stage2_schema_error_total is a sub-counter.
