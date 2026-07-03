@@ -1164,7 +1164,32 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._async_stage2_worker(),
             name="shop2parcel_stage2_worker",
         )
+        # IN-06 follow-up: retrieve a crashed worker's exception at completion time.
+        # async_stop_stage2 only awaits tasks that are still running — a worker that
+        # died BEFORE stop would otherwise leave its exception unretrieved, surfacing
+        # only as asyncio's "Task exception was never retrieved" at GC (and silently
+        # in production until then).
+        self._stage2_worker_task.add_done_callback(self._log_stage2_worker_crash)
         _LOGGER.debug("Stage-2 worker spawned for entry %s", self.config_entry.entry_id)
+
+    @callback
+    def _log_stage2_worker_crash(self, task: asyncio.Task) -> None:
+        """Retrieve and log a Stage-2 worker exception the moment the task ends.
+
+        Marks the exception as retrieved (task.exception()) so asyncio never emits
+        an unretrieved-exception warning, and makes an unexpected worker death loud
+        in the HA log instead of silent until unload.
+        """
+        if task.cancelled():
+            return
+        err = task.exception()
+        if err is not None:
+            _LOGGER.error(
+                "Stage-2 worker crashed; Stage-2 extraction is stopped until the "
+                "integration is reloaded: %s",
+                err,
+                exc_info=err,
+            )
 
     async def async_stop_stage2(self) -> None:
         """Cancel worker (bounded 5 s), drain queue, release extractor.
