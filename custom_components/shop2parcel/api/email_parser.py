@@ -572,33 +572,46 @@ class EmailParser:
             "carrier_regex": carrier is not None,
         }
 
-        if not tracking:
+        def _href_fallback_result() -> ParseResult | None:
+            """Try the href fallback; None when no valid TN sits in a link.
+
+            IN-01: shared by the no-label AND labelled-but-invalid branches — the
+            latter previously returned tracking_invalid without ever consulting the
+            hrefs, so an email whose 'Tracking number:' label captured a regional
+            carrier code missed a valid carrier TN sitting in its tracking link.
+            """
             href_tracking = _extract_tracking_from_hrefs(soup)
-            if href_tracking and _looks_like_tracking(href_tracking):
-                _LOGGER.debug(
-                    "Tier 1 href fallback matched TN=%s for message %s",
-                    href_tracking,
-                    message_id,
-                )
-                return ParseResult(
-                    shipment=ShipmentData(
-                        tracking_number=href_tracking,
-                        carrier_name=(
-                            next(
-                                (g for g in (carrier.group(1), carrier.group(2)) if g),
-                                "Unknown",
-                            ).strip()
-                            if carrier
-                            else _infer_carrier(href_tracking)
-                        ),
-                        order_name=f"#{order.group(1).upper()}" if order else "",
-                        message_id=message_id,
-                        email_date=email_date,
+            if not (href_tracking and _looks_like_tracking(href_tracking)):
+                return None
+            _LOGGER.debug(
+                "Tier 1 href fallback matched TN=%s for message %s",
+                href_tracking,
+                message_id,
+            )
+            return ParseResult(
+                shipment=ShipmentData(
+                    tracking_number=href_tracking,
+                    carrier_name=(
+                        next(
+                            (g for g in (carrier.group(1), carrier.group(2)) if g),
+                            "Unknown",
+                        ).strip()
+                        if carrier
+                        else _infer_carrier(href_tracking)
                     ),
-                    skip_reason=None,
-                    strategy_used=STRATEGY_REGEX,
-                    keyword_hits=hits,
-                )
+                    order_name=f"#{order.group(1).upper()}" if order else "",
+                    message_id=message_id,
+                    email_date=email_date,
+                ),
+                skip_reason=None,
+                strategy_used=STRATEGY_REGEX,
+                keyword_hits=hits,
+            )
+
+        if not tracking:
+            href_result = _href_fallback_result()
+            if href_result is not None:
+                return href_result
             return ParseResult(
                 shipment=None,
                 skip_reason="no_tracking_label",
@@ -608,6 +621,11 @@ class EmailParser:
 
         raw_tracking = tracking.group(1).upper()
         if not _looks_like_tracking(raw_tracking):
+            # IN-01: consistent recall with the no-label branch above — consult the
+            # href fallback before declaring the labelled token invalid.
+            href_result = _href_fallback_result()
+            if href_result is not None:
+                return href_result
             return ParseResult(
                 shipment=None,
                 skip_reason="tracking_invalid",

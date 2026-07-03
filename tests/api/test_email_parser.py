@@ -566,6 +566,24 @@ def test_skip_reason_tracking_invalid_from_tier1() -> None:
     assert result.keyword_hits["tracking_regex"] is True
 
 
+def test_tier1_invalid_labeled_token_falls_back_to_href() -> None:
+    """IN-01: a labelled-but-invalid token (e.g. regional carrier code) must not
+    preclude the href fallback — consistent recall with the no-label branch."""
+    html = (
+        "<html><body>"
+        "<div>Tracking number: NOTRACK1234 Order #1234</div>"
+        '<a href="https://track.example.com/?num=1Z999AA10123456784">Track</a>'
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_regex_tier1(html, "x", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.shipment.order_name == "#1234"
+    assert result.skip_reason is None
+    assert result.strategy_used == "regex_fallback"
+
+
 def test_skip_reason_no_tracking_pattern_from_full_parse() -> None:
     """Full parse of plain-text-only email returns skip_reason='no_tracking_pattern' from Tier 2."""
     parser = EmailParser()
