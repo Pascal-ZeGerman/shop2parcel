@@ -562,6 +562,28 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
             )
 
+    def _record_submitted_tn(self, normalized_tn: str) -> None:
+        """Record a tracking number in the dedup set and trim FIFO to the cap.
+
+        IN-01: single helper for every dedup-write site (inline POST success,
+        AlreadyAdded/InvalidTracking suppression, worker success, drain) so the
+        trim policy cannot drift per-site. Previously each site used a
+        single-eviction ``if`` (one popitem per insert) while the seen-ID cache
+        used ``while``.
+        """
+        self._submitted_tracking_numbers[normalized_tn] = None
+        self._trim_submitted_tns()
+
+    def _trim_submitted_tns(self) -> None:
+        """FIFO-trim _submitted_tracking_numbers to MAX_SUBMITTED_TRACKING_NUMBERS.
+
+        IN-01: ``while`` (not ``if``) so an oversized set — e.g. a hand-edited or
+        pre-fix store hydrated by _async_load_store — converges to the cap in one
+        call instead of shrinking by one entry per insert.
+        """
+        while len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+            self._submitted_tracking_numbers.popitem(last=False)
+
     def _mark_message_seen(self, msg_id: str) -> None:
         """Record a Gmail message ID as processed (seen) so it is skipped on future polls.
 
@@ -1446,10 +1468,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._stage2_posts_this_poll += 1
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
             self._record_stage2_success()
-            # Write dedup so next poll does not retry this TN.
-            self._submitted_tracking_numbers[normalized_tn] = None
-            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                self._submitted_tracking_numbers.popitem(last=False)
+            # Write dedup so next poll does not retry this TN (IN-01: shared helper).
+            self._record_submitted_tn(normalized_tn)
             # Pitfall 2: remove ONLY after a successful POST (never before).
             del self._pending_posts[storage_key]
             # Pitfall 5: re-snapshot immediately before async_set_updated_data to avoid
@@ -1741,10 +1761,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # and no parcelapp quota was consumed, so counting these ate
             # MAX_STAGE2_POSTS_PER_POLL cap slots for non-POST outcomes (the D-12
             # contract is "increment only on successful POST").
-            # Write dedup so next poll does not retry; discard in-flight key.
-            self._submitted_tracking_numbers[normalized_tn] = None
-            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                self._submitted_tracking_numbers.popitem(last=False)
+            # Write dedup so next poll does not retry; discard in-flight key (IN-01: shared helper).
+            self._record_submitted_tn(normalized_tn)
             self._stage2_enqueued_keys.discard(normalized_tn)
             # WR-08: mirror the success path — persist AND publish. Persisting without
             # async_set_updated_data left store and live data divergent (the entry was
@@ -1769,9 +1787,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
         self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
         self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
-        self._submitted_tracking_numbers[normalized_tn] = None
-        if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-            self._submitted_tracking_numbers.popitem(last=False)
+        self._record_submitted_tn(normalized_tn)  # IN-01: shared dedup-write helper
         self._stage2_enqueued_keys.discard(normalized_tn)  # Phase 18 WR-01 fix
 
         # D-06: snapshot pattern — never mutate self.data directly.
@@ -1832,6 +1848,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._submitted_tracking_numbers = OrderedDict(
             (normalize_tracking_number(tn), None) for tn in stored_list if isinstance(tn, str)
         )
+        # IN-01: trim once after hydration — an oversized (hand-edited or pre-fix)
+        # store list previously stayed above the cap and shrank by one per insert.
+        self._trim_submitted_tns()
         qe = stored.get("quota_exhausted_until")
         self._quota_exhausted_until = qe if isinstance(qe, int) else None
         _LOGGER.debug(

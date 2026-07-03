@@ -814,9 +814,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     msg_pending_retry = True
                     continue
                 except ParcelAppAlreadyAddedError:
-                    self._submitted_tracking_numbers[normalized] = None
-                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                        self._submitted_tracking_numbers.popitem(last=False)
+                    self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     self._emit_scan_event(
@@ -834,10 +832,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         msg_id,
                         err,
                     )
-                    # Record normalized tracking number to suppress infinite retries.
-                    self._submitted_tracking_numbers[normalized] = None
-                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                        self._submitted_tracking_numbers.popitem(last=False)
+                    # Record normalized tracking number to suppress infinite retries
+                    # (IN-01: shared dedup-write helper).
+                    self._record_submitted_tn(normalized)
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
@@ -873,9 +870,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     continue
 
                 # 6. Success — record tracking number dedup, save immediately (D-10/D-03).
-                self._submitted_tracking_numbers[normalized] = None
-                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                    self._submitted_tracking_numbers.popitem(last=False)
+                self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
                 current_data[storage_key] = shipment
                 self._pending_shipments = current_data
