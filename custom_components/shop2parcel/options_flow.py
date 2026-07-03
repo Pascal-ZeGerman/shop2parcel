@@ -337,6 +337,13 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                 new_options.pop(CONF_STAGE2_ENABLED, None)
                 return self.async_create_entry(title="", data=new_options)
 
+        if user_input is not None:
+            # WR-07: this point is only reached on a validation error. The schema
+            # was built from STORED options, so re-showing it verbatim would revert
+            # every field the user edited — inviting an accidental re-submit of the
+            # old values. Overlay the submitted input as suggested values instead.
+            schema = self.add_suggested_values_to_schema(schema, user_input)
+
         return self.async_show_form(
             step_id="settings",
             data_schema=schema,

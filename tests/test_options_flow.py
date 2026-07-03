@@ -248,6 +248,68 @@ async def test_settings_happy_path(hass, mock_config_entry):
     assert result["type"] == "create_entry"
 
 
+async def test_settings_error_rerender_preserves_user_input(hass, mock_config_entry):
+    """WR-07: a validation error re-renders the form with the SUBMITTED values.
+
+    The schema is built from stored options before validation runs; re-showing it
+    verbatim would silently revert every field the user edited. The submitted
+    input must be overlaid as suggested values so nothing is lost.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_POLL_INTERVAL: 30,
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: "llama3.1:8b",
+        }
+    )
+    user_input = {
+        CONF_POLL_INTERVAL: 45,
+        CONF_GMAIL_QUERY: "from:etsy",
+        CONF_RESCAN_WINDOW_DAYS: 60,
+        CONF_DEBUG_MODE: True,
+        CONF_OLLAMA_URL: "http://10.0.0.9:11434",
+        CONF_OLLAMA_MODEL: "typo-model:1b",
+        CONF_OLLAMA_TIMEOUT: 60,
+        CONF_QUEUE_MAXLEN: 12,
+    }
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["llama3.1:8b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "ollama_model_not_found"
+
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    for key, expected in (
+        (CONF_POLL_INTERVAL, 45),
+        (CONF_GMAIL_QUERY, "from:etsy"),
+        (CONF_RESCAN_WINDOW_DAYS, 60),
+        (CONF_DEBUG_MODE, True),
+        (CONF_OLLAMA_URL, "http://10.0.0.9:11434"),
+        (CONF_OLLAMA_MODEL, "typo-model:1b"),
+        (CONF_OLLAMA_TIMEOUT, 60),
+        (CONF_QUEUE_MAXLEN, 12),
+    ):
+        marker = schema_dict[key]
+        suggested = (marker.description or {}).get("suggested_value")
+        assert suggested == expected, (
+            f"{key}: expected submitted value {expected!r} as suggested_value, got {suggested!r}"
+        )
+
+
 async def test_settings_save_drops_dead_stage2_enabled_key(hass, mock_config_entry):
     """IN-01: saving settings removes the dead stage2_enabled key from stored options.
 
