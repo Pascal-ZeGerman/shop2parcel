@@ -305,9 +305,7 @@ async def test_imap_storage_key_qualified_with_uidvalidity(hass, mock_imap_no_st
     assert "42" not in data
 
 
-async def test_imap_seen_gate_skips_reparse_of_terminal_messages(
-    hass, mock_imap_no_stage2_entry
-):
+async def test_imap_seen_gate_skips_reparse_of_terminal_messages(hass, mock_imap_no_stage2_entry):
     """WR-06: a message that reached a terminal decision (posted) is marked seen and
     its body is NOT re-parsed on the next poll — the IMAP path previously re-parsed
     the entire rescan window every poll."""

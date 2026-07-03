@@ -191,7 +191,7 @@ class ImapClient:
                 _uv_typ, uv_data = conn.response("UIDVALIDITY")
                 if uv_data and uv_data[0] is not None:
                     uidvalidity = int(uv_data[0])
-            except (ValueError, TypeError):
+            except (ValueError, TypeError):  # fmt: skip
                 uidvalidity = None
 
             # WR-01: imaplib._command concatenates string args as raw bytes and

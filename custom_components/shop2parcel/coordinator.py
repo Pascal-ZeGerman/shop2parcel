@@ -1104,7 +1104,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         raw = self.config_entry.options.get(CONF_QUEUE_MAXLEN, DEFAULT_QUEUE_MAXLEN)
         try:
             maxlen = max(1, min(256, int(raw)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # fmt: skip
             # IN-05: a corrupt option (non-numeric string, None, list, ...) must not
             # abort entry setup — fall back to the default with a WARNING, mirroring
             # the _valid_nonneg_int discipline used for store hydration (ASVS V5).
@@ -1195,7 +1195,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_worker_task.cancel()
             try:
                 await asyncio.wait_for(self._stage2_worker_task, timeout=5.0)
-            except (asyncio.CancelledError, TimeoutError):
+            except (asyncio.CancelledError, TimeoutError):  # fmt: skip
                 pass
             except Exception as err:  # noqa: BLE001
                 # IN-06: a worker that died with a non-CancelledError exception

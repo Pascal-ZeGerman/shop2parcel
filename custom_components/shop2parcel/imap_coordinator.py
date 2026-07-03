@@ -278,9 +278,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             # WR-06: meta + body extraction batched into one executor job per
             # message — three email.message_from_bytes/MIME-walk passes that must
             # not run on the HA event loop.
-            imap_meta, html = await self.hass.async_add_executor_job(
-                _parse_imap_message, raw_bytes
-            )
+            imap_meta, html = await self.hass.async_add_executor_job(_parse_imap_message, raw_bytes)
             if not html:
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
