@@ -4213,6 +4213,69 @@ async def test_gmail_poll_drains_pending_posts_without_new_jobs(hass, mock_stage
     assert "deferred_key" in data, "drained shipment must survive the poll-end merge (CR-01)"
 
 
+async def test_worker_already_added_publishes_and_consumes_no_cap_slot(
+    hass, mock_stage2_config_entry
+):
+    """WR-08: the AlreadyAdded/InvalidTracking worker path must publish the merged
+    shipment via async_set_updated_data (like the success path — otherwise store and
+    live data diverge and the next poll clobbers the store entry) and must NOT
+    consume a MAX_STAGE2_POSTS_PER_POLL cap slot (no POST succeeded, no quota used)."""
+    from custom_components.shop2parcel.api.exceptions import ParcelAppAlreadyAddedError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        tn = "1Z999AA10123456784"
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={"tracking_number": tn}, custom={}, passes_used=1, latency_ms=10.0
+            )
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        job = Stage2Job(
+            storage_key="already_key",
+            normalized_tn=tn,
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+        )
+        await coord._async_process_stage2_job(job)
+
+        # WR-08: the shipment must be PUBLISHED to live data, not only persisted.
+        assert coord.data is not None and "already_key" in coord.data, (
+            "AlreadyAdded path must publish via async_set_updated_data like the success path"
+        )
+        # WR-08/D-12: no cap slot consumed for a non-POST outcome.
+        assert coord._stage2_posts_this_poll == 0, (
+            "AlreadyAdded must not consume a MAX_STAGE2_POSTS_PER_POLL slot"
+        )
+        # Existing semantics preserved: dedup written, key discarded.
+        assert tn in coord._submitted_tracking_numbers
+        assert tn not in coord._stage2_enqueued_keys
+
+        await coord.async_stop_stage2()
+
+
 async def test_worker_auth_failure_not_counted_as_ollama_failure(
     hass, mock_stage2_config_entry
 ):

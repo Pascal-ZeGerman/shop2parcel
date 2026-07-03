@@ -1410,10 +1410,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
             # Success or AlreadyAdded/InvalidTracking: bookkeeping (Pitfall 3: call
             # _record_stage2_success on drain POSTs too — they are real POSTs).
-            self._stage2_posts_this_poll += 1  # Pitfall 4: shared counter
-            self._record_stage2_success()
             if posted_2xx:
+                # WR-08/D-12: only a genuine 2xx POST consumes a cap slot — AlreadyAdded/
+                # InvalidTracking consumed no parcelapp quota (Pitfall 4: shared counter).
+                self._stage2_posts_this_poll += 1
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
+            self._record_stage2_success()
             # Write dedup so next poll does not retry this TN.
             self._submitted_tracking_numbers[normalized_tn] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
@@ -1705,16 +1707,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._diagnostics.stage2_already_added_total += 1
-            self._stage2_posts_this_poll += 1
+            # WR-08: do NOT increment _stage2_posts_this_poll here — no POST succeeded
+            # and no parcelapp quota was consumed, so counting these ate
+            # MAX_STAGE2_POSTS_PER_POLL cap slots for non-POST outcomes (the D-12
+            # contract is "increment only on successful POST").
             # Write dedup so next poll does not retry; discard in-flight key.
             self._submitted_tracking_numbers[normalized_tn] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                 self._submitted_tracking_numbers.popitem(last=False)
             self._stage2_enqueued_keys.discard(normalized_tn)
-            base = self.data if self.data is not None else {}
-            updated = {**base, job.storage_key: merged_shipment}
-            self._pending_shipments = updated
+            # WR-08: mirror the success path — persist AND publish. Persisting without
+            # async_set_updated_data left store and live data divergent (the entry was
+            # invisible to sensors/cleanup), and the next poll's snapshot then dropped
+            # it from the store again. Re-snapshot immediately before publish (S2 race).
+            self._pending_shipments = {**(self.data or {}), job.storage_key: merged_shipment}
             await self._async_save_store()
+            self.async_set_updated_data({**(self.data or {}), job.storage_key: merged_shipment})
             return
         except ParcelAppTransientError as err:
             _LOGGER.warning(
