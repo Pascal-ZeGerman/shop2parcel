@@ -796,8 +796,9 @@ async def test_second_poll_runs_inline_fallback(hass, mock_stage2_entry):
         mock_extractor.async_extract.reset_mock()
         await coord._async_update_data()
 
-    # async_extract must have been awaited on the second poll.
-    mock_extractor.async_extract.assert_awaited()
+    # async_extract must have been awaited exactly once on the second poll
+    # (single message; a double-extraction bug would make this fail).
+    mock_extractor.async_extract.assert_awaited_once()
 
 
 async def test_wall_clock_budget_stops_inline_fallback(hass, mock_stage2_entry):

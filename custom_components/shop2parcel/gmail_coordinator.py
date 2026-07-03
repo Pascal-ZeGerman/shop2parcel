@@ -466,6 +466,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 if (
                     self._diagnostics.stage2_enabled
                     and not debug_mode
+                    and self._extractor is not None
                     and not self._first_refresh_done
                 ):
                     _LOGGER.debug(
