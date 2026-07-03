@@ -259,3 +259,80 @@ async def test_imap_poll_options_verify_tls_overrides_data(hass):
 
     call_kwargs = mock_imap_cls.return_value.fetch_shipping_emails.call_args.kwargs
     assert call_kwargs["verify_tls"] is False
+
+
+# ---------------------------------------------------------------------------
+# IN-04: UIDVALIDITY-qualified storage keys
+# ---------------------------------------------------------------------------
+
+
+async def test_imap_storage_key_qualified_with_uidvalidity(hass, mock_imap_no_stage2_entry):
+    """IN-04: when the client reports UIDVALIDITY, coordinator.data keys are
+    '{uidvalidity}:{uid}' so a mailbox rebuild (which may reuse UIDs) cannot
+    collide with previously persisted entries."""
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+
+    raw_msg = {
+        "uid": 42,
+        "raw": b"From: a@example.com\r\nSubject: shipped\r\n\r\n",
+        "uidvalidity": 1748359721,
+    }
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(
+            "1Z999AA10123456784"
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+        data = await coord._async_update_data()
+
+    assert "1748359721:42" in data
+    assert "42" not in data
+
+
+async def test_imap_storage_key_falls_back_to_bare_uid(hass, mock_imap_no_stage2_entry):
+    """IN-04 backward compatibility: without a reported UIDVALIDITY (older client
+    payloads, servers that omit it), the storage key stays the bare UID."""
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+
+    raw_msg = {"uid": 42, "raw": b"From: a@example.com\r\nSubject: shipped\r\n\r\n"}
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(
+            "1Z999AA10123456784"
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+        data = await coord._async_update_data()
+
+    assert "42" in data

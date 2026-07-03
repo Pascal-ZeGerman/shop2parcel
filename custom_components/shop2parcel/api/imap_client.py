@@ -71,7 +71,9 @@ class ImapClient:
     ) -> list[dict[str, Any]]:
         """Fetch shipping emails via IMAP using SINCE-date search.
 
-        D-11: Returns list[dict] with keys "uid" (int) and "raw" (bytes).
+        D-11: Returns list[dict] with keys "uid" (int), "raw" (bytes), and
+        "uidvalidity" (int | None — IN-04: the mailbox UIDVALIDITY when the
+        server reports it, so callers can build rebuild-safe storage keys).
         since_date: IMAP SEARCH date string in DD-Mon-YYYY format (e.g. "8-May-2026").
         Phase 10 D-11: full-window scanning uses SINCE date exclusively.
         Entire IMAP session runs in one executor call (RESEARCH.md Pitfall 6).
@@ -177,6 +179,21 @@ class ImapClient:
             if ok != "OK":
                 raise ImapTransientError(f"Failed to select INBOX: {ok}")
 
+            # IN-04: capture UIDVALIDITY from the EXAMINE response. IMAP UIDs are
+            # only stable per (mailbox, UIDVALIDITY) — after a mailbox rebuild the
+            # server MUST bump UIDVALIDITY and may reuse UIDs, so the coordinator
+            # qualifies its per-message storage keys with this value to prevent a
+            # reused UID from colliding with a previously persisted entry.
+            # Fail-open: None when the server does not report it (or the value is
+            # unparsable) — callers fall back to bare-UID keys, exactly as before.
+            uidvalidity: int | None = None
+            try:
+                _uv_typ, uv_data = conn.response("UIDVALIDITY")
+                if uv_data and uv_data[0] is not None:
+                    uidvalidity = int(uv_data[0])
+            except (ValueError, TypeError):
+                uidvalidity = None
+
             # WR-01: imaplib._command concatenates string args as raw bytes and
             # appends CRLF with NO sanitization — a search string containing
             # \r\n would inject arbitrary pipelined IMAP commands (e.g. STORE/
@@ -241,7 +258,9 @@ class ImapClient:
                         "IMAP FETCH returned non-bytes body for UID %s; skipping", uid_str
                     )
                     continue  # Skip malformed FETCH tuple — body must be bytes
-                results.append({"uid": uid_int, "raw": raw_bytes})
+                # IN-04: uidvalidity rides along per-message so the coordinator can
+                # build (UIDVALIDITY, UID)-qualified storage keys.
+                results.append({"uid": uid_int, "raw": raw_bytes, "uidvalidity": uidvalidity})
 
             return results
         except ImapAuthError:

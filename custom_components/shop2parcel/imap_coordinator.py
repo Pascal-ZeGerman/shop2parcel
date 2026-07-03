@@ -229,6 +229,18 @@ class ImapCoordinator(Shop2ParcelCoordinator):
 
         for msg_info in raw_messages:
             uid_str = str(msg_info["uid"])
+            # IN-04: qualify the per-message storage key with UIDVALIDITY when the
+            # server reports it — IMAP UIDs are only unique per (mailbox,
+            # UIDVALIDITY), so after a mailbox rebuild a reused UID would otherwise
+            # overwrite an unrelated persisted entry. Backward compatibility:
+            # entries persisted under the old bare-UID keys simply remain under
+            # those keys (they age out via FIFO trim / delivered-cleanup); a
+            # re-scan of their source message under the new key shape cannot
+            # double-POST because the tracking-number dedup layer
+            # (_submitted_tracking_numbers) guards the POST regardless of key
+            # shape. uid_str (display/logging) intentionally stays unqualified.
+            uidvalidity = msg_info.get("uidvalidity")
+            uid_key = f"{uidvalidity}:{uid_str}" if uidvalidity is not None else uid_str
 
             raw_bytes: bytes = msg_info["raw"]
             imap_meta = _extract_imap_email_meta(raw_bytes)
@@ -336,9 +348,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             # (e.g. USPS Informed Delivery) may have 2+ shipments; each gets its
             # own storage key so coordinator.data creates a sensor per package.
             for _si, shipment in enumerate([result.shipment, *result.extra_shipments]):
-                # First shipment uses uid_str for backward compat; extras get a
-                # composite key so they create distinct entities.
-                storage_key = uid_str if _si == 0 else f"{uid_str}::{shipment.tracking_number}"
+                # First shipment uses the (UIDVALIDITY-qualified, IN-04) uid_key;
+                # extras get a composite key so they create distinct entities.
+                storage_key = uid_key if _si == 0 else f"{uid_key}::{shipment.tracking_number}"
 
                 # D-10: tracking-number dedup check (replaces UID skip gate).
                 normalized = normalize_tracking_number(shipment.tracking_number)

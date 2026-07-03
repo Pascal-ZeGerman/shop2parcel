@@ -365,10 +365,42 @@ def test_fetch_returns_messages_with_uid_and_raw():
             "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
         )
 
+    # IN-04: uidvalidity rides along per message; None here because the mocked
+    # conn.response() does not yield a parsable UIDVALIDITY (fail-open).
     assert results == [
-        {"uid": 101, "raw": raw_a},
-        {"uid": 102, "raw": raw_b},
+        {"uid": 101, "raw": raw_a, "uidvalidity": None},
+        {"uid": 102, "raw": raw_b, "uidvalidity": None},
     ]
+
+
+def test_fetch_includes_uidvalidity_when_server_reports_it():
+    """IN-04: UIDVALIDITY from the EXAMINE response is parsed and attached to every
+    returned message dict so callers can build rebuild-safe storage keys."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    raw = b"Subject: shipped\r\n\r\nbody"
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"7"])
+        if command == "FETCH":
+            return ("OK", _fetch_tuple(raw))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"1"])
+    mock_conn.response.return_value = ("UIDVALIDITY", [b"1748359721"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        results = client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    assert results == [{"uid": 7, "raw": raw, "uidvalidity": 1748359721}]
 
 
 def test_fetch_skips_non_integer_uid():
