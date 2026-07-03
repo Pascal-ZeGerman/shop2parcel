@@ -58,6 +58,7 @@ from .const import (
     CONF_POLL_INTERVAL,
     CONF_QUEUE_MAXLEN,
     CONF_RESCAN_WINDOW_DAYS,
+    CONF_STAGE2_ENABLED,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
     DEFAULT_GMAIL_QUERY,
@@ -330,6 +331,10 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                 # Merge with existing options so CONF_CUSTOM_FIELDS is preserved (CR-01).
                 new_options = dict(self.config_entry.options)
                 new_options.update(user_input)
+                # IN-01: drop the dead stage2_enabled key seeded by pre-1.5 entry
+                # creation — Stage-2 enablement is derived from CONF_OLLAMA_URL in
+                # async_setup_entry and nothing reads the stored key.
+                new_options.pop(CONF_STAGE2_ENABLED, None)
                 return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(

@@ -248,6 +248,34 @@ async def test_settings_happy_path(hass, mock_config_entry):
     assert result["type"] == "create_entry"
 
 
+async def test_settings_save_drops_dead_stage2_enabled_key(hass, mock_config_entry):
+    """IN-01: saving settings removes the dead stage2_enabled key from stored options.
+
+    Pre-1.5 entries were created with options={"stage2_enabled": False}, which
+    nothing reads (Stage-2 enablement is derived from CONF_OLLAMA_URL). The
+    options-merge must not carry the stale key forward.
+    """
+    handler, fake_entry = _make_handler_with_options(options={"stage2_enabled": False})
+    user_input = {
+        CONF_POLL_INTERVAL: 30,
+        CONF_GMAIL_QUERY: "from:shopify",
+        CONF_RESCAN_WINDOW_DAYS: 30,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "",
+        CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert "stage2_enabled" not in result["data"], (
+        "Dead stage2_enabled key must be dropped on options save (IN-01)"
+    )
+
+
 async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
     """OLLM-03: schema rejects timeout outside 10-300."""
     handler, fake_entry = _make_handler_with_options(options={})

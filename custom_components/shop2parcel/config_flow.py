@@ -57,7 +57,6 @@ from .const import (
     CONF_IMAP_TLS,
     CONF_IMAP_USERNAME,
     CONF_IMAP_VERIFY_TLS,
-    CONF_STAGE2_ENABLED,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
     DEFAULT_IMAP_VERIFY_TLS,
@@ -227,7 +226,11 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_IMAP_HOST): str,
-                    vol.Required(CONF_IMAP_PORT, default=993): int,
+                    # IN-03: reject impossible TCP ports at schema time instead of
+                    # surfacing them later as a generic connection error.
+                    vol.Required(CONF_IMAP_PORT, default=993): vol.All(
+                        int, vol.Range(min=1, max=65535)
+                    ),
                     vol.Required(CONF_IMAP_USERNAME): str,
                     vol.Required(CONF_IMAP_PASSWORD): str,
                     vol.Required(CONF_IMAP_TLS, default="ssl"): vol.In(["ssl", "starttls", "none"]),
@@ -273,7 +276,9 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             return self.async_update_reload_and_abort(reauth_entry, data_updates=data)
 
         self._abort_if_unique_id_configured(error="already_configured")
-        self._data = data
+        # IN-06: store the connection type explicitly so entry.data is
+        # self-describing — call sites no longer depend on a .get() default.
+        self._data = {**data, CONF_CONNECTION_TYPE: CONNECTION_TYPE_GMAIL}
         self._title = f"Shop2Parcel ({email})"
         return await self.async_step_finish()
 
@@ -295,10 +300,12 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             except ParcelAppTransientError:
                 errors["base"] = "cannot_connect"
             else:
+                # IN-01: no options seeded — the old stage2_enabled=False seed was
+                # dead data (Stage-2 enablement is derived from CONF_OLLAMA_URL in
+                # async_setup_entry; nothing ever reads the stored key).
                 return self.async_create_entry(
                     title=user_input[CONF_NAME],
                     data={**self._data, CONF_API_KEY: user_input[CONF_API_KEY]},
-                    options={CONF_STAGE2_ENABLED: False},
                 )
 
         return self.async_show_form(
@@ -409,10 +416,11 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                         CONF_IMAP_HOST,
                         default=reauth_entry.data.get(CONF_IMAP_HOST, ""),
                     ): str,
+                    # IN-03: same 1-65535 port range as the initial IMAP form.
                     vol.Required(
                         CONF_IMAP_PORT,
                         default=reauth_entry.data.get(CONF_IMAP_PORT, 993),
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=65535)),
                     vol.Required(
                         CONF_IMAP_USERNAME,
                         default=reauth_entry.data.get(CONF_IMAP_USERNAME, ""),
