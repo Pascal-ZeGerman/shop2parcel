@@ -543,6 +543,16 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
         coord._diagnostics.stage2_enabled = True
         await coord.async_start_stage2()
 
+        # WR-06: the poll now yields to the event loop at its executor awaits, which
+        # would let the live worker drain the pre-filled queue before the enqueue —
+        # cancel the worker so the queue STAYS full and QueueFull is actually hit
+        # (the drop-newest path under test). With `await put` instead of put_nowait
+        # the poll would now hang here with no worker, so the assertion below still
+        # proves the put_nowait contract.
+        assert coord._stage2_worker_task is not None
+        coord._stage2_worker_task.cancel()
+        await asyncio.sleep(0)
+
         # Pre-fill queue to maxsize=1 with a filler job (different TN to avoid dedup skip).
         filler_shipment = _make_shipment("filler_msg")
         coord._stage2_queue.put_nowait(

@@ -1147,7 +1147,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
                 continue
             field_list.append((f["name"], f.get("description")))
-        self._extractor = OllamaExtractor(client=client, field_list=field_list)
+        # WR-06: inject the HA executor so the extractor's preprocess_html
+        # (BeautifulSoup/lxml pass) runs off the event loop.
+        self._extractor = OllamaExtractor(
+            client=client,
+            field_list=field_list,
+            async_add_executor_job=self.hass.async_add_executor_job,
+        )
 
         # Phase 19 D-02: spawn worker after queue and extractor are ready (QUE-04).
         # async_create_background_task auto-registers task in entry._background_tasks;

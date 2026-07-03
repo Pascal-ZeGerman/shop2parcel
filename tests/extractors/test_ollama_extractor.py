@@ -404,10 +404,13 @@ def test_no_ha_imports():
 
 
 def test_constructor_signature():
-    """Constructor params are exactly (self, client, field_list) (D-08)."""
+    """Constructor params are (self, client, field_list, async_add_executor_job) —
+    D-08 plus the optional WR-06 executor injection (defaults to None so all
+    pre-existing call shapes remain valid)."""
     sig = inspect.signature(OllamaExtractor.__init__)
     params = list(sig.parameters.keys())
-    assert params == ["self", "client", "field_list"]
+    assert params == ["self", "client", "field_list", "async_add_executor_job"]
+    assert sig.parameters["async_add_executor_job"].default is None
 
     # field_list annotation accepts Sequence[tuple[str, str | None]]. The
     # annotation is stored as a string under `from __future__ import
@@ -595,6 +598,43 @@ async def test_extractor_delegates_to_client(mock_client, sample_stage1, shopify
     # (b) Structural delegation.
     init_params = set(inspect.signature(OllamaExtractor.__init__).parameters.keys())
     assert init_params.isdisjoint({"url", "model", "timeout"})
+
+
+async def test_extractor_uses_injected_executor_for_preprocess(
+    mock_client, sample_stage1, shopify_mini_html
+):
+    """WR-06: with an injected executor, the CPU-bound preprocess_html pass runs
+    through it (off the HA event loop) instead of being called inline."""
+    from custom_components.shop2parcel.extractors.ollama_extractor import (  # noqa: PLC0415
+        preprocess_html,
+    )
+
+    executor_calls: list[tuple] = []
+
+    async def _fake_executor(fn, *args):
+        executor_calls.append((fn, args))
+        return fn(*args)
+
+    mock_client.async_generate_with_metadata.return_value = (
+        {
+            "tracking_number": "1Z999AA10123456784",
+            "carrier_name": "UPS",
+            "order_name": "#1234",
+        },
+        {"passes_used": 1},
+    )
+    extractor = OllamaExtractor(
+        client=mock_client,
+        field_list=[],
+        async_add_executor_job=_fake_executor,
+    )
+    result = await extractor.async_extract(shopify_mini_html, sample_stage1)
+
+    assert len(executor_calls) == 1
+    assert executor_calls[0][0] is preprocess_html
+    assert executor_calls[0][1] == (shopify_mini_html,)
+    # The pipeline still produces a normal result through the executor path.
+    assert result.locked["tracking_number"] == "1Z999AA10123456784"
 
 
 async def test_async_extract_returns_locked_plus_custom(

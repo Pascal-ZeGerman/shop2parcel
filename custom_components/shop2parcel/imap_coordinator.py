@@ -80,6 +80,25 @@ _IMAP_MONTH_ABBR = (
 )
 
 
+def _parse_imap_message(raw_bytes: bytes) -> tuple[dict, str | None]:
+    """Executor-side batch: header meta + HTML/text body extraction in ONE job.
+
+    WR-06: _extract_imap_email_meta / extract_html_body_imap /
+    extract_text_body_imap each call email.message_from_bytes + MIME-walk the
+    same raw message — three CPU-bound parses per message that previously ran
+    on the HA event loop. Batched here into a single executor job per message
+    (not one job per tiny call), including the PR4-I1 escape+<pre> wrap for
+    text-only bodies (same as the Gmail path).
+    """
+    meta = _extract_imap_email_meta(raw_bytes)
+    html = extract_html_body_imap(raw_bytes)
+    if not html:
+        text_body = extract_text_body_imap(raw_bytes)
+        if text_body:
+            html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
+    return meta, html
+
+
 class ImapCoordinator(Shop2ParcelCoordinator):
     """Coordinator for IMAP-connected Shop2Parcel entries."""
 
@@ -243,13 +262,12 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             uid_key = f"{uidvalidity}:{uid_str}" if uidvalidity is not None else uid_str
 
             raw_bytes: bytes = msg_info["raw"]
-            imap_meta = _extract_imap_email_meta(raw_bytes)
-            html = extract_html_body_imap(raw_bytes)
-            if not html:
-                text_body = extract_text_body_imap(raw_bytes)
-                if text_body:
-                    # PR4-I1: same escape+<pre> wrap as Gmail path.
-                    html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
+            # WR-06: meta + body extraction batched into one executor job per
+            # message — three email.message_from_bytes/MIME-walk passes that must
+            # not run on the HA event loop.
+            imap_meta, html = await self.hass.async_add_executor_job(
+                _parse_imap_message, raw_bytes
+            )
             if not html:
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
@@ -274,8 +292,13 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 continue
 
             # Assign a synthetic email_date (0 = unknown — IMAP does not guarantee internalDate).
+            # WR-06: parser.parse performs up to six BeautifulSoup/lxml passes per
+            # email — offloaded to the executor (one job per message), mirroring
+            # the Gmail path.
             try:
-                result: ParseResult = parser.parse(html, uid_str, 0)
+                result: ParseResult = await self.hass.async_add_executor_job(
+                    parser.parse, html, uid_str, 0
+                )
             except Exception as parse_err:  # noqa: BLE001
                 _LOGGER.error(
                     "Email parser raised an unexpected error for IMAP UID %s: %s",

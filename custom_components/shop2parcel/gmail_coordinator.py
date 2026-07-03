@@ -60,6 +60,26 @@ from .coordinator import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _extract_gmail_html(payload: dict) -> str | None:
+    """Executor-side body extraction: HTML part, else escaped text/plain wrap.
+
+    WR-06: extract_html_body / extract_text_body walk the MIME tree and
+    base64-decode potentially multi-hundred-KB bodies — CPU-bound work batched
+    into ONE executor job per message (with the <pre> wrap) instead of running
+    on the HA event loop.
+
+    PR4-I1: the text fallback escapes angle brackets/ampersands so plain-text
+    bodies with raw '<', '>', '&' don't produce malformed HTML for
+    BeautifulSoup; <pre> preserves newlines for downstream regex/text scanning.
+    """
+    html = extract_html_body(payload)
+    if not html:
+        text_body = extract_text_body(payload)
+        if text_body:
+            html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
+    return html
+
+
 class GmailCoordinator(Shop2ParcelCoordinator):
     """Coordinator for Gmail-connected Shop2Parcel entries."""
 
@@ -301,15 +321,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 continue
 
             payload = msg.get("payload", {})
-            html = extract_html_body(payload)
-            if not html:
-                text_body = extract_text_body(payload)
-                if text_body:
-                    # PR4-I1: escape angle brackets/ampersands so plain-text
-                    # bodies with raw '<', '>', '&' don't produce malformed
-                    # HTML for BeautifulSoup. Use <pre> to preserve newlines
-                    # for downstream regex/text scanning.
-                    html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
+            # WR-06: MIME walk + base64 decode run in the executor (one job per
+            # message), not on the event loop.
+            html = await self.hass.async_add_executor_job(_extract_gmail_html, payload)
             if not html:
                 # Phase 7 (D-02): no_html_body is set by the COORDINATOR — the parser
                 # never sees this case because we don't call parser.parse on empty HTML.
@@ -342,8 +356,14 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
+            # WR-06: parser.parse performs up to six BeautifulSoup/lxml passes per
+            # email — CPU-bound work that must not block the HA event loop (HA's
+            # asyncio guidelines require offloading; a blocked loop stalls every
+            # other integration and the UI). One executor job per message.
             try:
-                result: ParseResult = parser.parse(html, msg_id, email_date)
+                result: ParseResult = await self.hass.async_add_executor_job(
+                    parser.parse, html, msg_id, email_date
+                )
             except Exception as parse_err:  # noqa: BLE001
                 _LOGGER.error(
                     "Email parser raised an unexpected error for message %s: %s",
