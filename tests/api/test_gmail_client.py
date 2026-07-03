@@ -8,6 +8,7 @@ the real library installed. Token values in tests are always "fake-token" litera
 from __future__ import annotations
 
 import base64
+import logging
 import sys
 import time
 from functools import partial
@@ -348,6 +349,79 @@ def test_extract_html_body_recurses_into_parts():
     }
     result = extract_html_body(payload)
     assert result == original
+
+
+# ---------------------------------------------------------------------------
+# Tests: WR-10 — bounded MIME recursion + parts guards
+# ---------------------------------------------------------------------------
+
+
+def _nest_payload(depth: int, leaf: dict) -> dict:
+    """Build a multipart payload nesting `leaf` at the given depth."""
+    payload = leaf
+    for _ in range(depth):
+        payload = {"mimeType": "multipart/mixed", "body": {"data": ""}, "parts": [payload]}
+    return payload
+
+
+def test_extract_html_body_stops_at_depth_bound(caplog):
+    """WR-10: sender-controlled nesting beyond the depth bound returns None with a warning
+    instead of raising RecursionError (which would abort the whole poll cycle)."""
+    original = "<p>too deep</p>"
+    encoded = base64.urlsafe_b64encode(original.encode("utf-8")).decode("ascii")
+    leaf = {"mimeType": "text/html", "body": {"data": encoded}}
+    payload = _nest_payload(500, leaf)  # would blow the recursion limit unbounded
+
+    with caplog.at_level(logging.WARNING):
+        result = extract_html_body(payload)
+
+    assert result is None
+    assert any("stopping descent" in r.getMessage() for r in caplog.records)
+
+
+def test_extract_html_body_finds_body_within_depth_bound():
+    """WR-10 regression guard: nesting within the bound still resolves the body."""
+    original = "<p>Shipped!</p>"
+    encoded = base64.urlsafe_b64encode(original.encode("utf-8")).decode("ascii")
+    leaf = {"mimeType": "text/html", "body": {"data": encoded}}
+    payload = _nest_payload(5, leaf)
+    assert extract_html_body(payload) == original
+
+
+def test_extract_text_body_stops_at_depth_bound(caplog):
+    """WR-10: extract_text_body has the same depth bound as extract_html_body."""
+    encoded = base64.urlsafe_b64encode(b"too deep").decode("ascii")
+    leaf = {"mimeType": "text/plain", "body": {"data": encoded}}
+    payload = _nest_payload(500, leaf)
+
+    with caplog.at_level(logging.WARNING):
+        result = extract_text_body(payload)
+
+    assert result is None
+
+
+def test_extract_html_body_parts_null_returns_none():
+    """WR-10: Gmail returning JSON null for parts must not raise TypeError."""
+    payload = {"mimeType": "multipart/mixed", "body": {"data": ""}, "parts": None}
+    assert extract_html_body(payload) is None
+
+
+def test_extract_text_body_parts_null_returns_none():
+    """WR-10: parts=null guard for the text/plain extractor."""
+    payload = {"mimeType": "multipart/mixed", "body": {"data": ""}, "parts": None}
+    assert extract_text_body(payload) is None
+
+
+def test_extract_html_body_skips_non_dict_parts_entries():
+    """WR-10: garbage (non-dict) entries inside parts are skipped, not crashed on."""
+    original = "<p>ok</p>"
+    encoded = base64.urlsafe_b64encode(original.encode("utf-8")).decode("ascii")
+    payload = {
+        "mimeType": "multipart/mixed",
+        "body": {"data": ""},
+        "parts": ["garbage", 42, None, {"mimeType": "text/html", "body": {"data": encoded}}],
+    }
+    assert extract_html_body(payload) == original
 
 
 # ---------------------------------------------------------------------------
