@@ -162,7 +162,13 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         debug_mode = entry.options.get(CONF_DEBUG_MODE, False)
         if debug_mode:
             rescan_window_days = MAX_RESCAN_WINDOW_DAYS
-        since_ts = int(time.time()) - rescan_window_days * 86400
+        # IN-08: RFC 3501 SINCE compares against the message INTERNALDATE at the
+        # SERVER's local-day granularity, while this boundary is computed from UTC.
+        # For servers west of UTC the UTC-derived date can sit one day ahead of the
+        # server's local date at the window edge, silently excluding messages still
+        # inside the configured window. Widen by one day — the overlap is cheap and
+        # fully absorbed by the tracking-number dedup / seen-ID gates.
+        since_ts = int(time.time()) - (rescan_window_days + 1) * 86400
         _since_dt = datetime.fromtimestamp(since_ts, tz=UTC)
         since_date = f"{_since_dt.day:02d}-{_IMAP_MONTH_ABBR[_since_dt.month - 1]}-{_since_dt.year}"
         _LOGGER.debug(

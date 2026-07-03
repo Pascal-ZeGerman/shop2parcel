@@ -224,7 +224,9 @@ async def test_dbg02_imap_window_override(hass, mock_imap_config_entry):
         dt = datetime.fromtimestamp(ts, tz=UTC)
         return f"{dt.day:02d}-{_IMAP_MONTH_ABBR_LOCAL[dt.month - 1]}-{dt.year}"
 
-    expected_before = _to_since_date(int(time.time()) - MAX_RESCAN_WINDOW_DAYS * 86400)
+    # IN-08: the coordinator widens the SINCE window by one day (server-local vs
+    # UTC day-granularity mismatch), so the expected boundary is window + 1 days.
+    expected_before = _to_since_date(int(time.time()) - (MAX_RESCAN_WINDOW_DAYS + 1) * 86400)
 
     with (
         patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
@@ -244,11 +246,11 @@ async def test_dbg02_imap_window_override(hass, mock_imap_config_entry):
     call_kwargs = mock_imap_cls.return_value.fetch_shipping_emails.call_args[1]
     since_date_arg = call_kwargs["since_date"]
 
-    expected_after = _to_since_date(int(time.time()) - MAX_RESCAN_WINDOW_DAYS * 86400)
+    expected_after = _to_since_date(int(time.time()) - (MAX_RESCAN_WINDOW_DAYS + 1) * 86400)
     # Accept either candidate (the date computed just before OR just after the poll)
     assert since_date_arg in {expected_before, expected_after}, (
         f"Expected since_date in {{{expected_before!r}, {expected_after!r}}} "
-        f"(365-day lookback, dual-candidate), got {since_date_arg!r}"
+        f"(365+1-day lookback per IN-08, dual-candidate), got {since_date_arg!r}"
     )
 
 
