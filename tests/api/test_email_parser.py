@@ -336,6 +336,45 @@ def test_fedex_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> Non
     assert _detect_fedex(shopify_html) is False
 
 
+@pytest.mark.parametrize(
+    "lookalike_domain",
+    ["groups.com", "meetups.com", "signups.com", "pickups.com"],
+)
+def test_ups_detect_fn_not_triggered_on_lookalike_domains(lookalike_domain: str) -> None:
+    """WR-03: bare-substring matching fired on any domain ending in 'ups.com' —
+    a newsletter linking groups.com/meetups.com/etc. must NOT route to the UPS template."""
+    from custom_components.shop2parcel.api.email_parser import _detect_ups
+
+    html = (
+        "<html><body>"
+        f'<p>Join us! <a href="https://www.{lookalike_domain}/events">RSVP here</a></p>'
+        "</body></html>"
+    )
+    assert _detect_ups(html) is False
+
+
+@pytest.mark.parametrize(
+    ("detect_name", "html"),
+    [
+        ("_detect_ups", '<a href="https://www.ups.com/track?tracknum=1Z1">Track</a>'),
+        ("_detect_ups", "<td>Your package is arriving today. ups.com</td>"),
+        ("_detect_ups", "<p>Visit https://ups.com for details</p>"),
+        ("_detect_usps", "<p>usps.com</p>"),
+        ("_detect_usps", '<a href="https://tools.usps.com/go/Track?tLabels=9">Track</a>'),
+        ("_detect_fedex", "<td>fedex.com</td>"),
+    ],
+)
+def test_carrier_detect_fns_still_fire_on_boundary_anchored_domains(
+    detect_name: str, html: str
+) -> None:
+    """WR-03 regression guard: legitimate carrier-domain placements (href, prose,
+    tag-adjacent) must keep firing after the boundary-anchored rewrite."""
+    from custom_components.shop2parcel.api import email_parser
+
+    detect_fn = getattr(email_parser, detect_name)
+    assert detect_fn(f"<html><body>{html}</body></html>") is True
+
+
 def test_usps_detect_fn_not_triggered_on_shopify_usps_merchant_email() -> None:
     """_detect_usps must NOT fire on a Shopify merchant email that includes a USPS tracking URL."""
     from custom_components.shop2parcel.api.email_parser import _detect_usps
