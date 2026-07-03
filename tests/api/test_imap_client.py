@@ -559,6 +559,361 @@ def test_logout_failure_is_swallowed():
 
 
 # ---------------------------------------------------------------------------
+# WR-01 — control characters in search_criteria (IMAP command injection)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "injected",
+    [
+        'SUBJECT "shipped"\r\nUID STORE 1 +FLAGS \\Deleted',  # CRLF pipelining
+        'SUBJECT "shipped"\nEXPUNGE',  # bare LF
+        'SUBJECT "shipped"\x00',  # NUL
+        '\tSUBJECT "shipped"',  # other C0 control char
+    ],
+)
+def test_search_criteria_with_control_chars_raises(injected):
+    """WR-01: control characters in search_criteria must raise before any SEARCH is issued.
+
+    imaplib appends raw CRLF to command strings with no sanitization — an
+    embedded \\r\\n injects pipelined commands (STORE/EXPUNGE), breaking the
+    D-09 read-only guarantee.
+    """
+    from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(ImapTransientError, match="control characters"):
+            client._fetch_sync("imap.example.com", 993, "u", "p", "ssl", injected, "8-May-2026")
+
+    # The injected string must never reach the server.
+    mock_conn.uid.assert_not_called()
+
+
+def test_search_criteria_without_control_chars_passes():
+    """WR-01 regression guard: a normal search string still reaches SEARCH unchanged."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    mock_conn.uid.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# CR-01 — TLS certificate verification
+# ---------------------------------------------------------------------------
+
+
+def test_ssl_mode_uses_verifying_context_by_default():
+    """CR-01: IMAP4_SSL must receive a verifying ssl_context (CERT_REQUIRED + hostname check).
+
+    imaplib's stdlib fallback context is CERT_NONE with check_hostname=False —
+    a MITM could terminate TLS and harvest the LOGIN credentials.
+    """
+    import ssl  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn) as mock_ssl_cls:
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    ctx = mock_ssl_cls.call_args.kwargs.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext), "IMAP4_SSL must be given an explicit ssl_context"
+    assert ctx.verify_mode == ssl.CERT_REQUIRED, "default context must verify certificates"
+    assert ctx.check_hostname is True, "default context must check the server hostname"
+
+
+def test_ssl_mode_verify_tls_false_disables_verification():
+    """CR-01: verify_tls=False (explicit user opt-out) yields CERT_NONE + no hostname check."""
+    import ssl  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn) as mock_ssl_cls:
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com",
+            993,
+            "u",
+            "p",
+            "ssl",
+            'SUBJECT "shipped"',
+            "8-May-2026",
+            False,  # verify_tls opt-out
+        )
+
+    ctx = mock_ssl_cls.call_args.kwargs.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.check_hostname is False
+
+
+def test_starttls_mode_uses_verifying_context_by_default():
+    """CR-01: starttls() must receive the same verifying ssl_context as the SSL path."""
+    import ssl  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4)
+    mock_conn.starttls.return_value = ("OK", [b"tls started"])
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com", 143, "u", "p", "starttls", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    ctx = mock_conn.starttls.call_args.kwargs.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext), "starttls() must be given an explicit ssl_context"
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+
+
+async def test_fetch_shipping_emails_forwards_verify_tls():
+    """CR-01: fetch_shipping_emails passes verify_tls through to _fetch_sync."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    captured: dict = {}
+
+    async def _capturing_executor(func, *args):
+        captured["args"] = args
+        return []
+
+    client = ImapClient(_capturing_executor)
+    await client.fetch_shipping_emails(
+        host="h",
+        port=993,
+        username="u",
+        password="p",
+        tls_mode="ssl",
+        search_criteria='SUBJECT "shipped"',
+        since_date="8-May-2026",
+        verify_tls=False,
+    )
+
+    assert captured["args"][-1] is False, "verify_tls must reach the executor call"
+
+
+# ---------------------------------------------------------------------------
+# IN-06 — cleartext LOGIN warning for tls_mode="none"
+# ---------------------------------------------------------------------------
+
+
+def test_tls_mode_none_logs_cleartext_warning(caplog):
+    """IN-06: tls_mode='none' must log a WARNING that credentials go out unencrypted."""
+    import logging  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with caplog.at_level(logging.WARNING):
+            client._fetch_sync(
+                "imap.example.com", 143, "u", "p", "none", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+    assert any("sent unencrypted" in r.getMessage() for r in caplog.records), (
+        "cleartext LOGIN must be surfaced with a WARNING"
+    )
+
+
+def test_tls_modes_ssl_and_starttls_do_not_log_cleartext_warning(caplog):
+    """IN-06 regression guard: encrypted modes must NOT emit the cleartext warning."""
+    import logging  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_ssl_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_ssl_conn.login.return_value = ("OK", [b"logged in"])
+    mock_ssl_conn.select.return_value = ("OK", [b"0"])
+    mock_ssl_conn.uid.return_value = ("OK", [None])
+    mock_ssl_conn.logout.return_value = ("BYE", [b"bye"])
+
+    mock_plain_conn = MagicMock(spec=imaplib.IMAP4)
+    mock_plain_conn.starttls.return_value = ("OK", [b"tls started"])
+    mock_plain_conn.login.return_value = ("OK", [b"logged in"])
+    mock_plain_conn.select.return_value = ("OK", [b"0"])
+    mock_plain_conn.uid.return_value = ("OK", [None])
+    mock_plain_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with (
+        patch("imaplib.IMAP4_SSL", return_value=mock_ssl_conn),
+        patch("imaplib.IMAP4", return_value=mock_plain_conn),
+    ):
+        client = ImapClient(_inline_executor)
+        with caplog.at_level(logging.WARNING):
+            client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+            client._fetch_sync(
+                "imap.example.com", 143, "u", "p", "starttls", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+    assert not any("sent unencrypted" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# WR-11 — per-poll fetch bounds (message count cap + size cap)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_caps_uid_list_at_newest_100(caplog):
+    """WR-11: a SEARCH returning more than MAX_MESSAGES_PER_POLL UIDs is capped
+    to the newest 100 (highest UIDs) with a WARNING."""
+    import logging  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import (  # noqa: PLC0415
+        MAX_MESSAGES_PER_POLL,
+        ImapClient,
+    )
+
+    raw = b"Subject: shipped\r\n\r\nbody"
+    uids = list(range(1, 151))  # 150 UIDs, ascending = oldest → newest
+    body_fetched: list[str] = []
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [" ".join(str(u) for u in uids).encode()])
+        if command == "FETCH" and args[1] == "(RFC822.SIZE)":
+            return ("OK", [f"{args[0]} (UID {args[0]} RFC822.SIZE 512)".encode()])
+        if command == "FETCH":
+            body_fetched.append(args[0])
+            return ("OK", _fetch_tuple(raw))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"150"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with caplog.at_level(logging.WARNING):
+            results = client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+    assert len(results) == MAX_MESSAGES_PER_POLL
+    # Newest 100 = UIDs 51..150.
+    assert [r["uid"] for r in results] == list(range(51, 151))
+    assert body_fetched == [str(u) for u in range(51, 151)]
+    assert any("processing only the newest" in r.getMessage() for r in caplog.records)
+
+
+def test_fetch_skips_oversized_message(caplog):
+    """WR-11: a message whose RFC822.SIZE exceeds the 5 MB cap is skipped with a
+    WARNING and its full body is never fetched."""
+    import logging  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    raw = b"Subject: shipped\r\n\r\nbody"
+    body_fetched: list[str] = []
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"101 102"])
+        if command == "FETCH" and args[1] == "(RFC822.SIZE)":
+            size = 10_000_000 if args[0] == "101" else 512  # 101 is ~10 MB
+            return ("OK", [f"{args[0]} (UID {args[0]} RFC822.SIZE {size})".encode()])
+        if command == "FETCH":
+            body_fetched.append(args[0])
+            return ("OK", _fetch_tuple(raw))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"2"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with caplog.at_level(logging.WARNING):
+            results = client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+    assert [r["uid"] for r in results] == [102], "oversized message must be skipped"
+    assert body_fetched == ["102"], "full body of the oversized message must never be fetched"
+    assert any("byte cap" in r.getMessage() for r in caplog.records)
+
+
+def test_fetch_size_check_fails_open():
+    """WR-11: an unparsable / non-OK RFC822.SIZE response must NOT block the message —
+    the normal body fetch proceeds (fail-open)."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    raw = b"Subject: shipped\r\n\r\nbody"
+
+    def uid_side_effect(command, *args):
+        if command == "SEARCH":
+            return ("OK", [b"101"])
+        if command == "FETCH" and args[1] == "(RFC822.SIZE)":
+            return ("NO", [b"size fetch not supported"])
+        if command == "FETCH":
+            return ("OK", _fetch_tuple(raw))
+        return ("OK", [None])
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"1"])
+    mock_conn.uid.side_effect = uid_side_effect
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        results = client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    assert [r["uid"] for r in results] == [101]
+
+
+# ---------------------------------------------------------------------------
 # extract_text_body_imap / extract_html_body_imap — body extraction
 # ---------------------------------------------------------------------------
 

@@ -22,6 +22,14 @@ from .exceptions import GmailAuthError, GmailTransientError
 
 _LOGGER = logging.getLogger(__name__)
 
+# WR-10: MIME nesting depth bound for the body extractors. The Gmail payload
+# mirrors the MIME structure of the received message, which the SENDER
+# controls — unbounded recursion on a crafted deeply-nested multipart message
+# would raise RecursionError and abort the entire poll cycle, every cycle,
+# until the message leaves the rescan window. Real emails rarely nest beyond
+# 3-4 levels; 10 is generous headroom.
+_MAX_MIME_DEPTH = 10
+
 
 class GmailClient:
     """Wraps Gmail API for async use in HA. No HA imports — executor callable injected.
@@ -103,12 +111,16 @@ def build_incremental_query(
     return f"{base_query} after:{int(time.time()) - rescan_window_days * 86400}"
 
 
-def extract_html_body(payload: dict) -> str | None:
+def extract_html_body(payload: dict, _depth: int = 0) -> str | None:
     """Recursively extract HTML body from Gmail MIME payload.
 
     Gmail returns body data as base64url — always pad with '==' before decoding.
     Pitfall: base64.urlsafe_b64decode(data) raises binascii.Error if padding missing.
     Fix: always append '==' (extra padding is ignored by the decoder).
+
+    WR-10: recursion is bounded at _MAX_MIME_DEPTH (sender-controlled nesting
+    must not RecursionError the poll) and ``parts`` is guarded against the
+    JSON-null / non-list case (would raise TypeError on iteration).
     """
     mime_type = payload.get("mimeType", "")
     if mime_type == "text/html":
@@ -119,18 +131,30 @@ def extract_html_body(payload: dict) -> str | None:
                 return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001 — binascii.Error or similar
                 return None
-    for part in payload.get("parts", []):
-        result = extract_html_body(part)
+    parts = payload.get("parts")
+    if not isinstance(parts, list):
+        return None  # guards parts=None / non-list garbage
+    if parts and _depth >= _MAX_MIME_DEPTH:
+        _LOGGER.warning(
+            "Gmail MIME payload nests deeper than %d levels; stopping descent (WR-10)",
+            _MAX_MIME_DEPTH,
+        )
+        return None
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        result = extract_html_body(part, _depth + 1)
         if result:
             return result
     return None
 
 
-def extract_text_body(payload: dict) -> str | None:
+def extract_text_body(payload: dict, _depth: int = 0) -> str | None:
     """Recursively extract text/plain body from Gmail MIME payload.
 
     Mirrors extract_html_body but matches text/plain MIME type.
     Used as fallback when no HTML body is present.
+    WR-10: same depth bound and non-list ``parts`` guard as extract_html_body.
     """
     mime_type = payload.get("mimeType", "")
     if mime_type == "text/plain":
@@ -141,8 +165,19 @@ def extract_text_body(payload: dict) -> str | None:
                 return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 return None
-    for part in payload.get("parts", []):
-        result = extract_text_body(part)
+    parts = payload.get("parts")
+    if not isinstance(parts, list):
+        return None
+    if parts and _depth >= _MAX_MIME_DEPTH:
+        _LOGGER.warning(
+            "Gmail MIME payload nests deeper than %d levels; stopping descent (WR-10)",
+            _MAX_MIME_DEPTH,
+        )
+        return None
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        result = extract_text_body(part, _depth + 1)
         if result:
             return result
     return None

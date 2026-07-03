@@ -41,9 +41,11 @@ from .const import (
     CONF_IMAP_SEARCH,
     CONF_IMAP_TLS,
     CONF_IMAP_USERNAME,
+    CONF_IMAP_VERIFY_TLS,
     CONF_RESCAN_WINDOW_DAYS,
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_IMAP_SEARCH,
+    DEFAULT_IMAP_VERIFY_TLS,
     DEFAULT_RESCAN_WINDOW_DAYS,
     MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
@@ -162,6 +164,13 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             since_date,
         )
 
+        # CR-01: verify_tls — options (editable post-setup) override the entry.data
+        # value written by the config flow; default True (verify certificates).
+        verify_tls = entry.options.get(
+            CONF_IMAP_VERIFY_TLS,
+            entry.data.get(CONF_IMAP_VERIFY_TLS, DEFAULT_IMAP_VERIFY_TLS),
+        )
+
         # Fetch messages from IMAP (whole session in one executor call per D-05/Pitfall 6).
         try:
             raw_messages = await imap_client.fetch_shipping_emails(
@@ -172,6 +181,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 tls_mode=entry.data[CONF_IMAP_TLS],
                 search_criteria=query,
                 since_date=since_date,
+                verify_tls=verify_tls,
             )
         except ImapAuthError as err:
             raise ConfigEntryAuthFailed(f"IMAP auth error: {err}") from err

@@ -15,6 +15,7 @@ No HA imports (D-01/D-03).
 from __future__ import annotations
 
 import logging
+import re
 
 import aiohttp
 
@@ -33,6 +34,14 @@ VIEW_DELIVERIES_URL = "https://api.parcel.app/external/deliveries/"
 
 _ALREADY_ADDED_MSG = "You have already added this delivery to the app"
 _NO_JSON = object()  # Sentinel: body could not be decoded as JSON.
+
+# WR-09: description sanitization at the POST boundary. The description can be
+# LLM-generated (order_summary) from attacker-controlled email content — the
+# only field of the four POSTed that had no validation gate. Cap length and
+# strip control characters here so EVERY POST path (inline Stage-1, Stage-2
+# worker, deferred drain) is covered by the single choke point.
+MAX_DESCRIPTION_CHARS = 200
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 async def _read_error_body(resp: aiohttp.ClientResponse) -> object:
@@ -103,7 +112,12 @@ class ParcelAppClient:
         send_push_confirmation is always False for automated submissions.
 
         Security: api_key is passed as header only — never in URL params, never logged.
+        WR-09: description is sanitized here (control chars stripped, capped at
+        MAX_DESCRIPTION_CHARS) — it can carry LLM-generated text derived from
+        attacker-controlled email content, and this method is the single choke
+        point every POST path goes through.
         """
+        description = _CTRL_CHARS_RE.sub(" ", description)[:MAX_DESCRIPTION_CHARS].strip()
         headers = {"api-key": self._api_key}
         body = {
             "tracking_number": tracking_number,

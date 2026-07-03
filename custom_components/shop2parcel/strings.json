@@ -42,14 +42,16 @@
           "imap_port": "Port",
           "imap_username": "Username",
           "imap_password": "Password / App Password",
-          "imap_tls": "TLS Mode"
+          "imap_tls": "TLS Mode",
+          "imap_verify_tls": "Verify TLS certificate"
         },
         "data_description": {
           "imap_host": "IMAP server hostname (e.g. imap.gmail.com, imap.outlook.com).",
           "imap_port": "993 for SSL, 143 for STARTTLS or unencrypted.",
           "imap_username": "Your email address.",
           "imap_password": "Your email password or app-specific password.",
-          "imap_tls": "'ssl' (port 993, recommended), 'starttls' (port 143), or 'none' (unencrypted, not recommended)."
+          "imap_tls": "'ssl' (port 993, recommended), 'starttls' (port 143), or 'none' (unencrypted, not recommended).",
+          "imap_verify_tls": "Verify the server's TLS certificate (recommended). Disable only for self-signed certificates on a trusted local server."
         }
       },
       "reauth_imap": {
@@ -60,7 +62,8 @@
           "imap_port": "Port",
           "imap_username": "Username",
           "imap_password": "New Password / App Password",
-          "imap_tls": "TLS Mode"
+          "imap_tls": "TLS Mode",
+          "imap_verify_tls": "Verify TLS certificate"
         }
       }
     },
@@ -98,6 +101,7 @@
           "poll_interval": "Poll Interval (minutes)",
           "gmail_query": "Gmail Search Query",
           "imap_search": "IMAP Search Criteria",
+          "imap_verify_tls": "Verify TLS certificate",
           "rescan_window_days": "Rescan Window (days)",
           "debug_mode": "Debug / Dry-run Mode",
           "ollama_url": "Ollama Server URL",
@@ -109,6 +113,7 @@
           "poll_interval": "How often to check for new shipping emails (5–1440 minutes).",
           "gmail_query": "Gmail search query to find shipping emails. The default matches shipping emails by subject keywords (tracking, shipped, shipment, delivery, etc.) regardless of sender. Clearing this field restores the default. Existing entries keep their stored query until manually cleared.",
           "imap_search": "IMAP SEARCH criteria (e.g. SUBJECT \"shipped\").",
+          "imap_verify_tls": "Verify the IMAP server's TLS certificate (recommended). Disable only for self-signed certificates on a trusted local server.",
           "rescan_window_days": "Always look back at least this many days for shipping emails (7-365). Increase this to rescan recent history without resetting the integration. Already-forwarded shipments are not re-sent.",
           "ollama_url": "Ollama server base URL (e.g. http://192.168.0.190:11434). Leave empty to disable AI extraction.",
           "ollama_model": "Ollama model tag (e.g. qwen3.5:2b). Must be pulled on the Ollama server.",
@@ -145,7 +150,8 @@
       "ollama_cannot_connect": "Cannot connect to the Ollama server. Check the URL and port, and ensure Ollama is running.",
       "ollama_model_not_found": "Model {missing_model} not found on the Ollama server. Run: ollama pull {missing_model}",
       "invalid_field_name": "Invalid field name. Use lowercase letters, digits, and underscores. Must start with a letter (max 32 chars).",
-      "locked_field_collision": "This field name is reserved and cannot be used as a custom field."
+      "locked_field_collision": "This field name is reserved and cannot be used as a custom field.",
+      "invalid_imap_search": "IMAP search criteria must not contain control characters (such as line breaks)."
     }
   },
   "issues": {

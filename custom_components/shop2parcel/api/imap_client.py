@@ -8,12 +8,26 @@ from __future__ import annotations
 import email
 import imaplib
 import logging
+import re
+import ssl
 from collections.abc import Callable
 from typing import Any, NoReturn
 
 from .exceptions import ImapAuthError, ImapTransientError
 
 _LOGGER = logging.getLogger(__name__)
+
+# WR-11: volume bounds for the per-poll fetch. Without them, a broad search
+# over a busy mailbox (worse in debug mode, which forces a 365-day window)
+# fetches every matching message body — attachments included — into memory in
+# one executor call: hundreds of MB on a Raspberry-Pi-class HA host.
+# MAX_MESSAGES_PER_POLL: newest N UIDs are kept when the SEARCH over-returns.
+# MAX_MESSAGE_BYTES: messages larger than this are skipped entirely; the size
+# is read via a cheap RFC822.SIZE fetch BEFORE downloading the full body.
+MAX_MESSAGES_PER_POLL = 100
+MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+
+_RFC822_SIZE_RE = re.compile(rb"RFC822\.SIZE (\d+)")
 
 
 class ImapClient:
@@ -37,6 +51,7 @@ class ImapClient:
         tls_mode: str,
         search_criteria: str,
         since_date: str,
+        verify_tls: bool = True,
     ) -> list[dict[str, Any]]:
         """Fetch shipping emails via IMAP using SINCE-date search.
 
@@ -44,6 +59,8 @@ class ImapClient:
         since_date: IMAP SEARCH date string in DD-Mon-YYYY format (e.g. "8-May-2026").
         Phase 10 D-11: full-window scanning uses SINCE date exclusively.
         Entire IMAP session runs in one executor call (RESEARCH.md Pitfall 6).
+        CR-01: verify_tls controls server-certificate verification (default True);
+        False is an explicit opt-out for self-signed local servers.
         """
         try:
             return await self._executor(
@@ -55,6 +72,7 @@ class ImapClient:
                 tls_mode,
                 search_criteria,
                 since_date,
+                verify_tls,
             )
         except ImapAuthError:
             raise  # already classified — do not re-wrap
@@ -73,6 +91,7 @@ class ImapClient:
         tls_mode: str,
         search_criteria: str,
         since_date: str,
+        verify_tls: bool = True,
     ) -> list[dict[str, Any]]:
         """Synchronous IMAP session — runs in executor thread.
 
@@ -80,15 +99,42 @@ class ImapClient:
         D-09: Uses PEEK fetch spec to avoid setting \\Seen flag.
         D-09: Never calls store(), expunge(), copy(), or uid(MOVE/STORE/EXPUNGE/COPY).
         D-11: Uses SINCE {since_date} search — UID-based search removed (Phase 10).
+        CR-01: builds an ssl.create_default_context() (CERT_REQUIRED + hostname check)
+        for both the SSL and STARTTLS paths — imaplib's stdlib fallback context does
+        NOT verify certificates, letting a MITM harvest the LOGIN credentials.
+        The context is built HERE (executor thread), never on the event loop:
+        create_default_context() loads CA certs from disk and HA flags/blocks
+        loop-blocking SSL context creation.
         """
         conn: imaplib.IMAP4 | None = None
         try:
+            ssl_context: ssl.SSLContext | None = None
+            if tls_mode in ("ssl", "starttls"):
+                ssl_context = ssl.create_default_context()
+                if not verify_tls:
+                    # Explicit user opt-out (self-signed cert on a trusted local
+                    # server). Order matters: check_hostname must be disabled
+                    # before verify_mode can be set to CERT_NONE.
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
             if tls_mode == "ssl":
-                conn = imaplib.IMAP4_SSL(host, port, timeout=30)
+                conn = imaplib.IMAP4_SSL(host, port, ssl_context=ssl_context, timeout=30)
             else:
                 conn = imaplib.IMAP4(host, port, timeout=30)
                 if tls_mode == "starttls":
-                    conn.starttls()
+                    conn.starttls(ssl_context=ssl_context)
+                else:
+                    # IN-06: tls_mode="none" is a supported config value, but the
+                    # LOGIN below sends the credentials over a plaintext socket —
+                    # make the risk visible instead of failing silently.
+                    _LOGGER.warning(
+                        "IMAP connection to %s:%s uses no TLS — credentials are "
+                        "being sent unencrypted. Switch TLS Mode to 'ssl' or "
+                        "'starttls' unless this server is on a fully trusted "
+                        "local network.",
+                        host,
+                        port,
+                    )
 
             _LOGGER.debug("IMAP connecting to %s:%s", host, port)
             conn.login(username, password)
@@ -99,6 +145,15 @@ class ImapClient:
             if ok != "OK":
                 raise ImapTransientError(f"Failed to select INBOX: {ok}")
 
+            # WR-01: imaplib._command concatenates string args as raw bytes and
+            # appends CRLF with NO sanitization — a search string containing
+            # \r\n would inject arbitrary pipelined IMAP commands (e.g. STORE/
+            # EXPUNGE), silently breaking the D-09 read-only guarantee. Reject
+            # ALL control characters at the client boundary (defense-in-depth;
+            # the options flow rejects the same class at entry time).
+            if any(ord(c) < 32 or ord(c) == 127 for c in search_criteria):
+                raise ImapTransientError("search_criteria contains control characters")
+
             uid_arg = f"SINCE {since_date} {search_criteria}"
 
             typ, data = conn.uid("SEARCH", uid_arg)
@@ -107,6 +162,17 @@ class ImapClient:
 
             uid_list = data[0].decode().split()
             _LOGGER.debug("IMAP SEARCH returned %d UIDs for folder %s", len(uid_list), "INBOX")
+            # WR-11: cap the number of messages fetched per poll. IMAP UIDs
+            # ascend with arrival order, so the LAST entries are the newest.
+            if len(uid_list) > MAX_MESSAGES_PER_POLL:
+                _LOGGER.warning(
+                    "IMAP SEARCH returned %d UIDs; processing only the newest %d "
+                    "this poll (narrow the search criteria or rescan window to "
+                    "cover older mail)",
+                    len(uid_list),
+                    MAX_MESSAGES_PER_POLL,
+                )
+                uid_list = uid_list[-MAX_MESSAGES_PER_POLL:]
             results: list[dict[str, Any]] = []
 
             for uid_str in uid_list:
@@ -114,6 +180,19 @@ class ImapClient:
                     uid_int = int(uid_str)
                 except ValueError:
                     _LOGGER.warning("IMAP server returned non-integer UID %r; skipping", uid_str)
+                    continue
+                # WR-11: check the message size via RFC822.SIZE before pulling the
+                # full body — a single huge message (large attachments) must not be
+                # loaded into memory at all. Fail-open: if the size cannot be read
+                # or parsed, proceed with the normal fetch.
+                size = _message_size(conn, uid_str)
+                if size is not None and size > MAX_MESSAGE_BYTES:
+                    _LOGGER.warning(
+                        "IMAP message UID %s is %d bytes (> %d byte cap); skipping",
+                        uid_str,
+                        size,
+                        MAX_MESSAGE_BYTES,
+                    )
                     continue
                 typ, msg_data = conn.uid("FETCH", uid_str, "(BODY.PEEK[])")
                 if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
@@ -146,6 +225,26 @@ class ImapClient:
                     conn.logout()
                 except Exception as logout_err:  # noqa: BLE001
                     _LOGGER.debug("IMAP logout failed (ignored): %s", logout_err)
+
+
+def _message_size(conn: imaplib.IMAP4, uid_str: str) -> int | None:
+    """Return the RFC822.SIZE of a message, or None when it cannot be determined.
+
+    WR-11: a cheap metadata-only FETCH issued before the full BODY.PEEK[] so
+    oversized messages (large attachments) are never downloaded. Returns None
+    (fail-open) on a non-OK response or an unparsable size — a metadata quirk
+    must not block legitimate shipment mail.
+    """
+    typ, size_data = conn.uid("FETCH", uid_str, "(RFC822.SIZE)")
+    if typ != "OK" or not size_data:
+        return None
+    for item in size_data:
+        raw = item[0] if isinstance(item, tuple) else item
+        if isinstance(raw, bytes):
+            match = _RFC822_SIZE_RE.search(raw)
+            if match:
+                return int(match.group(1))
+    return None
 
 
 def _classify_imap_error(err: Exception) -> NoReturn:

@@ -37,12 +37,13 @@ def test_strings_settings_step(strings):
 
 
 def test_strings_settings_data_keys(strings):
-    """Test 3: settings.data has all nine field labels."""
+    """Test 3: settings.data has all ten field labels."""
     data = strings["options"]["step"]["settings"]["data"]
     expected_keys = {
         "poll_interval",
         "gmail_query",
         "imap_search",
+        "imap_verify_tls",
         "rescan_window_days",
         "debug_mode",
         "ollama_url",
@@ -140,14 +141,17 @@ def test_remove_custom_field_data_key(strings):
 
 
 def test_new_error_keys_present(strings):
-    """Plan 04 Test 5: options.error has invalid_field_name + locked_field_collision (4 total)."""
+    """Plan 04 Test 5: options.error has invalid_field_name + locked_field_collision."""
     errors = strings["options"]["error"]
     assert "invalid_field_name" in errors
     assert len(errors["invalid_field_name"]) > 0
     assert "locked_field_collision" in errors
     assert len(errors["locked_field_collision"]) > 0
-    # Combined with Plan 03 keys — 4 total
-    assert len(errors) == 4, f"Expected 4 error keys total, got {sorted(errors.keys())}"
+    # WR-01: control-character rejection for the IMAP search string.
+    assert "invalid_imap_search" in errors
+    assert len(errors["invalid_imap_search"]) > 0
+    # Plan 03 keys + Plan 04 keys + WR-01 key — 5 total
+    assert len(errors) == 5, f"Expected 5 error keys total, got {sorted(errors.keys())}"
 
 
 def test_not_implemented_abort_absent(strings):

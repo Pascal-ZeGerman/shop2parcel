@@ -281,6 +281,50 @@ async def test_add_delivery_request_body_shape(client):
         assert body["send_push_confirmation"] is False
 
 
+async def test_add_delivery_description_capped_at_200_chars(client):
+    """WR-09: an over-long description (e.g. runaway LLM order_summary) is capped at 200 chars."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, payload={"success": True}, status=200)
+        await client.async_add_delivery("1Z999AA10123456784", "ups", "x" * 1000)
+        import yarl
+
+        requests = mock.requests[("POST", yarl.URL(ADD_DELIVERY_URL))]
+        body = requests[0].kwargs["json"]
+        assert len(body["description"]) == 200
+        assert body["description"] == "x" * 200
+
+
+async def test_add_delivery_description_strips_control_chars(client):
+    """WR-09: control characters in the description are replaced before POST."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, payload={"success": True}, status=200)
+        await client.async_add_delivery(
+            "1Z999AA10123456784", "ups", "Target \x1b[31m—\r\nCoffee maker\x00"
+        )
+        import yarl
+
+        requests = mock.requests[("POST", yarl.URL(ADD_DELIVERY_URL))]
+        body = requests[0].kwargs["json"]
+        assert not any(ord(c) < 32 or ord(c) == 127 for c in body["description"]), (
+            f"control characters leaked into description: {body['description']!r}"
+        )
+        # Content is preserved, just neutralized.
+        assert "Target" in body["description"]
+        assert "Coffee maker" in body["description"]
+
+
+async def test_add_delivery_normal_description_unchanged(client):
+    """WR-09 regression guard: a normal short description passes through verbatim."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, payload={"success": True}, status=200)
+        await client.async_add_delivery("1Z999AA10123456784", "ups", "Target — Coffee maker")
+        import yarl
+
+        requests = mock.requests[("POST", yarl.URL(ADD_DELIVERY_URL))]
+        body = requests[0].kwargs["json"]
+        assert body["description"] == "Target — Coffee maker"
+
+
 async def test_add_delivery_api_key_not_in_url(client):
     """POST succeeds → request URL does not contain api-key value (header only, never query param).
 

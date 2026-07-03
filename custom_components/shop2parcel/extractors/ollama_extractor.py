@@ -197,6 +197,14 @@ def build_prompt(
     closers reduce the "premature continuation" failure mode where the
     model treats trailing email prose as instruction.
 
+    WR-08: "rare" is not "impossible" — a malicious sender controls the
+    email content and can embed a literal ``<<<END_EMAIL>>>`` followed by
+    injected instructions to escape the data block. Every ``<<<`` in the
+    untrusted prose/links is therefore rewritten to ``‹‹‹`` (single
+    angle quotation marks) before embedding, so no email-derived text can
+    ever form a delimiter token. Visually near-identical for the model;
+    structurally inert.
+
     Args:
         prose: BeautifulSoup-extracted email text (output of
             :func:`preprocess_html`).
@@ -213,6 +221,13 @@ def build_prompt(
         f"- {name}: {desc if desc is not None else _auto_description(name)}"
         for name, desc in field_list
     )
+
+    # WR-08: neutralize delimiter tokens in untrusted email-derived content —
+    # every prompt delimiter starts with "<<<", so rewriting that prefix makes
+    # it impossible for a crafted email to close the EMAIL/LINKS data block
+    # and smuggle instructions into the instruction zone.
+    prose = prose.replace("<<<", "‹‹‹")
+    links = [link.replace("<<<", "‹‹‹") for link in links]
 
     links_block = "\n".join(links) if links else "(no links in email)"
 

@@ -204,7 +204,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Dismiss debug-mode AND Stage-2 cap notifications when this entry is removed.
+    """Dismiss notifications and delete the per-entry store when this entry is removed.
 
     W4/P14-WR-01: When the user uninstalls/removes the Shop2Parcel integration,
     any persistent debug-mode notification must be cleaned up.  This does not
@@ -214,6 +214,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     Phase 20 MRG-05: also dismisses the Stage-2 cap-hit notification so neither
     notification lingers after the integration is removed.
+
+    WR-05: also removes .storage/shop2parcel.{entry_id} — the file contains
+    tracking numbers, message IDs, and order names/summaries (personal data)
+    and would otherwise persist on disk indefinitely after an explicit
+    uninstall. Standard HA pattern: per-entry stores are removed here.
     """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
@@ -222,6 +227,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         stage2_cap_notification_id,
         stage2_failing_notification_id,
     )
+    from .coordinator import STORAGE_VERSION, Shop2ParcelStore  # noqa: PLC0415
 
     persistent_notification.async_dismiss(
         hass, notification_id=debug_mode_notification_id(entry.entry_id)
@@ -232,6 +238,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     persistent_notification.async_dismiss(
         hass, notification_id=stage2_failing_notification_id(entry.entry_id)
     )
+
+    # WR-05: delete the persisted dedup/shipment state for this entry.
+    store = Shop2ParcelStore(hass, version=STORAGE_VERSION, key=f"shop2parcel.{entry.entry_id}")
+    await store.async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

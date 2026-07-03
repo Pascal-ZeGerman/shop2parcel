@@ -586,3 +586,43 @@ async def test_sweep_warns_on_has_active_shipments_removal(hass, mock_config_ent
 
     assert "has_active_shipments" in caplog.text, "removal must be surfaced at WARNING level"
     assert "Shipments Forwarded" in caplog.text, "the warning must name the replacement entity"
+
+
+# ---------------------------------------------------------------------------
+# WR-05: async_remove_entry deletes the per-entry store file
+# ---------------------------------------------------------------------------
+
+
+async def test_remove_entry_deletes_store_file(hass, mock_config_entry):
+    """WR-05: async_remove_entry removes .storage/shop2parcel.{entry_id}.
+
+    The store contains tracking numbers, message IDs, and order names/summaries
+    (personal data) — it must not persist on disk after an explicit uninstall.
+    """
+    from custom_components.shop2parcel import async_remove_entry
+    from custom_components.shop2parcel.coordinator import STORAGE_VERSION, Shop2ParcelStore
+
+    mock_config_entry.add_to_hass(hass)
+    key = f"shop2parcel.{mock_config_entry.entry_id}"
+    store = Shop2ParcelStore(hass, version=STORAGE_VERSION, key=key)
+    await store.async_save(
+        {
+            "submitted_tracking_numbers": ["1Z999AA10123456784"],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {},
+        }
+    )
+    assert await store.async_load() is not None, "precondition: store file must exist"
+
+    await async_remove_entry(hass, mock_config_entry)
+
+    fresh = Shop2ParcelStore(hass, version=STORAGE_VERSION, key=key)
+    assert await fresh.async_load() is None, "store file must be deleted on entry removal"
+
+
+async def test_remove_entry_without_store_file_does_not_raise(hass, mock_config_entry):
+    """WR-05: removing an entry that never persisted a store must not raise."""
+    from custom_components.shop2parcel import async_remove_entry
+
+    mock_config_entry.add_to_hass(hass)
+    await async_remove_entry(hass, mock_config_entry)  # must complete without error

@@ -16,6 +16,7 @@ from custom_components.shop2parcel.const import (
     CONF_FIELD_NAME,
     CONF_GMAIL_QUERY,
     CONF_IMAP_SEARCH,
+    CONF_IMAP_VERIFY_TLS,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_TIMEOUT,
     CONF_OLLAMA_URL,
@@ -608,6 +609,72 @@ async def test_options_flow_imap_saves_imap_search(hass, mock_imap_config_entry)
         result = await handler.async_step_settings(user_input=user_input)
     assert result["type"] == "create_entry"
     assert result["data"] == user_input
+
+
+async def test_options_flow_imap_shows_verify_tls_field(hass, mock_imap_config_entry):
+    """CR-01: IMAP entry options form shows the imap_verify_tls toggle."""
+    handler, fake_entry = _make_imap_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=None)
+    schema_keys = [str(k) for k in result["data_schema"].schema]
+    assert CONF_IMAP_VERIFY_TLS in schema_keys, "IMAP options form must show imap_verify_tls"
+
+
+async def test_options_flow_gmail_hides_verify_tls_field(hass, mock_config_entry):
+    """CR-01: Gmail entry options form does NOT show the IMAP-only imap_verify_tls toggle."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=None)
+    schema_keys = [str(k) for k in result["data_schema"].schema]
+    assert CONF_IMAP_VERIFY_TLS not in schema_keys, (
+        "Gmail options form must NOT show imap_verify_tls"
+    )
+
+
+async def test_options_flow_imap_saves_verify_tls_false(hass, mock_imap_config_entry):
+    """CR-01: submitting imap_verify_tls=False persists the opt-out to entry.options."""
+    handler, fake_entry = _make_imap_handler_with_options(options={})
+    user_input = {
+        CONF_POLL_INTERVAL: 60,
+        CONF_IMAP_SEARCH: 'SUBJECT "tracking"',
+        CONF_IMAP_VERIFY_TLS: False,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "",
+        CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_IMAP_VERIFY_TLS] is False
+
+
+async def test_options_flow_imap_search_rejects_control_chars(hass, mock_imap_config_entry):
+    """WR-01: an imap_search containing CR/LF is rejected at entry time with a field error."""
+    handler, fake_entry = _make_imap_handler_with_options(options={})
+    user_input = {
+        CONF_POLL_INTERVAL: 60,
+        CONF_IMAP_SEARCH: 'SUBJECT "shipped"\r\nUID STORE 1 +FLAGS \\Deleted',
+        CONF_IMAP_VERIFY_TLS: True,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "",
+        CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "form", "control characters must NOT create an entry"
+    assert result["errors"] == {CONF_IMAP_SEARCH: "invalid_imap_search"}
 
 
 async def test_options_flow_gmail_still_shows_gmail_query(hass, mock_config_entry):
