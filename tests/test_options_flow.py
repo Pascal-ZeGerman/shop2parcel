@@ -296,7 +296,9 @@ async def test_tags_fetch_uses_short_timeout_not_stored_timeout(hass, mock_confi
     assert result["type"] == "create_entry"
     assert mock_tags.call_count == 2, "Expected one render fetch + one submit fetch"
     for fetch_call in mock_tags.call_args_list:
-        timeout_arg = fetch_call.args[2] if len(fetch_call.args) > 2 else fetch_call.kwargs["timeout"]
+        timeout_arg = (
+            fetch_call.args[2] if len(fetch_call.args) > 2 else fetch_call.kwargs["timeout"]
+        )
         assert timeout_arg == _OLLAMA_TAGS_TIMEOUT, (
             f"/api/tags fetch must use _OLLAMA_TAGS_TIMEOUT ({_OLLAMA_TAGS_TIMEOUT}), "
             f"got {timeout_arg}"
