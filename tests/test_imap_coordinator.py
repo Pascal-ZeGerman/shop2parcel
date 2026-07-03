@@ -305,6 +305,144 @@ async def test_imap_storage_key_qualified_with_uidvalidity(hass, mock_imap_no_st
     assert "42" not in data
 
 
+async def test_imap_seen_gate_skips_reparse_of_terminal_messages(
+    hass, mock_imap_no_stage2_entry
+):
+    """WR-06: a message that reached a terminal decision (posted) is marked seen and
+    its body is NOT re-parsed on the next poll — the IMAP path previously re-parsed
+    the entire rescan window every poll."""
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+
+    raw_msg = _make_imap_message(uid=1, tracking_number="1Z999AA10123456784")
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(
+            "1Z999AA10123456784"
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+
+        # Poll 1: message parsed and posted → terminal → marked seen.
+        await coord._async_update_data()
+        assert mock_parser_cls.return_value.parse.call_count == 1
+        assert "1" in coord._seen_message_ids
+
+        # Poll 2: the SAME window is returned again — the seen gate must skip
+        # the body parse entirely.
+        await coord._async_update_data()
+        assert mock_parser_cls.return_value.parse.call_count == 1, (
+            "seen message must not be re-parsed on the next poll"
+        )
+        # Still exactly one POST (dedup would guard anyway, but we never got there).
+        mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+
+
+async def test_imap_no_match_marked_seen_and_not_reparsed(hass, mock_imap_no_stage2_entry):
+    """WR-06: a Stage-1 no-match is terminal on the IMAP path (no fallback exists) —
+    marked seen so the body is not re-parsed every poll."""
+    from custom_components.shop2parcel.api.email_parser import ParseResult  # noqa: PLC0415
+
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+
+    raw_msg = _make_imap_message(uid=9, tracking_number="unused")
+    no_match = ParseResult(
+        shipment=None,
+        skip_reason="no_tracking_pattern",
+        strategy_used=None,
+        keyword_hits={
+            "tracking_regex": False,
+            "order_regex": False,
+            "carrier_regex": False,
+        },
+    )
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>marketing body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = no_match
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+
+        await coord._async_update_data()
+        assert "9" in coord._seen_message_ids
+        assert mock_parser_cls.return_value.parse.call_count == 1
+
+        await coord._async_update_data()
+        assert mock_parser_cls.return_value.parse.call_count == 1
+
+
+async def test_imap_transient_post_failure_stays_reparsable(hass, mock_imap_no_stage2_entry):
+    """WR-06: a transient POST failure must NOT mark the message seen — the next
+    poll re-parses and retries the forward."""
+    from custom_components.shop2parcel.api.exceptions import (  # noqa: PLC0415
+        ParcelAppTransientError,
+    )
+
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+
+    raw_msg = _make_imap_message(uid=5, tracking_number="1Z999AA10123456784")
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(
+            "1Z999AA10123456784"
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppTransientError("503")
+        )
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+
+        await coord._async_update_data()
+        assert "5" not in coord._seen_message_ids
+        assert "5" not in coord._inflight_message_ids
+
+        # Second poll re-parses and retries the POST.
+        await coord._async_update_data()
+        assert mock_parser_cls.return_value.parse.call_count == 2
+        assert mock_parcel_cls.return_value.async_add_delivery.await_count == 2
+
+
 async def test_imap_storage_key_falls_back_to_bare_uid(hass, mock_imap_no_stage2_entry):
     """IN-04 backward compatibility: without a reported UIDVALIDITY (older client
     payloads, servers that omit it), the storage key stays the bare UID."""
