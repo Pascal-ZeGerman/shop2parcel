@@ -457,6 +457,53 @@ def test_fetch_skips_non_bytes_body():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "server_message",
+    [
+        "LOGIN [UNAVAILABLE] backend down, try later",
+        "LOGIN rate-limited, try again in a minute",
+        "Service temporarily unavailable",
+    ],
+)
+def test_login_failure_with_transient_marker_is_transient(server_message):
+    """IN-03: a LOGIN 'NO' carrying an RFC 5530 temporary-condition marker must be
+    transient — not ImapAuthError — so no spurious reauth flow is triggered."""
+    from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.side_effect = imaplib.IMAP4.error(server_message)
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(ImapTransientError):
+            client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+
+def test_non_login_error_mentioning_login_is_transient():
+    """IN-03: an error from a post-login command whose message merely CONTAINS
+    'login'/'password' keywords must be transient — the old keyword heuristic
+    classified it as an auth failure and triggered a spurious reauth flow."""
+    from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"1"])
+    mock_conn.uid.side_effect = imaplib.IMAP4.error("connection dropped during login")
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        with pytest.raises(ImapTransientError):
+            client._fetch_sync(
+                "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+            )
+
+
 def test_imap4_abort_raises_transient_error():
     """imaplib.IMAP4.abort is always transient (covers _classify_imap_error abort branch)."""
     from custom_components.shop2parcel.api.exceptions import ImapTransientError  # noqa: PLC0415

@@ -29,6 +29,22 @@ MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 _RFC822_SIZE_RE = re.compile(rb"RFC822\.SIZE (\d+)")
 
+# IN-03: RFC 5530 response codes / common server phrasings that mark a LOGIN
+# "NO" as a TEMPORARY server condition rather than bad credentials. A login
+# failure carrying one of these markers is transient (retry next poll), NOT an
+# auth failure — classifying it as ImapAuthError triggered a spurious HA
+# reauth flow for conditions that clear on their own.
+_TRANSIENT_LOGIN_MARKERS = (
+    "[unavailable]",
+    "[inuse]",
+    "[limit]",
+    "try later",
+    "try again",
+    "temporar",  # "temporary" / "temporarily"
+    "rate limit",
+    "rate-limited",
+)
+
 
 class ImapClient:
     """Wraps imaplib for async use in HA. No HA imports — executor callable injected.
@@ -137,7 +153,23 @@ class ImapClient:
                     )
 
             _LOGGER.debug("IMAP connecting to %s:%s", host, port)
-            conn.login(username, password)
+            # IN-03: classify auth failures ONLY from the LOGIN command itself —
+            # the one place a credential rejection can genuinely surface. The old
+            # message-keyword heuristic ("login"/"password"/... anywhere in ANY
+            # imaplib error) misclassified transient errors from later commands
+            # (e.g. "connection dropped during login") as auth failures, causing
+            # a spurious reauth flow. IMAP4.abort stays transient even here (a
+            # service error — close and retry); RFC 5530 markers that signal a
+            # temporary condition also stay transient.
+            try:
+                conn.login(username, password)
+            except imaplib.IMAP4.abort:
+                raise  # transient — classified by _classify_imap_error below
+            except imaplib.IMAP4.error as err:
+                login_msg = str(err).lower()
+                if any(marker in login_msg for marker in _TRANSIENT_LOGIN_MARKERS):
+                    raise ImapTransientError(str(err)) from err
+                raise ImapAuthError(str(err)) from err
 
             ok, _ = conn.select(
                 "INBOX", readonly=True
@@ -248,25 +280,19 @@ def _message_size(conn: imaplib.IMAP4, uid_str: str) -> int | None:
 
 
 def _classify_imap_error(err: Exception) -> NoReturn:
-    """Translate imaplib exceptions to ImapAuthError / ImapTransientError.
+    """Translate any non-login imaplib/socket exception to ImapTransientError.
+
+    IN-03: auth classification happens exclusively at the login() call site in
+    _fetch_sync — the only command whose failure can genuinely mean bad
+    credentials. Everything reaching this fallback (select/search/fetch errors,
+    protocol state errors, socket failures) is transient by construction; the
+    old keyword heuristic ("login"/"password" anywhere in the message) turned
+    transient server errors like "connection dropped during login" into
+    ImapAuthError and triggered spurious reauth flows.
 
     Security: never include password in exception message.
-    ImapAuthError → coordinator raises ConfigEntryAuthFailed (D-04).
     ImapTransientError → coordinator raises UpdateFailed (D-04).
-
-    IMAP4.abort is a subclass of IMAP4.error but semantically a service error
-    (close and retry) — always transient, even if the message contains "invalid".
-    Note: "invalid" is intentionally excluded from auth keywords because IMAP
-    protocol state errors like "command invalid in state AUTH" contain that word
-    but are transient, not auth failures.
     """
-    if isinstance(err, imaplib.IMAP4.abort):
-        # IMAP4.abort is semantically a service error (close and retry) — always transient.
-        raise ImapTransientError(str(err)) from err
-    if isinstance(err, imaplib.IMAP4.error):
-        msg = str(err).lower()
-        if any(kw in msg for kw in ("login", "auth", "credential", "username", "password")):
-            raise ImapAuthError(str(err)) from err
     raise ImapTransientError(str(err)) from err
 
 
