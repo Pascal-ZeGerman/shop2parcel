@@ -412,10 +412,16 @@ async def test_no_worker_leak_after_3_reloads(hass, mock_stage2_config_entry):
         assert coord._stage2_worker_task is None
 
 
-async def test_async_stop_stage2_swallows_worker_crash_exception(hass, mock_stage2_config_entry):
+async def test_async_stop_stage2_swallows_worker_crash_exception(
+    hass, mock_stage2_config_entry, caplog
+):
     """IN-06: a worker task that died with a non-CancelledError exception (e.g.
     AssertionError) re-raises when awaited during shutdown — async_stop_stage2
-    must swallow it (QUE-05: on-unload never raises) and finish the teardown."""
+    must swallow it (QUE-05: on-unload never raises) and finish the teardown.
+
+    The done-callback registered in async_start_stage2 must retrieve and log the
+    crash at completion time, so asyncio never reports the exception as
+    unretrieved at task GC (the CI-only teardown error this pins)."""
     mock_stage2_config_entry.add_to_hass(hass)
 
     async def _crashing_worker():
@@ -452,6 +458,11 @@ async def test_async_stop_stage2_swallows_worker_crash_exception(hass, mock_stag
         for _ in range(3):
             await asyncio.sleep(0)
         assert worker_task is not None and worker_task.done()
+
+        # The done-callback must have retrieved AND logged the crash already —
+        # this is what keeps asyncio from flagging the exception as unretrieved.
+        assert "Stage-2 worker crashed" in caplog.text
+        assert "worker invariant blew up" in caplog.text
 
         # Must NOT raise despite the dead task re-raising AssertionError on await.
         await coord.async_stop_stage2()
