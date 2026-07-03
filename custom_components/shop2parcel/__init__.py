@@ -262,7 +262,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        # IN-05: .get() guard — hass.data[DOMAIN] is absent if unload runs
+        # without a prior successful setup (future refactors, direct test calls).
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         # cancel_cleanup is registered via entry.async_on_unload in async_setup_entry
         # so HA cancels it automatically — no explicit call needed here.
     return unload_ok

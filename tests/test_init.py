@@ -148,6 +148,22 @@ async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
     assert mock_config_entry.entry_id not in hass.data.get(DOMAIN, {})
 
 
+async def test_unload_entry_tolerates_missing_domain_data(hass, mock_config_entry):
+    """IN-05: async_unload_entry must not raise KeyError when hass.data[DOMAIN] is absent.
+
+    Unreachable in normal lifecycles (unload only runs after successful setup),
+    but the direct invocation must degrade gracefully for future refactors.
+    """
+    from custom_components.shop2parcel import async_unload_entry
+
+    assert DOMAIN not in hass.data
+    with patch.object(
+        hass.config_entries, "async_unload_platforms", new=AsyncMock(return_value=True)
+    ):
+        result = await async_unload_entry(hass, mock_config_entry)
+    assert result is True
+
+
 async def test_unload_entry_awaits_stage2_shutdown(hass, mock_config_entry):
     """WR-01: unload must AWAIT Stage-2 shutdown — async_stop_stage2 has run to
     COMPLETION by the time async_unload returns. The previous fire-and-forget
