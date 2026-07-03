@@ -133,6 +133,14 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         assert entry is not None  # guaranteed by _async_update_data
         imap_client = cast(ImapClient, self._email_client)
 
+        # WR-04: drain quota-deferred POSTs on EVERY poll, honouring the documented
+        # _pending_posts contract ("drained on next quota-free poll"). Previously the
+        # drain only ran when a NEW Stage-2 job arrived, so deferred forwards stalled
+        # indefinitely with no new shipment emails. The drain self-guards (empty /
+        # debug mode / quota still exhausted → no-op) and runs BEFORE the poll's
+        # current_data snapshot so its publishes are included in it.
+        await self._async_drain_pending_posts()
+
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
         d = self._diagnostics

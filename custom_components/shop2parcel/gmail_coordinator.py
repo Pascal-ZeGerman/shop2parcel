@@ -104,6 +104,15 @@ class GmailCoordinator(Shop2ParcelCoordinator):
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
         """Inner implementation of the poll cycle (called from _async_update_data)."""
         assert self.config_entry is not None  # guaranteed by _async_update_data None check
+
+        # WR-04: drain quota-deferred POSTs on EVERY poll, honouring the documented
+        # _pending_posts contract ("drained on next quota-free poll"). Previously the
+        # drain only ran when a NEW Stage-2 job arrived, so deferred forwards stalled
+        # indefinitely with no new shipment emails. The drain self-guards (empty /
+        # debug mode / quota still exhausted → no-op) and runs BEFORE the poll's
+        # current_data snapshot so its publishes are included in it.
+        await self._async_drain_pending_posts()
+
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
             self.hass, self.config_entry

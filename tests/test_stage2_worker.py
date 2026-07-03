@@ -4152,3 +4152,95 @@ async def test_description_falls_back_to_order_name_when_no_summary(hass, mock_s
         # LOH-SUMMARY: no order_summary → falls back to order_name.
         call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
         assert call_kwargs["description"] == "#1234"
+
+
+# ---------------------------------------------------------------------------
+# WR-04: _pending_posts drains on EVERY quota-free poll, not only when a new
+# Stage-2 job happens to arrive.
+# ---------------------------------------------------------------------------
+
+
+def _make_deferred_shipment() -> ShipmentData:
+    return ShipmentData(
+        tracking_number="1Z999AA10123456784",
+        carrier_name="UPS",
+        order_name="#9001",
+        message_id="deferred_msg",
+        email_date=1700000000,
+    )
+
+
+async def test_gmail_poll_drains_pending_posts_without_new_jobs(hass, mock_stage2_config_entry):
+    """WR-04 (Gmail): quota-deferred POSTs drain on the next quota-free poll even
+    when the poll finds NO new shipment emails."""
+    import time as stdlib_time
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        coord._diagnostics.stage2_enabled = True
+
+        # A quota-deferred item from a prior poll; the quota window has since expired.
+        coord._pending_posts = {"deferred_key": _make_deferred_shipment()}
+        coord._quota_exhausted_until = int(stdlib_time.time()) - 1
+
+        data = await coord._async_update_data()
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    assert coord._pending_posts == {}, "deferred post must drain on the quota-free poll"
+    assert "deferred_key" in data, "drained shipment must survive the poll-end merge (CR-01)"
+
+
+async def test_imap_poll_drains_pending_posts_without_new_jobs(hass, mock_imap_config_entry):
+    """WR-04 (IMAP): same guarantee on the IMAP poll path."""
+    import time as stdlib_time
+
+    from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
+
+    mock_imap_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        coord._diagnostics.stage2_enabled = True
+
+        coord._pending_posts = {"deferred_key": _make_deferred_shipment()}
+        coord._quota_exhausted_until = int(stdlib_time.time()) - 1
+
+        data = await coord._async_update_data()
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    assert coord._pending_posts == {}, "deferred post must drain on the quota-free poll"
+    assert "deferred_key" in data, "drained shipment must survive the poll-end merge (CR-01)"

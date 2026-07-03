@@ -1269,8 +1269,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     async def _async_drain_pending_posts(self) -> None:
         """Drain pending posts from prior quota-blocked extraction cycles.
 
-        Runs before each new extraction job to opportunistically flush the backlog
-        when quota/cap conditions allow. Respects MAX_STAGE2_POSTS_PER_POLL cap and
+        Runs before each new extraction job AND at the top of every poll cycle
+        (WR-04 — both subclasses call it from _async_update_data_inner, so the
+        "drained on next quota-free poll" contract holds even when no new shipment
+        email ever arrives) to opportunistically flush the backlog when quota/cap
+        conditions allow. Respects MAX_STAGE2_POSTS_PER_POLL cap and
         _quota_exhausted_until timestamp.
 
         Guard order:
