@@ -192,7 +192,16 @@ class ParcelAppClient:
                 # 2xx path: assert success field — a success:false body is a rejected add.
                 # Read body once; if success is not True, route via the shared error helper.
                 raw_2xx = await _read_error_body(resp)
-                if isinstance(raw_2xx, dict) and raw_2xx.get("success") is not True:
+                # IN-04: a 2xx with a non-JSON or non-dict body is NOT proof of a
+                # successful add — treating it as success wrote a permanent dedup
+                # entry (and bumped forward counters) for a shipment that may never
+                # have been added, e.g. a proxy serving an HTML error page with
+                # status 200. Classify as transient so the POST retries next poll.
+                if raw_2xx is _NO_JSON or not isinstance(raw_2xx, dict):
+                    raise ParcelAppTransientError(
+                        "Add-delivery returned 2xx with a non-JSON or non-dict body"
+                    )
+                if raw_2xx.get("success") is not True:
                     _raise_from_error_body(raw_2xx)
         except (TimeoutError, aiohttp.ClientError) as err:
             # WR-04: catch the aiohttp base class — ClientPayloadError (connection
