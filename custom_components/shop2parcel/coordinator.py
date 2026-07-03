@@ -71,6 +71,7 @@ from .const import (
     STAGE2_MSG_QUARANTINE_THRESHOLD,
     STAGE2_NOTIFY_COOLDOWN_S,
     STAGE2_NOTIFY_THRESHOLD,
+    normalize_tracking_number,
     stage2_cap_notification_id,
     stage2_failing_notification_id,
 )
@@ -452,11 +453,20 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # RELEASES an entry on any retry-discard so a deferred job is re-fetched next poll.
         self._inflight_message_ids: OrderedDict[str, None] = OrderedDict()
         # Poison-message quarantine: per-message consecutive Stage-2 failure counts,
-        # keyed by raw Gmail message ID. In-memory only (session-scoped). When a count
-        # reaches STAGE2_MSG_QUARANTINE_THRESHOLD the worker stops releasing that message
-        # for re-fetch, breaking the observed infinite retry loop. FIFO-bounded so a long
-        # run of distinct failing messages cannot grow it without bound.
+        # keyed by raw Gmail message ID when present, else normalized_tn (WR-03 — the
+        # Gmail Stage-1 and IMAP enqueue paths pass raw_msg_id=None). In-memory only
+        # (session-scoped). When a count reaches STAGE2_MSG_QUARANTINE_THRESHOLD the
+        # worker stops releasing that message for re-fetch AND the tracking number is
+        # added to _stage2_quarantined_tns, breaking the observed infinite retry loop
+        # on ALL enqueue paths. FIFO-bounded so a long run of distinct failing messages
+        # cannot grow it without bound.
         self._stage2_msg_failures: OrderedDict[str, int] = OrderedDict()
+        # WR-03: session-scoped skip set of quarantined tracking numbers, consulted by
+        # _enqueue_stage2. The in-flight-gate quarantine only covers Gmail fallback jobs
+        # (the only path that sets raw_msg_id); Gmail Stage-1 and IMAP jobs re-enqueue
+        # from every poll's re-parse, so blocking at the enqueue seam is what actually
+        # stops their retry loop. In-memory only — a restart clears it (self-healing).
+        self._stage2_quarantined_tns: OrderedDict[str, None] = OrderedDict()
         self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
@@ -591,40 +601,70 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if job.raw_msg_id is not None:
             self._inflight_message_ids.pop(job.raw_msg_id, None)
 
+    @staticmethod
+    def _stage2_failure_key(job: Stage2Job) -> str:
+        """Quarantine-counter key for a job (WR-03).
+
+        raw_msg_id when present (Gmail fallback jobs — one message, one key), else
+        normalized_tn, which exists for EVERY job type (Gmail Stage-1 and IMAP
+        enqueues pass raw_msg_id=None).
+        """
+        return job.raw_msg_id if job.raw_msg_id is not None else job.normalized_tn
+
     def _register_stage2_msg_failure(self, job: Stage2Job) -> bool:
         """Track consecutive Stage-2 failures per message; return True to quarantine.
 
-        Increments the per-message failure count (keyed by raw_msg_id). Once it reaches
-        STAGE2_MSG_QUARANTINE_THRESHOLD the caller must NOT release the message's in-flight
-        entry, leaving it in the session-scoped skip set so the poll gate stops re-fetching
-        it — this breaks the observed infinite retry loop where one pathological email
+        Increments the per-message failure count (keyed via _stage2_failure_key so
+        ALL job types are covered — WR-03). Once it reaches
+        STAGE2_MSG_QUARANTINE_THRESHOLD:
+          - the job's normalized_tn is added to _stage2_quarantined_tns, which
+            _enqueue_stage2 consults — stopping the poll→re-enqueue→re-fail loop on
+            the Gmail Stage-1 and IMAP paths that have no in-flight gate;
+          - the caller must NOT release the message's in-flight entry (no-op for
+            raw_msg_id=None jobs), so a Gmail fallback message also stops being
+            re-fetched by the poll gate.
+        This breaks the observed infinite retry loop where one pathological email
         re-failed every poll cycle for hours.
 
-        Returns False (keep retrying) for jobs without a raw_msg_id (IMAP path has no
-        in-flight gate to quarantine) and for messages still under the threshold. The
-        counter is in-memory only, so a restart clears it and a transient Ollama outage
-        self-heals instead of permanently poisoning legitimate shipment emails.
+        Returns False (keep retrying) for messages still under the threshold. The
+        counter and skip set are in-memory only, so a restart clears them and a
+        transient Ollama outage self-heals instead of permanently poisoning
+        legitimate shipment emails.
         """
-        raw_id = job.raw_msg_id
-        if raw_id is None:
-            return False
-        count = self._stage2_msg_failures.get(raw_id, 0) + 1
+        key = self._stage2_failure_key(job)
+        count = self._stage2_msg_failures.get(key, 0) + 1
         if count >= STAGE2_MSG_QUARANTINE_THRESHOLD:
-            self._stage2_msg_failures.pop(raw_id, None)
+            self._stage2_msg_failures.pop(key, None)
+            self._stage2_quarantined_tns[job.normalized_tn] = None
+            while len(self._stage2_quarantined_tns) > SEEN_MESSAGE_IDS_MAXLEN:
+                self._stage2_quarantined_tns.popitem(last=False)
             _LOGGER.warning(
-                "Stage-2 worker: quarantining message %s ('%s' from '%s') after %d "
+                "Stage-2 worker: quarantining %s ('%s' from '%s') after %d "
                 "consecutive extraction failures; skipping it until restart",
-                raw_id,
+                key,
                 job.meta.get("subject", ""),
                 job.meta.get("from", ""),
                 count,
             )
             return True
-        self._stage2_msg_failures[raw_id] = count
-        self._stage2_msg_failures.move_to_end(raw_id)
+        self._stage2_msg_failures[key] = count
+        self._stage2_msg_failures.move_to_end(key)
         while len(self._stage2_msg_failures) > SEEN_MESSAGE_IDS_MAXLEN:
             self._stage2_msg_failures.popitem(last=False)
         return False
+
+    def _debug_mode_active(self) -> bool:
+        """True when this entry is in debug/dry-run mode.
+
+        CR-02: single helper for the DBG-03 "zero store writes in debug mode"
+        contract, so timer-driven persist paths (_maybe_reset_used_today,
+        _on_quota_expiry, async_stop_stage2) apply the same gate the poll paths
+        already honour. Safe on bare-coordinator tests: returns False when no
+        config_entry is attached.
+        """
+        return self.config_entry is not None and bool(
+            self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        )
 
     def _maybe_reset_used_today(self) -> None:
         """Reset used_today to 0 on UTC date rollover.
@@ -642,7 +682,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # not restore yesterday's count. Fires only on an actual rollover (at most
             # once per UTC day); _persist_state is await-free so it is safe here even
             # when reached via the synchronous used_today property read path.
-            self._persist_state()
+            # CR-02: skipped in debug mode (DBG-03 zero-store-writes) — previously this
+            # timer-driven persist snapshotted the empty debug-mode _pending_shipments
+            # and wiped persisted_shipments from disk at the first UTC midnight.
+            if not self._debug_mode_active():
+                self._persist_state()
 
     def _record_forward(self) -> None:
         """Record one genuine 2xx POST success to ParcelApp.
@@ -941,7 +985,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._quota_expiry_unsub = None
         if self._quota_exhausted_until is not None:
             self._quota_exhausted_until = None
-            self._persist_state()
+            # CR-02: honour DBG-03 (zero store writes in debug mode) — the in-memory
+            # clear still happens so quota_is_exhausted reads False immediately.
+            if not self._debug_mode_active():
+                self._persist_state()
         self.async_update_listeners()
 
     def _schedule_midnight_refresh(self) -> None:
@@ -1094,7 +1141,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # CR-02: preserve maxsize so backpressure invariant holds after a reload.
         self._stage2_queue = asyncio.Queue(maxsize=prev_maxsize)
         self._stage2_enqueued_keys.clear()
-        if self._store_loaded:
+        # CR-02: gate on debug mode too (DBG-03 zero-store-writes) — this save fires
+        # on every unload path, including a failed-first-refresh teardown.
+        if self._store_loaded and not self._debug_mode_active():
             await self._async_save_store()
         _LOGGER.debug("Stage-2 queue stopped and cleared")
 
@@ -1130,6 +1179,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         tracking-number dedup-skip / re-fetch instead. prefetched_result and raw_msg_id are
         forwarded onto the Stage2Job (see its docstring).
         """
+        if normalized_tn in self._stage2_quarantined_tns:
+            # WR-03: poison quarantine — extraction for this tracking number failed
+            # STAGE2_MSG_QUARANTINE_THRESHOLD times in a row this session. Skip the
+            # re-enqueue: the Gmail Stage-1 and IMAP paths re-parse and re-enqueue on
+            # every poll, so without this seam the retry loop the quarantine was built
+            # to stop stayed live on those paths. Session-scoped; a restart re-tries.
+            return False
         if normalized_tn in self._stage2_enqueued_keys:
             # In-flight skip (QUE-06): a job for this tracking number already exists (this or
             # another message). Return False — THIS call did not create a job, so the caller
@@ -1199,6 +1255,23 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
                     self._release_inflight(job)  # re-fetch on next start (not lost)
                     raise  # propagate — shuts down the worker
+                except ConfigEntryAuthFailed as err:
+                    # WR-05: parcelapp auth failure — NOT an Ollama failure. The D-05
+                    # contract says _record_stage2_failure tracks Ollama failures only;
+                    # routing auth errors through the generic handler inflated the
+                    # streak and fired the misleading "check Ollama" notification for
+                    # a parcelapp API-key problem. Log the real cause, discard the key
+                    # + release the message so the job re-runs after reauth; the next
+                    # inline poll raises ConfigEntryAuthFailed from poll context and
+                    # triggers HA's reauth flow (T-19-08).
+                    _LOGGER.error(
+                        "Stage-2 worker: parcelapp auth error for %s — check the "
+                        "ParcelApp API key (reauth is requested on the next poll): %s",
+                        normalized_tn,
+                        err,
+                    )
+                    self._stage2_enqueued_keys.discard(normalized_tn)
+                    self._release_inflight(job)  # re-fetch next poll (not lost)
                 except Exception as err:  # noqa: BLE001
                     # FAIL-01/02/04: surface the failure loudly via the centralized helper (D-01..D-04).
                     self._record_stage2_failure(job, err)
@@ -1213,8 +1286,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     async def _async_drain_pending_posts(self) -> None:
         """Drain pending posts from prior quota-blocked extraction cycles.
 
-        Runs before each new extraction job to opportunistically flush the backlog
-        when quota/cap conditions allow. Respects MAX_STAGE2_POSTS_PER_POLL cap and
+        Runs before each new extraction job AND at the top of every poll cycle
+        (WR-04 — both subclasses call it from _async_update_data_inner, so the
+        "drained on next quota-free poll" contract holds even when no new shipment
+        email ever arrives) to opportunistically flush the backlog when quota/cap
+        conditions allow. Respects MAX_STAGE2_POSTS_PER_POLL cap and
         _quota_exhausted_until timestamp.
 
         Guard order:
@@ -1334,10 +1410,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
             # Success or AlreadyAdded/InvalidTracking: bookkeeping (Pitfall 3: call
             # _record_stage2_success on drain POSTs too — they are real POSTs).
-            self._stage2_posts_this_poll += 1  # Pitfall 4: shared counter
-            self._record_stage2_success()
             if posted_2xx:
+                # WR-08/D-12: only a genuine 2xx POST consumes a cap slot — AlreadyAdded/
+                # InvalidTracking consumed no parcelapp quota (Pitfall 4: shared counter).
+                self._stage2_posts_this_poll += 1
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
+            self._record_stage2_success()
             # Write dedup so next poll does not retry this TN.
             self._submitted_tracking_numbers[normalized_tn] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
@@ -1454,6 +1532,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     return
                 self._release_inflight(job)  # re-fetch next poll (not lost)
                 return
+
+            # WR-03: a successful extraction clears this message's failure streak so
+            # a recovered message doesn't carry a stale near-threshold count into the
+            # next transient blip.
+            self._stage2_msg_failures.pop(self._stage2_failure_key(job), None)
 
             self._diagnostics.record_llm_call(
                 stage2_result.latency_ms,
@@ -1624,16 +1707,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._diagnostics.stage2_already_added_total += 1
-            self._stage2_posts_this_poll += 1
+            # WR-08: do NOT increment _stage2_posts_this_poll here — no POST succeeded
+            # and no parcelapp quota was consumed, so counting these ate
+            # MAX_STAGE2_POSTS_PER_POLL cap slots for non-POST outcomes (the D-12
+            # contract is "increment only on successful POST").
             # Write dedup so next poll does not retry; discard in-flight key.
             self._submitted_tracking_numbers[normalized_tn] = None
             if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
                 self._submitted_tracking_numbers.popitem(last=False)
             self._stage2_enqueued_keys.discard(normalized_tn)
-            base = self.data if self.data is not None else {}
-            updated = {**base, job.storage_key: merged_shipment}
-            self._pending_shipments = updated
+            # WR-08: mirror the success path — persist AND publish. Persisting without
+            # async_set_updated_data left store and live data divergent (the entry was
+            # invisible to sensors/cleanup), and the next poll's snapshot then dropped
+            # it from the store again. Re-snapshot immediately before publish (S2 race).
+            self._pending_shipments = {**(self.data or {}), job.storage_key: merged_shipment}
             await self._async_save_store()
+            self.async_set_updated_data({**(self.data or {}), job.storage_key: merged_shipment})
             return
         except ParcelAppTransientError as err:
             _LOGGER.warning(
@@ -1707,8 +1796,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 type(stored_list).__name__,
             )
             stored_list = []
+        # WR-01: re-normalize stored keys through the (now separator-stripping)
+        # canonical form so entries written by older versions under the
+        # strip().upper() scheme stay effective as dedup keys.
         self._submitted_tracking_numbers = OrderedDict(
-            (tn, None) for tn in stored_list if isinstance(tn, str)
+            (normalize_tracking_number(tn), None) for tn in stored_list if isinstance(tn, str)
         )
         qe = stored.get("quota_exhausted_until")
         self._quota_exhausted_until = qe if isinstance(qe, int) else None
@@ -1764,6 +1856,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     err,
                 )
         self._restored_shipments = restored
+        # CR-02: seed _pending_shipments from the restored shipments so any store save
+        # that fires before the first successful non-debug poll (async_stop_stage2 on a
+        # failed first refresh, _maybe_reset_used_today rollover, _on_quota_expiry) never
+        # snapshots an empty dict and wipes persisted_shipments from disk.
+        self._pending_shipments = dict(restored)
         # Phase 23 D-03 / LD-05: hydrate pending_posts — post-deferred merged shipments
         # that survived an HA restart while ParcelApp quota was exhausted.
         # Uses stored.get("pending_posts", {}) so v3 stores without this key load cleanly

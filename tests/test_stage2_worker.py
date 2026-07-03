@@ -1067,9 +1067,11 @@ async def test_poison_message_quarantined_after_threshold(hass, mock_stage2_conf
         assert raw_id in coord._inflight_message_ids
 
 
-async def test_imap_job_without_raw_msg_id_never_quarantined(hass, mock_stage2_config_entry):
-    """A job with no raw_msg_id (IMAP path) has no in-flight gate to quarantine;
-    it must keep releasing on every failure, never getting stuck.
+async def test_job_without_raw_msg_id_quarantined_via_tn_skip_set(hass, mock_stage2_config_entry):
+    """WR-03: a job with no raw_msg_id (Gmail Stage-1 / IMAP paths) has no in-flight
+    gate — the quarantine must instead key the failure counter on normalized_tn and,
+    at the threshold, block re-enqueue via the _stage2_quarantined_tns skip set so
+    the poll→re-enqueue→re-fail loop actually stops on those paths too.
     """
     from custom_components.shop2parcel.api.exceptions import OllamaTransientError
 
@@ -1095,9 +1097,10 @@ async def test_imap_job_without_raw_msg_id_never_quarantined(hass, mock_stage2_c
         await coord._async_load_store()
         await coord.async_start_stage2()
 
+        tn = "1Z999AA10123456784"
         job = Stage2Job(
-            storage_key="1Z999AA10123456784",
-            normalized_tn="1Z999AA10123456784",
+            storage_key=tn,
+            normalized_tn=tn,
             shipment=_make_shipment(),
             html_body="<html/>",
             message_id="imap:42",
@@ -1105,11 +1108,100 @@ async def test_imap_job_without_raw_msg_id_never_quarantined(hass, mock_stage2_c
             raw_msg_id=None,
         )
 
-        for _ in range(STAGE2_MSG_QUARANTINE_THRESHOLD + 2):
+        for i in range(STAGE2_MSG_QUARANTINE_THRESHOLD):
             await coord._async_process_stage2_job(job)
+            if i < STAGE2_MSG_QUARANTINE_THRESHOLD - 1:
+                # Sub-threshold: still re-enqueueable (poll re-parses next cycle).
+                assert tn not in coord._stage2_quarantined_tns
+                assert coord._enqueue_stage2(
+                    tn,
+                    tn,
+                    _make_shipment(),
+                    "<html/>",
+                    message_id="imap:42",
+                    meta={},
+                ), "sub-threshold job must still be enqueueable"
+                # Drain the re-enqueued job so the next loop iteration is clean.
+                coord._stage2_queue.get_nowait()
+                coord._stage2_queue.task_done()
+                coord._stage2_enqueued_keys.discard(tn)
 
+        # At threshold: TN quarantined — the next poll's re-enqueue is skipped.
+        assert tn in coord._stage2_quarantined_tns
+        assert not coord._enqueue_stage2(
+            tn,
+            tn,
+            _make_shipment(),
+            "<html/>",
+            message_id="imap:42",
+            meta={},
+        ), "quarantined tracking number must not re-enqueue"
         # No raw_msg_id → nothing ever added to the in-flight skip set.
         assert "imap:42" not in coord._inflight_message_ids
+        assert "42" not in coord._inflight_message_ids
+
+
+async def test_stage2_msg_failure_streak_cleared_on_successful_extraction(
+    hass, mock_stage2_config_entry
+):
+    """WR-03: a successful extraction resets the per-message failure counter so a
+    recovered message doesn't carry a stale near-threshold count."""
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        tn = "1Z999AA10123456784"
+        job = Stage2Job(
+            storage_key=tn,
+            normalized_tn=tn,
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="imap:42",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            raw_msg_id=None,
+        )
+
+        # Accumulate a near-threshold failure streak.
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            side_effect=OllamaTransientError("timeout")
+        )
+        for _ in range(STAGE2_MSG_QUARANTINE_THRESHOLD - 1):
+            await coord._async_process_stage2_job(job)
+        assert coord._stage2_msg_failures.get(tn) == STAGE2_MSG_QUARANTINE_THRESHOLD - 1
+
+        # Recovery: one successful extraction clears the streak.
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={"tracking_number": tn},
+                custom={},
+                latency_ms=10.0,
+                passes_used=1,
+            )
+        )
+        await coord._async_process_stage2_job(job)
+        assert tn not in coord._stage2_msg_failures, (
+            "successful extraction must clear the failure streak"
+        )
+        assert tn not in coord._stage2_quarantined_tns
 
 
 async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
@@ -4058,3 +4150,225 @@ async def test_description_falls_back_to_order_name_when_no_summary(hass, mock_s
         # LOH-SUMMARY: no order_summary → falls back to order_name.
         call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
         assert call_kwargs["description"] == "#1234"
+
+
+# ---------------------------------------------------------------------------
+# WR-04: _pending_posts drains on EVERY quota-free poll, not only when a new
+# Stage-2 job happens to arrive.
+# ---------------------------------------------------------------------------
+
+
+def _make_deferred_shipment() -> ShipmentData:
+    return ShipmentData(
+        tracking_number="1Z999AA10123456784",
+        carrier_name="UPS",
+        order_name="#9001",
+        message_id="deferred_msg",
+        email_date=1700000000,
+    )
+
+
+async def test_gmail_poll_drains_pending_posts_without_new_jobs(hass, mock_stage2_config_entry):
+    """WR-04 (Gmail): quota-deferred POSTs drain on the next quota-free poll even
+    when the poll finds NO new shipment emails."""
+    import time as stdlib_time
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        coord._diagnostics.stage2_enabled = True
+
+        # A quota-deferred item from a prior poll; the quota window has since expired.
+        coord._pending_posts = {"deferred_key": _make_deferred_shipment()}
+        coord._quota_exhausted_until = int(stdlib_time.time()) - 1
+
+        data = await coord._async_update_data()
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    assert coord._pending_posts == {}, "deferred post must drain on the quota-free poll"
+    assert "deferred_key" in data, "drained shipment must survive the poll-end merge (CR-01)"
+
+
+async def test_worker_already_added_publishes_and_consumes_no_cap_slot(
+    hass, mock_stage2_config_entry
+):
+    """WR-08: the AlreadyAdded/InvalidTracking worker path must publish the merged
+    shipment via async_set_updated_data (like the success path — otherwise store and
+    live data diverge and the next poll clobbers the store entry) and must NOT
+    consume a MAX_STAGE2_POSTS_PER_POLL cap slot (no POST succeeded, no quota used)."""
+    from custom_components.shop2parcel.api.exceptions import ParcelAppAlreadyAddedError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        tn = "1Z999AA10123456784"
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={"tracking_number": tn}, custom={}, passes_used=1, latency_ms=10.0
+            )
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        job = Stage2Job(
+            storage_key="already_key",
+            normalized_tn=tn,
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+        )
+        await coord._async_process_stage2_job(job)
+
+        # WR-08: the shipment must be PUBLISHED to live data, not only persisted.
+        assert coord.data is not None and "already_key" in coord.data, (
+            "AlreadyAdded path must publish via async_set_updated_data like the success path"
+        )
+        # WR-08/D-12: no cap slot consumed for a non-POST outcome.
+        assert coord._stage2_posts_this_poll == 0, (
+            "AlreadyAdded must not consume a MAX_STAGE2_POSTS_PER_POLL slot"
+        )
+        # Existing semantics preserved: dedup written, key discarded.
+        assert tn in coord._submitted_tracking_numbers
+        assert tn not in coord._stage2_enqueued_keys
+
+        await coord.async_stop_stage2()
+
+
+async def test_worker_auth_failure_not_counted_as_ollama_failure(hass, mock_stage2_config_entry):
+    """WR-05: a parcelapp auth error from the worker POST path must NOT feed the
+    Ollama consecutive-failure streak nor fire the 'check Ollama' notification —
+    it is handled distinctly (log + key discard) per the D-05 contract."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import ParcelAppAuthError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(persistent_notification, "async_create") as mock_create,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        tn = "1Z999AA10123456784"
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={"tracking_number": tn}, custom={}, passes_used=1, latency_ms=10.0
+            )
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAuthError("401")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        job = Stage2Job(
+            storage_key=tn,
+            normalized_tn=tn,
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+        )
+        # Three auth failures — enough to trip the old (buggy) Ollama-streak
+        # notification threshold if they were miscounted.
+        for _ in range(3):
+            coord._stage2_queue.put_nowait(job)
+            await asyncio.sleep(0)
+            await hass.async_block_till_done()
+            coord._stage2_enqueued_keys.discard(tn)
+
+        assert coord._stage2_consecutive_failures == 0, (
+            "parcelapp auth errors must not inflate the Ollama failure streak (D-05)"
+        )
+        assert mock_create.call_count == 0, (
+            "the 'Stage-2 Failing / check Ollama' notification must not fire for auth errors"
+        )
+        assert tn not in coord._stage2_enqueued_keys
+        # Worker must survive the auth error and keep running.
+        assert not coord._stage2_worker_task.done()
+
+        await coord.async_stop_stage2()
+
+
+async def test_imap_poll_drains_pending_posts_without_new_jobs(hass, mock_imap_config_entry):
+    """WR-04 (IMAP): same guarantee on the IMAP poll path."""
+    import time as stdlib_time
+
+    from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
+
+    mock_imap_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+        coord._diagnostics.stage2_enabled = True
+
+        coord._pending_posts = {"deferred_key": _make_deferred_shipment()}
+        coord._quota_exhausted_until = int(stdlib_time.time()) - 1
+
+        data = await coord._async_update_data()
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    assert coord._pending_posts == {}, "deferred post must drain on the quota-free poll"
+    assert "deferred_key" in data, "drained shipment must survive the poll-end merge (CR-01)"

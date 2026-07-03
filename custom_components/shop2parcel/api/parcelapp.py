@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 import aiohttp
 
@@ -42,6 +43,37 @@ _NO_JSON = object()  # Sentinel: body could not be decoded as JSON.
 # worker, deferred drain) is covered by the single choke point.
 MAX_DESCRIPTION_CHARS = 200
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# WR-05/WR-07: the 429 body's reset_at is untrusted external input. A non-int
+# value TypeError'd every subsequent quota comparison until restart; an absurd
+# far-future int silently paused forwarding indefinitely AND persisted across
+# restarts. Clamp the pause to at most 24 hours from now.
+MAX_RESET_AT_WINDOW_S = 86400  # 24 hours
+
+
+def _validate_reset_at(raw: object) -> int | None:
+    """Validate and clamp an untrusted reset_at value from the 429 body (WR-05/WR-07).
+
+    Accepts ints and int-parseable strings (bool excluded — it is an int subclass).
+    Returns an epoch int clamped to at most MAX_RESET_AT_WINDOW_S in the future,
+    or None for invalid, past, or absent values — callers treat None as "use the
+    default quota window" (the coordinators fall back to _next_midnight_utc()).
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str):
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            return None
+    else:
+        return None  # None, float, list, dict, ... — not an epoch int
+    now = int(time.time())
+    if value <= now:
+        return None
+    return min(value, now + MAX_RESET_AT_WINDOW_S)
 
 
 async def _read_error_body(resp: aiohttp.ClientResponse) -> object:
@@ -145,7 +177,9 @@ class ParcelAppClient:
                     try:
                         data = await resp.json(content_type=None)
                         if isinstance(data, dict):
-                            reset_at = data.get("reset_at")
+                            # WR-05/WR-07: validate + clamp the untrusted value at the
+                            # source so a malformed body can never poison quota state.
+                            reset_at = _validate_reset_at(data.get("reset_at"))
                     except (ValueError, aiohttp.ContentTypeError):  # fmt: skip
                         pass  # Non-JSON or wrong content-type body — reset_at stays None.
                     raise ParcelAppQuotaError("Daily quota (20/day) exhausted", reset_at=reset_at)
@@ -160,7 +194,11 @@ class ParcelAppClient:
                 raw_2xx = await _read_error_body(resp)
                 if isinstance(raw_2xx, dict) and raw_2xx.get("success") is not True:
                     _raise_from_error_body(raw_2xx)
-        except (TimeoutError, aiohttp.ClientConnectionError) as err:
+        except (TimeoutError, aiohttp.ClientError) as err:
+            # WR-04: catch the aiohttp base class — ClientPayloadError (connection
+            # lost mid-body) subclasses ClientError but NOT ClientConnectionError,
+            # and previously escaped the documented ParcelApp exception taxonomy,
+            # aborting the whole poll cycle instead of a per-message transient skip.
             raise ParcelAppTransientError(f"Network error: {err}") from err
 
     async def async_get_deliveries(self, filter_mode: str = "recent") -> list[dict]:
@@ -187,8 +225,19 @@ class ParcelAppClient:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 if 400 <= resp.status < 500:
                     raise ParcelAppTransientError(f"Unexpected client error: HTTP {resp.status}")
-                resp.raise_for_status()
-                data = await resp.json(content_type=None)
-                return data.get("deliveries", [])
-        except (TimeoutError, aiohttp.ClientConnectionError) as err:
+                # WR-06: the raise_for_status() that used to sit here was dead code —
+                # every >= 400 status is already converted to an exception above.
+                # Guard the 2xx body parse + shape so a non-JSON or non-dict body maps
+                # into the documented taxonomy instead of escaping as a raw
+                # ValueError/AttributeError coordinator error.
+                try:
+                    data = await resp.json(content_type=None)
+                except (ValueError, aiohttp.ContentTypeError) as err:
+                    raise ParcelAppTransientError("View-deliveries returned non-JSON body") from err
+                deliveries = data.get("deliveries", []) if isinstance(data, dict) else None
+                if not isinstance(deliveries, list):
+                    raise ParcelAppTransientError("View-deliveries returned unexpected JSON shape")
+                return deliveries
+        except (TimeoutError, aiohttp.ClientError) as err:
+            # WR-04: catch the aiohttp base class (see async_add_delivery note).
             raise ParcelAppTransientError(f"Network error: {err}") from err

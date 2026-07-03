@@ -224,6 +224,27 @@ async def test_connection_refused_raises_transient_error(client):
             await client.async_generate("prompt", {"type": "object"})
 
 
+async def test_payload_error_raises_transient_error(client):
+    """WR-04: aiohttp.ClientPayloadError (connection lost mid-body — a ClientError
+    but NOT a ClientConnectionError) must map to OllamaTransientError instead of
+    escaping the taxonomy and aborting the poll."""
+    with aioresponses() as mock:
+        mock.post(
+            GENERATE_URL,
+            exception=aiohttp.ClientPayloadError("Response payload is not completed"),
+        )
+        with pytest.raises(OllamaTransientError):
+            await client.async_generate("prompt", {"type": "object"})
+
+
+async def test_async_get_tags_payload_error_raises_transient(session):
+    """WR-04: ClientPayloadError in async_get_tags → OllamaTransientError."""
+    with aioresponses() as mock:
+        mock.get(TAGS_URL, exception=aiohttp.ClientPayloadError("mid-body disconnect"))
+        with pytest.raises(OllamaTransientError, match="network error"):
+            await OllamaClient.async_get_tags(session, BASE_URL, 30.0)
+
+
 # ---------------------------------------------------------------------------
 # async_generate — HTTP status mapping (SPEC Req 5)
 # ---------------------------------------------------------------------------

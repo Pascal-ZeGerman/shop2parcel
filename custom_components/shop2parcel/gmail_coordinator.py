@@ -104,6 +104,15 @@ class GmailCoordinator(Shop2ParcelCoordinator):
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
         """Inner implementation of the poll cycle (called from _async_update_data)."""
         assert self.config_entry is not None  # guaranteed by _async_update_data None check
+
+        # WR-04: drain quota-deferred POSTs on EVERY poll, honouring the documented
+        # _pending_posts contract ("drained on next quota-free poll"). Previously the
+        # drain only ran when a NEW Stage-2 job arrived, so deferred forwards stalled
+        # indefinitely with no new shipment emails. The drain self-guards (empty /
+        # debug mode / quota still exhausted → no-op) and runs BEFORE the poll's
+        # current_data snapshot so its publishes are included in it.
+        await self._async_drain_pending_posts()
+
         # 1. Refresh OAuth2 token (HA framework owns the lifecycle).
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
             self.hass, self.config_entry
@@ -932,6 +941,16 @@ class GmailCoordinator(Shop2ParcelCoordinator):
             self._quota_exhausted_until = None
             self._arm_quota_expiry_timer()  # finding 3: cancel the now-obsolete expiry timer
             await self._async_save_store()
+
+        # CR-01: re-merge onto the LIVE self.data before trim/save/return. The Stage-2
+        # worker (and the pending-posts drain) publish merged shipments via
+        # async_set_updated_data while this poll is awaiting; returning the stale
+        # start-of-poll snapshot would overwrite self.data without those entries and
+        # the poll-end save would drop them from the store — permanently, because the
+        # tracking-number dedup + seen-ID gates prevent them from ever being re-added.
+        # Merge direction: keys this poll wrote win on collision (the poll's writes
+        # are newest for its own keys); worker-published keys survive via self.data.
+        current_data = {**(self.data or {}), **current_data}
 
         if not debug_mode:
             # FIFO trim: current_data is a plain dict (not OrderedDict), so

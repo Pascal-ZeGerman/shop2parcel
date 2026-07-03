@@ -160,17 +160,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Phase 18: when Stage-2 is enabled, construct the bounded queue + in-flight
     # dedup set so the first poll's enqueues already have somewhere to land.
     # Register async_stop_stage2 via async_on_unload so HA tears down the queue
-    # on every unload path (clean unload, exception, HA shutdown). Wrap the async
-    # callable in a sync lambda + hass.async_create_task to be robust across HA
-    # versions whose async_on_unload semantics differ for async vs sync callables
-    # (RESEARCH.md Pitfall 3).
+    # on every unload path (clean unload, exception, HA shutdown).
+    # WR-01: register the coroutine function DIRECTLY so unload AWAITS Stage-2
+    # shutdown (worker cancel, bounded at 5 s inside async_stop_stage2, + final
+    # save) before returning. The previous sync-lambda + hass.async_create_task
+    # fire-and-forget let an options-save reload (OptionsFlowWithReload) start a
+    # new coordinator/worker while the old worker was still mid-POST, and the old
+    # coordinator's debounced save could land AFTER the new coordinator's saves —
+    # clobbering fresh dedup state and burning quota on duplicate POSTs.
+    # entry.async_on_unload awaits coroutine-returning callables on every HA
+    # version this integration supports (>= 2025.8 for OptionsFlowWithReload).
     if coordinator._diagnostics.stage2_enabled:
         await coordinator.async_start_stage2()
-
-        def _stop_stage2() -> None:
-            hass.async_create_task(coordinator.async_stop_stage2())
-
-        entry.async_on_unload(_stop_stage2)
+        entry.async_on_unload(coordinator.async_stop_stage2)
     await coordinator.async_config_entry_first_refresh()
 
     # Finding 3: enable the time-boundary refresh timers (quota-expiry + UTC-midnight

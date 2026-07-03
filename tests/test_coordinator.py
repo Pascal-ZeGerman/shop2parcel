@@ -226,7 +226,9 @@ async def test_dedup_survives_restart(hass, mock_config_entry):
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
-        assert list(coord._submitted_tracking_numbers.keys()) == ["TN-A", "TN-B"]
+        # WR-01: stored keys are re-normalized to the canonical separator-free
+        # form on load (insertion order preserved).
+        assert list(coord._submitted_tracking_numbers.keys()) == ["TNA", "TNB"]
         assert isinstance(coord._submitted_tracking_numbers, OrderedDict)
         assert coord._quota_exhausted_until is None
 
@@ -6151,3 +6153,100 @@ async def test_drain_defensive_regate_posts_clean_form_for_valid_item(hass, mock
     assert posted_tn == clean_tn, (
         f"Drain must POST the clean canonical form '{clean_tn}', got '{posted_tn}'"
     )
+
+
+# ---------------------------------------------------------------------------
+# CR-01 regression: a Stage-2 worker publish that lands MID-POLL (via
+# async_set_updated_data) must survive the poll's end-of-cycle return — the
+# poll previously returned its stale start-of-poll snapshot, permanently
+# dropping the worker's entries from live data and the persisted store.
+# ---------------------------------------------------------------------------
+
+
+async def test_gmail_worker_publish_mid_poll_survives_poll_end(hass, mock_config_entry):
+    """CR-01 (Gmail): an entry published via async_set_updated_data while the poll
+    iterates messages must still be present in the poll's returned data."""
+    mock_config_entry.add_to_hass(hass)
+    worker_shipment = _make_shipment("worker_msg")
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:0")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        def _parse_and_publish(*args, **kwargs):
+            # Simulate the Stage-2 worker publishing a merged shipment mid-poll —
+            # AFTER the poll took its start-of-cycle snapshot of self.data.
+            coord.async_set_updated_data({**(coord.data or {}), "worker_msg": worker_shipment})
+            return _make_parse_result(None, skip_reason="no_template_match")
+
+        mock_parser_cls.return_value.parse.side_effect = _parse_and_publish
+
+        data = await coord._async_update_data()
+
+    assert "worker_msg" in data, (
+        "worker-published shipment was clobbered by the poll's stale snapshot"
+    )
+    # The poll-end store snapshot must include the worker's entry too.
+    assert "worker_msg" in coord._pending_shipments
+
+
+async def test_imap_worker_publish_mid_poll_survives_poll_end(hass, mock_imap_config_entry):
+    """CR-01 (IMAP): same guarantee on the IMAP poll path."""
+    mock_imap_config_entry.add_to_hass(hass)
+    worker_shipment = _make_shipment("worker_msg")
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(
+            return_value=[{"uid": 7, "raw": b"raw-bytes"}]
+        )
+        coord = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord._async_load_store()
+
+        def _parse_and_publish(*args, **kwargs):
+            coord.async_set_updated_data({**(coord.data or {}), "worker_msg": worker_shipment})
+            return _make_parse_result(None, skip_reason="no_template_match")
+
+        mock_parser_cls.return_value.parse.side_effect = _parse_and_publish
+
+        data = await coord._async_update_data()
+
+    assert "worker_msg" in data, (
+        "worker-published shipment was clobbered by the poll's stale snapshot"
+    )
+    assert "worker_msg" in coord._pending_shipments

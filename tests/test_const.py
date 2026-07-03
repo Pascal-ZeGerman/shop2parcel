@@ -248,5 +248,37 @@ def test_default_gmail_query_contains_all_8_keywords():
 
 
 def test_normalize_tracking_number_unchanged_after_r6():
-    """D-03 regression: normalize_tracking_number still strip().upper() after R6 changes."""
+    """D-03 regression: separator-free tracking numbers pass through unchanged."""
     assert normalize_tracking_number("  9400111899223765496892  ") == "9400111899223765496892"
+
+
+# -------- WR-01: normalize_tracking_number matches the gate-clean form ----------
+
+
+def test_normalize_strips_internal_spaces():
+    """WR-01: internal spaces are stripped (canonical separator-free form)."""
+    assert normalize_tracking_number("1Z999 AA10 1234 56784") == "1Z999AA10123456784"
+
+
+def test_normalize_strips_internal_dashes():
+    """WR-01: internal dashes are stripped (canonical separator-free form)."""
+    assert normalize_tracking_number("9400-1118-9922-3765-4968-92") == "9400111899223765496892"
+
+
+def test_normalize_matches_validate_carrier_format_clean_form():
+    """WR-01: normalize_tracking_number and validate_carrier_format must produce
+    the IDENTICAL canonical key for the same input — a key-scheme split defeats
+    dedup for separator-containing tracking numbers."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    for raw in ("1Z999 AA10 1234 56784", "9400-1118 9922-3765 4968-92", " 1z999aa10123456784 "):
+        clean, _ok, _reason = validate_carrier_format(raw)
+        assert normalize_tracking_number(raw) == clean, (
+            f"dedup key mismatch for {raw!r}: "
+            f"normalize={normalize_tracking_number(raw)!r} gate-clean={clean!r}"
+        )
+
+
+def test_normalize_handles_none_like_empty():
+    """WR-01: empty input still yields an empty string (no crash)."""
+    assert normalize_tracking_number("") == ""

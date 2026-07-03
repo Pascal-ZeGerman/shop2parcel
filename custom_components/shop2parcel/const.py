@@ -1,5 +1,7 @@
 """Constants for the Shop2Parcel integration."""
 
+import re
+
 DOMAIN = "shop2parcel"
 
 # Phase 4: coordinator + options flow constants
@@ -151,12 +153,19 @@ def stage2_failing_notification_id(entry_id: str) -> str:
 
 
 def normalize_tracking_number(tracking_number: str) -> str:
-    """Normalize a tracking number for dedup comparison.
+    """Normalize a tracking number to the single canonical dedup form.
 
-    strip() removes whitespace from parser extraction.
-    upper() handles casing inconsistencies in email content.
+    WR-01: mirrors validate_carrier_format's clean form (api/email_parser.py) —
+    strips internal space/dash separators and uppercases, so EVERY dedup write
+    site produces the identical key regardless of email formatting. Two divergent
+    normalizations (strip().upper() here vs the separator-free gate-clean form)
+    previously split the dedup key space: a separator-containing tracking number
+    was recorded under one key by the drain and looked up under another by the
+    next poll, defeating dedup and re-running Ollama + re-POSTing.
+    The separator strip uses a bounded char class (no unbounded quantifier —
+    ASVS V5), same as validate_carrier_format.
     """
-    return tracking_number.strip().upper()
+    return re.sub(r"[ -]", "", (tracking_number or "").strip()).upper()
 
 
 # Phase 16: Stage-2 LLM extraction (locked field set — owned by extractor,

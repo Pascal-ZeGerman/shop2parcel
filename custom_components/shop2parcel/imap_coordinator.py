@@ -133,6 +133,14 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         assert entry is not None  # guaranteed by _async_update_data
         imap_client = cast(ImapClient, self._email_client)
 
+        # WR-04: drain quota-deferred POSTs on EVERY poll, honouring the documented
+        # _pending_posts contract ("drained on next quota-free poll"). Previously the
+        # drain only ran when a NEW Stage-2 job arrived, so deferred forwards stalled
+        # indefinitely with no new shipment emails. The drain self-guards (empty /
+        # debug mode / quota still exhausted → no-op) and runs BEFORE the poll's
+        # current_data snapshot so its publishes are included in it.
+        await self._async_drain_pending_posts()
+
         # Phase 7 (D-06): reset last_poll_* fields at the top of every poll cycle.
         poll_start = time.time()
         d = self._diagnostics
@@ -578,6 +586,16 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             self._quota_exhausted_until = None
             self._arm_quota_expiry_timer()  # finding 3: cancel the now-obsolete expiry timer
             await self._async_save_store()
+
+        # CR-01: re-merge onto the LIVE self.data before trim/save/return. The Stage-2
+        # worker (and the pending-posts drain) publish merged shipments via
+        # async_set_updated_data while this poll is awaiting; returning the stale
+        # start-of-poll snapshot would overwrite self.data without those entries and
+        # the poll-end save would drop them from the store — permanently, because the
+        # tracking-number dedup gate prevents them from ever being re-added.
+        # Merge direction: keys this poll wrote win on collision (the poll's writes
+        # are newest for its own keys); worker-published keys survive via self.data.
+        current_data = {**(self.data or {}), **current_data}
 
         if not debug_mode:
             # FIFO trim: current_data is a plain dict (not OrderedDict), so

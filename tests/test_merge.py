@@ -352,6 +352,83 @@ def test_shipmentdata_default_custom_attributes_is_empty_dict() -> None:
 
 
 # ---------------------------------------------------------------------------
+# WR-02: placeholder sentinels ("", "Unknown") route to the promotion path
+# ---------------------------------------------------------------------------
+
+
+def test_llm_fills_empty_order_name_without_conflict() -> None:
+    """WR-02: Stage-1 order_name='' (the parser's 'not found' sentinel) must be
+    PROMOTED by a non-empty Stage-2 value — previously '' was treated as
+    authoritative and every such job emitted a spurious stage2_conflict."""
+    stage1 = _make_shipment(order_name="")
+    result = _make_result(locked={"order_name": "#4711"})
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
+    assert merged.order_name == "#4711"
+    assert conflicts == [], "filling an empty Stage-1 field must not emit a conflict"
+    assert gate_rejections == []
+
+
+def test_llm_replaces_unknown_carrier_without_conflict() -> None:
+    """WR-02: Stage-1 carrier_name='Unknown' (the parser's carrier sentinel) must
+    be replaced by an LLM-identified carrier — previously 'Unknown' won and
+    normalize_carrier POSTed 'pholder' even when the LLM knew the carrier."""
+    stage1 = _make_shipment(carrier_name="Unknown")
+    result = _make_result(locked={"carrier_name": "UPS"})
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
+    assert merged.carrier_name == "UPS"
+    assert conflicts == []
+    assert gate_rejections == []
+
+
+def test_unknown_carrier_kept_when_stage2_declines() -> None:
+    """WR-02: sentinel values are never downgraded to None — when Stage-2 declines,
+    the original Stage-1 sentinel is kept (downstream types are non-Optional str)."""
+    stage1 = _make_shipment(carrier_name="Unknown", order_name="")
+    result = _make_result(locked={"carrier_name": None, "order_name": None})
+    merged, conflicts, _gate = merge_llm_authoritative(stage1, result)
+    assert merged.carrier_name == "Unknown"
+    assert merged.order_name == ""
+    assert conflicts == []
+
+
+def test_unknown_sentinel_not_special_for_order_name() -> None:
+    """WR-02: the 'Unknown' sentinel is carrier-specific — an order_name literally
+    equal to 'Unknown' is a real value and still conflicts."""
+    stage1 = _make_shipment(order_name="Unknown")
+    result = _make_result(locked={"order_name": "#1234"})
+    merged, conflicts, _gate = merge_llm_authoritative(stage1, result)
+    assert merged.order_name == "Unknown"
+    assert len(conflicts) == 1
+
+
+def test_real_carrier_conflict_still_recorded() -> None:
+    """WR-02: conflicts still fire when Stage-1 had a REAL carrier value."""
+    stage1 = _make_shipment(carrier_name="USPS")
+    result = _make_result(locked={"carrier_name": "UPS"})
+    merged, conflicts, _gate = merge_llm_authoritative(stage1, result)
+    assert merged.carrier_name == "USPS"
+    assert conflicts == [{"field": "carrier_name", "stage1": "USPS", "stage2": "UPS"}]
+
+
+def test_empty_stage1_tracking_number_gets_gated_promotion() -> None:
+    """WR-02 + MRG-04: an (anomalous) empty Stage-1 tracking_number routes to the
+    promotion path, where the strict carrier-format gate still applies."""
+    stage1 = _make_shipment(tracking_number="")
+    # Valid UPS format → gate passes → clean form promoted.
+    result = _make_result(locked={"tracking_number": "1Z999AA10123456784"})
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
+    assert merged.tracking_number == "1Z999AA10123456784"
+    assert conflicts == []
+    assert gate_rejections == []
+    # Non-carrier string → gate rejects → sentinel kept, rejection recorded.
+    result_bad = _make_result(locked={"tracking_number": "NOTATRACKINGNO"})
+    merged_bad, conflicts_bad, gate_rejections_bad = merge_llm_authoritative(stage1, result_bad)
+    assert merged_bad.tracking_number == ""
+    assert conflicts_bad == []
+    assert len(gate_rejections_bad) == 1
+
+
+# ---------------------------------------------------------------------------
 # Phase 28 Plan 03 RED: MRG-04 strict carrier-format gate tests
 # ---------------------------------------------------------------------------
 # These tests FAIL until Task 2 (GREEN) because:

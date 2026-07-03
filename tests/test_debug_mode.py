@@ -873,3 +873,67 @@ async def test_async_remove_entry_dismisses_debug_notification(hass, mock_config
     # The debug-mode notification must be one of the dismissed IDs.
     notification_ids = {call.kwargs["notification_id"] for call in mock_dismiss.call_args_list}
     assert debug_mode_notification_id(mock_config_entry.entry_id) in notification_ids
+
+
+# ---------------------------------------------------------------------------
+# CR-02 / DBG-03: timer-driven persist paths must honour the zero-store-writes
+# contract in debug mode (previously they persisted unconditionally, wiping
+# persisted_shipments because _pending_shipments stays empty in debug mode).
+# ---------------------------------------------------------------------------
+
+
+async def _make_debug_coordinator(hass, mock_config_entry, mock_store_cls):
+    """Construct a GmailCoordinator with debug mode ON and the store loaded."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={CONF_DEBUG_MODE: True},
+    )
+    mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    await coord._async_load_store()
+    return coord
+
+
+async def test_dbg03_used_today_rollover_no_store_write_in_debug(hass, mock_config_entry):
+    """CR-02/DBG-03: the used_today rollover persist is skipped in debug mode;
+    the in-memory reset still happens."""
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        delay_save = MagicMock()
+        mock_store_cls.return_value.async_delay_save = delay_save
+        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
+        coord._used_today = 5
+        coord._used_today_date = "2000-01-01"
+        coord._maybe_reset_used_today()
+    assert coord._used_today == 0, "in-memory rollover reset must still happen in debug mode"
+    assert delay_save.call_count == 0, "DBG-03: no store write on rollover in debug mode"
+
+
+async def test_dbg03_quota_expiry_no_store_write_in_debug(hass, mock_config_entry):
+    """CR-02/DBG-03: the quota-expiry timer persist is skipped in debug mode;
+    the in-memory clear still happens."""
+    from datetime import UTC, datetime
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        delay_save = MagicMock()
+        mock_store_cls.return_value.async_delay_save = delay_save
+        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
+        coord._quota_exhausted_until = int(time.time()) - 10
+        coord._on_quota_expiry(datetime.now(UTC))
+    assert coord._quota_exhausted_until is None, "in-memory quota clear must still happen"
+    assert delay_save.call_count == 0, "DBG-03: no store write on quota expiry in debug mode"
+
+
+async def test_dbg03_stop_stage2_no_store_write_in_debug(hass, mock_config_entry):
+    """CR-02/DBG-03: the async_stop_stage2 teardown save is skipped in debug mode."""
+    import asyncio
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        delay_save = MagicMock()
+        mock_store_cls.return_value.async_delay_save = delay_save
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
+        coord._stage2_queue = asyncio.Queue(maxsize=8)
+        await coord.async_stop_stage2()
+    assert delay_save.call_count == 0, "DBG-03: no store write on stage2 stop in debug mode"
+    assert mock_store_cls.return_value.async_save.call_count == 0

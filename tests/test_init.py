@@ -148,6 +148,67 @@ async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
     assert mock_config_entry.entry_id not in hass.data.get(DOMAIN, {})
 
 
+async def test_unload_entry_awaits_stage2_shutdown(hass, mock_config_entry):
+    """WR-01: unload must AWAIT Stage-2 shutdown — async_stop_stage2 has run to
+    COMPLETION by the time async_unload returns. The previous fire-and-forget
+    lambda (hass.async_create_task) let a reload start a new coordinator/worker
+    while the old teardown was still pending, so its debounced save could land
+    after — and clobber — the new coordinator's state."""
+    import asyncio
+
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={"ollama_url": "http://localhost:11434"},
+    )
+
+    stop_completed = False
+    real_stop = Shop2ParcelCoordinator.async_stop_stage2
+
+    async def _tracked_stop(self):
+        nonlocal stop_completed
+        # Force at least one event-loop suspension so an (incorrect) eager
+        # fire-and-forget registration cannot complete this synchronously.
+        await asyncio.sleep(0)
+        await real_stop(self)
+        stop_completed = True
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
+        patch.object(Shop2ParcelCoordinator, "async_stop_stage2", _tracked_stop),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+        worker_task = coordinator._stage2_worker_task
+        assert worker_task is not None and not worker_task.done(), (
+            "precondition: worker running after setup"
+        )
+
+        assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+
+        # WR-01: shutdown must be COMPLETE when unload returns — no pending
+        # fire-and-forget task allowed to overlap with a subsequent reload.
+        assert stop_completed, "unload must await async_stop_stage2 to completion"
+        assert worker_task.done(), "worker task must be fully stopped when unload returns"
+        assert coordinator._stage2_worker_task is None, (
+            "async_stop_stage2 must have run to completion inside unload"
+        )
+
+
 async def test_setup_entry_forwards_to_sensor_platforms(hass, mock_config_entry):
     """CONTEXT.md D-09 / Phase 10 D-04: PLATFORMS includes sensor and binary_sensor only.
 

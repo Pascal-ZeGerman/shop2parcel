@@ -7,9 +7,10 @@ Maps to Phase 20 requirements:
   parcelapp.net.
 
 - **MRG-03**: Per-field conflict guard — LLM value overwrites Stage-1 ONLY if
-  Stage-1 is ``None`` OR values match after ``str.strip().upper()`` normalization
-  (mirrors ``normalize_tracking_number()`` in ``const.py``). Any divergence keeps
-  Stage-1 and records a conflict entry in the returned ``conflicts`` list.
+  Stage-1 is missing (``None``, ``""``/whitespace, or the ``"Unknown"`` carrier
+  sentinel — WR-02) OR values match after ``str.strip().upper()`` normalization.
+  Any divergence between two REAL values keeps Stage-1 and records a conflict
+  entry in the returned ``conflicts`` list.
 
 - **MRG-04** (Phase 28 Plan 03): Before promoting a Stage-2-sourced ``tracking_number``
   (Stage-1 is ``None``), validate it against the strict carrier-format gate
@@ -46,6 +47,22 @@ from .const import LOCKED_OLLAMA_FIELDS
 from .extractors.types import Stage2Result
 
 
+def _stage1_missing(field_name: str, value: str | None) -> bool:
+    """True when a Stage-1 value is "unknown" and eligible for Stage-2 promotion.
+
+    WR-02 (MRG-03/MRG-04 intent): Stage-1 emits placeholder sentinels rather than
+    ``None`` for missing fields — ``""`` for ``order_name`` (and any blank field)
+    and ``"Unknown"`` for ``carrier_name`` (see ``api/email_parser.py``). Treating
+    those sentinels as authoritative made the promotion path dead code for 3 of
+    the 4 locked fields: the LLM could never fill a blank ``order_name`` or
+    replace ``"Unknown"`` (which ``normalize_carrier`` maps to ``"pholder"``),
+    and every such job emitted a spurious ``stage2_conflict`` event.
+    """
+    if value is None or not value.strip():
+        return True
+    return field_name == "carrier_name" and value.strip().upper() == "UNKNOWN"
+
+
 def merge_llm_authoritative(
     stage1: ShipmentData,
     result: Stage2Result,
@@ -55,9 +72,11 @@ def merge_llm_authoritative(
     Iterates ``LOCKED_OLLAMA_FIELDS`` (``tracking_number``, ``carrier_name``,
     ``order_name``, ``order_summary``). For each field, applies **MRG-03** routing:
 
-    1. **Stage-1 is None** — accept Stage-2 value (after **MRG-04** strict carrier-
-       format gate for ``tracking_number``; value may still be ``None`` if Stage-2
-       also declined or failed the gate).
+    1. **Stage-1 is missing** (``None``, ``""``/whitespace, or the ``"Unknown"``
+       carrier sentinel — see ``_stage1_missing``, WR-02) — accept Stage-2 value
+       (after **MRG-04** strict carrier-format gate for ``tracking_number``); when
+       Stage-2 also declined, the original Stage-1 value (sentinel or ``None``) is
+       kept so non-Optional ``str`` fields are never downgraded to ``None``.
     2. **Stage-2 is None** — keep Stage-1 value (Stage-2 declined to extract).
     3. **``str.strip().upper()`` match** — keep Stage-1 canonical casing; no
        conflict.  Normalization mirrors ``normalize_tracking_number()`` in
@@ -101,7 +120,11 @@ def merge_llm_authoritative(
     gate_rejections: list[dict] = []
 
     for field_name in LOCKED_OLLAMA_FIELDS:
-        s1_val: str | None = getattr(stage1, field_name, None)
+        s1_raw: str | None = getattr(stage1, field_name, None)
+        # WR-02: placeholder sentinels ("", whitespace-only, carrier "Unknown")
+        # route to the promotion path exactly like None — conflicts only fire when
+        # Stage-1 had a REAL value that differs.
+        s1_val: str | None = None if _stage1_missing(field_name, s1_raw) else s1_raw
         s2_val: str | None = result.locked.get(field_name)
 
         # MRG-04: apply strict carrier-format gate to tracking_number on the Stage-1-None
@@ -121,9 +144,11 @@ def merge_llm_authoritative(
                 s2_val = None
 
         if s1_val is None:
-            # Stage-2 wins (promotion path); value may be None if Stage-2 declined
-            # or if MRG-04 discarded it above.
-            overrides[field_name] = s2_val
+            # Stage-2 wins (promotion path). When Stage-2 also declined (or MRG-04
+            # discarded its value), keep the ORIGINAL Stage-1 value — never downgrade
+            # a "" / "Unknown" sentinel to None, since downstream consumers type
+            # these fields as non-Optional str (WR-02).
+            overrides[field_name] = s2_val if s2_val is not None else s1_raw
         elif s2_val is None:
             # Stage-2 declined to extract; keep Stage-1 value.
             overrides[field_name] = s1_val

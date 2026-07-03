@@ -100,8 +100,8 @@ class OllamaClient:
             Entries without a string ``name`` field are filtered out.
 
         Raises:
-            OllamaTransientError: On TimeoutError, aiohttp.ClientConnectionError,
-                or any non-200 HTTP status.
+            OllamaTransientError: On TimeoutError, any aiohttp.ClientError
+                (WR-04: includes ClientPayloadError), or any non-200 HTTP status.
         """
         url = f"{base_url.rstrip('/')}{TAGS_PATH}"
         try:
@@ -113,7 +113,10 @@ class OllamaClient:
                     raise OllamaTransientError(f"Ollama /api/tags returned HTTP {resp.status}")
                 data = await resp.json(content_type=None)
                 return [m["name"] for m in data.get("models", []) if isinstance(m.get("name"), str)]
-        except (TimeoutError, aiohttp.ClientConnectionError) as err:
+        except (TimeoutError, aiohttp.ClientError) as err:
+            # WR-04: catch the aiohttp base class — ClientPayloadError (connection
+            # lost mid-body, raised by resp.json()) subclasses ClientError but NOT
+            # ClientConnectionError, and previously escaped the documented taxonomy.
             raise OllamaTransientError(f"Ollama /api/tags network error: {err}") from err
 
     async def async_generate(self, prompt: str, schema: dict) -> dict:
@@ -150,7 +153,7 @@ class OllamaClient:
           401, 403, 404 → OllamaSchemaError
           >= 500        → OllamaTransientError
           400-499 other → OllamaTransientError (catch-all)
-          TimeoutError, aiohttp.ClientConnectionError → OllamaTransientError
+          TimeoutError, aiohttp.ClientError (WR-04) → OllamaTransientError
 
         Returns:
             A tuple ``(result, {"passes_used": 1 | 2})`` where ``passes_used``
@@ -162,7 +165,7 @@ class OllamaClient:
                 envelope missing 'response' key, 'response' not a str, Pass 1
                 missing-'{', or Pass 2 parse failure.
             OllamaTransientError: HTTP >=500, other 4xx, TimeoutError, or
-                aiohttp.ClientConnectionError.
+                any aiohttp.ClientError (WR-04: includes ClientPayloadError).
         """
         payload = {
             "model": self._model,
@@ -290,7 +293,11 @@ class OllamaClient:
                     raise OllamaSchemaError(
                         "Ollama response could not be parsed after fence-strip retry"
                     ) from err
-        except (TimeoutError, aiohttp.ClientConnectionError) as err:
+        except (TimeoutError, aiohttp.ClientError) as err:
+            # WR-04: catch the aiohttp base class — ClientPayloadError (connection
+            # lost mid-body / invalid transfer encoding) subclasses ClientError but
+            # NOT ClientConnectionError, and previously escaped as a raw aiohttp
+            # exception that aborted the whole poll cycle.
             _LOGGER.debug(
                 "Ollama failure: status=%s err_class=%s",
                 None,

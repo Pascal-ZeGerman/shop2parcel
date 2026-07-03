@@ -1212,3 +1212,102 @@ async def test_load_store_order_summary_absent_defaults_to_none_pending_posts() 
     assert coordinator._pending_posts["old_drain_key"].order_summary is None, (
         "Missing order_summary key in pending_posts must default to None"
     )
+
+
+# ---------------------------------------------------------------------------
+# CR-02 regression: _async_load_store seeds _pending_shipments from restored
+# shipments, so timer-driven persists that fire BEFORE the first successful
+# non-debug poll never snapshot an empty dict and wipe persisted_shipments.
+# ---------------------------------------------------------------------------
+
+_RESTORED_STORE = {
+    "submitted_tracking_numbers": [],
+    "quota_exhausted_until": None,
+    "persisted_shipments": {
+        "MSG_RESTORED": {
+            "tracking_number": "TN123",
+            "carrier_name": "UPS",
+            "order_name": "#1001",
+            "message_id": "MSG_RESTORED",
+            "email_date": 1700000000,
+        },
+    },
+}
+
+
+async def test_load_store_seeds_pending_shipments_from_restored(hass, mock_config_entry):
+    """CR-02: _async_load_store must seed _pending_shipments from restored shipments
+    so the store snapshot base is never spuriously empty before the first poll."""
+    mock_config_entry.add_to_hass(hass)
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=dict(_RESTORED_STORE))
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+    assert "MSG_RESTORED" in coord._pending_shipments, (
+        "_pending_shipments must be seeded from persisted_shipments on load"
+    )
+    assert coord._pending_shipments == coord._restored_shipments
+
+
+async def test_used_today_rollover_persist_before_first_poll_preserves_restored_shipments(
+    hass, mock_config_entry
+):
+    """CR-02 regression: a used_today-rollover persist (midnight timer / property read)
+    that fires BEFORE the first successful poll must snapshot the restored shipments —
+    not an empty dict that permanently wipes persisted_shipments from disk."""
+    mock_config_entry.add_to_hass(hass)
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=dict(_RESTORED_STORE))
+        delay_save = MagicMock()
+        mock_store_cls.return_value.async_delay_save = delay_save
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        # Force a UTC date rollover (the _on_midnight / used_today read path).
+        coord._used_today_date = "2000-01-01"
+        coord._maybe_reset_used_today()
+    assert delay_save.called, "rollover must still persist outside debug mode"
+    snapshot = delay_save.call_args[0][0]()
+    assert "MSG_RESTORED" in snapshot["persisted_shipments"], (
+        "timer-driven persist before the first poll must not wipe restored shipments"
+    )
+
+
+async def test_quota_expiry_persist_before_first_poll_preserves_restored_shipments(
+    hass, mock_config_entry
+):
+    """CR-02 regression: the quota-expiry timer persist must also carry restored shipments."""
+    from datetime import UTC, datetime
+
+    mock_config_entry.add_to_hass(hass)
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=dict(_RESTORED_STORE))
+        delay_save = MagicMock()
+        mock_store_cls.return_value.async_delay_save = delay_save
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        coord._quota_exhausted_until = int(datetime.now(UTC).timestamp()) - 10
+        coord._on_quota_expiry(datetime.now(UTC))
+    assert delay_save.called, "quota-expiry clear must still persist outside debug mode"
+    snapshot = delay_save.call_args[0][0]()
+    assert "MSG_RESTORED" in snapshot["persisted_shipments"], (
+        "quota-expiry persist before the first poll must not wipe restored shipments"
+    )
+
+
+async def test_load_store_renormalizes_submitted_tracking_numbers(hass, mock_config_entry):
+    """WR-01: entries persisted under the old strip().upper() scheme (internal
+    separators retained) must be re-normalized to the canonical separator-free
+    form on load so they stay effective as dedup keys."""
+    mock_config_entry.add_to_hass(hass)
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": ["1Z999 AA10 1234 56784", "TN-WITH-DASH"],
+                "quota_exhausted_until": None,
+            }
+        )
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+    assert "TNWITHDASH" in coord._submitted_tracking_numbers
+    assert "1Z999 AA10 1234 56784" not in coord._submitted_tracking_numbers

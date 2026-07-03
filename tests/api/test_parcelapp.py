@@ -147,16 +147,22 @@ async def test_add_delivery_quota_error_on_429(client):
 
 
 async def test_add_delivery_quota_error_reset_at_from_body(client):
-    """POST returns 429 with reset_at body → ParcelAppQuotaError.reset_at populated."""
+    """POST returns 429 with reset_at body → ParcelAppQuotaError.reset_at populated.
+
+    WR-05/WR-07: the value must be in the future (past values now fall back to None).
+    """
+    import time as _time
+
+    future_reset = int(_time.time()) + 3600
     with aioresponses() as mock:
         mock.post(
             ADD_DELIVERY_URL,
             status=429,
-            payload={"reset_at": 1745452800},
+            payload={"reset_at": future_reset},
         )
         with pytest.raises(ParcelAppQuotaError) as exc_info:
             await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
-        assert exc_info.value.reset_at == 1745452800
+        assert exc_info.value.reset_at == future_reset
 
 
 async def test_add_delivery_quota_error_reset_at_none_when_no_body(client):
@@ -166,6 +172,85 @@ async def test_add_delivery_quota_error_reset_at_none_when_no_body(client):
         with pytest.raises(ParcelAppQuotaError) as exc_info:
             await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
         assert exc_info.value.reset_at is None
+
+
+# ---------------------------------------------------------------------------
+# WR-05/WR-07: reset_at is untrusted external input — validated + clamped
+# ---------------------------------------------------------------------------
+
+
+async def test_add_delivery_reset_at_string_parses_as_int(client):
+    """WR-05: an int-parseable string reset_at is accepted (previously it poisoned
+    every subsequent quota comparison with TypeError until restart)."""
+    import time as _time
+
+    future_reset = int(_time.time()) + 3600
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=429, payload={"reset_at": str(future_reset)})
+        with pytest.raises(ParcelAppQuotaError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert exc_info.value.reset_at == future_reset
+
+
+async def test_add_delivery_reset_at_garbage_falls_back_to_none(client):
+    """WR-05: non-int-parseable / bool reset_at values fall back to None (default
+    quota window behavior in the coordinators)."""
+    for garbage in ("soon", True, [1745452800], {"epoch": 1}):
+        with aioresponses() as mock:
+            mock.post(ADD_DELIVERY_URL, status=429, payload={"reset_at": garbage})
+            with pytest.raises(ParcelAppQuotaError) as exc_info:
+                await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+            assert exc_info.value.reset_at is None, f"reset_at={garbage!r} must yield None"
+
+
+async def test_add_delivery_reset_at_past_falls_back_to_none(client):
+    """WR-05: a past epoch is useless as a pause window — fall back to None."""
+    import time as _time
+
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=429, payload={"reset_at": int(_time.time()) - 3600})
+        with pytest.raises(ParcelAppQuotaError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert exc_info.value.reset_at is None
+
+
+async def test_add_delivery_payload_error_maps_to_transient(client):
+    """WR-04: aiohttp.ClientPayloadError (connection lost mid-body — a ClientError
+    but NOT a ClientConnectionError) must map to ParcelAppTransientError instead
+    of escaping the taxonomy and aborting the whole poll cycle."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, exception=aiohttp.ClientPayloadError("mid-body"))
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+
+
+async def test_get_deliveries_payload_error_maps_to_transient(client):
+    """WR-04: same guarantee for the view-deliveries GET."""
+    with aioresponses() as mock:
+        mock.get(
+            f"{VIEW_DELIVERIES_URL}?filter_mode=recent",
+            exception=aiohttp.ClientPayloadError("mid-body"),
+        )
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_get_deliveries()
+
+
+async def test_add_delivery_reset_at_clamped_to_24h(client):
+    """WR-05/WR-07 (user decision): an absurd far-future reset_at must not pause
+    forwarding indefinitely — it is clamped to at most 24 hours from now."""
+    import time as _time
+
+    from custom_components.shop2parcel.api.parcelapp import MAX_RESET_AT_WINDOW_S
+
+    now = int(_time.time())
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=429, payload={"reset_at": now + 10 * 365 * 86400})
+        with pytest.raises(ParcelAppQuotaError) as exc_info:
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+        assert exc_info.value.reset_at is not None
+        assert exc_info.value.reset_at <= int(_time.time()) + MAX_RESET_AT_WINDOW_S, (
+            "reset_at must be clamped to at most 24h from now"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +458,46 @@ async def test_get_deliveries_transient_error(client):
     with aioresponses() as mock:
         mock.get(VIEW_DELIVERIES_URL + "?filter_mode=recent", status=500)
         with pytest.raises(ParcelAppTransientError):
+            await client.async_get_deliveries()
+
+
+async def test_get_deliveries_2xx_non_json_body_maps_to_transient(client):
+    """WR-06: a 2xx response with a non-JSON body must raise ParcelAppTransientError
+    instead of leaking a raw ValueError out of the documented taxonomy."""
+    with aioresponses() as mock:
+        mock.get(
+            VIEW_DELIVERIES_URL + "?filter_mode=recent",
+            body="<html>proxy error page</html>",
+            status=200,
+            content_type="text/html",
+        )
+        with pytest.raises(ParcelAppTransientError, match="non-JSON"):
+            await client.async_get_deliveries()
+
+
+async def test_get_deliveries_2xx_non_dict_body_maps_to_transient(client):
+    """WR-06: a 2xx JSON body that is not a dict (e.g. a bare array) must raise
+    ParcelAppTransientError instead of leaking AttributeError."""
+    with aioresponses() as mock:
+        mock.get(
+            VIEW_DELIVERIES_URL + "?filter_mode=recent",
+            payload=["not", "a", "dict"],
+            status=200,
+        )
+        with pytest.raises(ParcelAppTransientError, match="unexpected JSON shape"):
+            await client.async_get_deliveries()
+
+
+async def test_get_deliveries_2xx_non_list_deliveries_maps_to_transient(client):
+    """WR-06: a dict body whose 'deliveries' value is not a list must raise
+    ParcelAppTransientError."""
+    with aioresponses() as mock:
+        mock.get(
+            VIEW_DELIVERIES_URL + "?filter_mode=recent",
+            payload={"success": True, "deliveries": "oops"},
+            status=200,
+        )
+        with pytest.raises(ParcelAppTransientError, match="unexpected JSON shape"):
             await client.async_get_deliveries()
 
 
