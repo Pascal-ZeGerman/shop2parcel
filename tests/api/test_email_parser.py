@@ -479,6 +479,24 @@ def test_html_template_alphanumeric_order_captured() -> None:
     assert result.shipment.tracking_number == "1Z999AA10123456784"
 
 
+@pytest.mark.parametrize(
+    "junk_paragraph",
+    [
+        "<p>#1A rated store on the web!</p>",
+        "<p>Share your unboxing with #ShipDay</p>",
+        "<p>We ordered EXTRA stock for the holidays</p>",
+    ],
+)
+def test_html_template_order_regex_ignores_bare_hashtags(junk_paragraph: str) -> None:
+    """IN-02: bare '#token' text without an 'order' anchor must NOT become order_name —
+    junk hashtags previously reached the POSTed parcelapp description."""
+    html = f"<html><body>{junk_paragraph}<p>1Z999AA10123456784</p></body></html>"
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "msg_junk_hash", 0)
+    assert result.shipment is not None
+    assert result.shipment.order_name == ""
+
+
 def test_html_template_scans_td_elements() -> None:
     """HTML template scans <td> elements — tracking in table cells is found."""
     html = (

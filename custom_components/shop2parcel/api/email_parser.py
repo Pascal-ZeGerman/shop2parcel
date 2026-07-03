@@ -495,7 +495,14 @@ class EmailParser:
         for elem in soup.find_all(["p", "td"]):
             text = elem.get_text(separator=" ", strip=True)
             if not order_name:
-                m = re.search(r"#([A-Z0-9][\w\-]{1,30})", text, re.IGNORECASE)
+                # IN-02: require an 'order' anchor + '#'/':' separator (mirrors the
+                # Tier-1 PR4-C1 tightening). The old bare '#token' pattern grabbed
+                # the first '#'-prefixed token in ANY <p>/<td> — '#1A rated!',
+                # social '#ShipDay' tags — and that junk value became order_name
+                # and could reach the POSTed parcelapp description. \b blocks
+                # 'ordered ...' matches; the optional second '#' accepts both
+                # 'Order #1234' and 'Order: #1234'.
+                m = re.search(r"order\b\s*[#:]\s*#?([A-Z0-9][\w\-]{1,30})", text, re.IGNORECASE)
                 if m:
                     order_name = f"#{m.group(1).upper()}"
             if not carrier_name:
