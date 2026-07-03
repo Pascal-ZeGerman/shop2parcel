@@ -559,6 +559,120 @@ def test_logout_failure_is_swallowed():
 
 
 # ---------------------------------------------------------------------------
+# CR-01 — TLS certificate verification
+# ---------------------------------------------------------------------------
+
+
+def test_ssl_mode_uses_verifying_context_by_default():
+    """CR-01: IMAP4_SSL must receive a verifying ssl_context (CERT_REQUIRED + hostname check).
+
+    imaplib's stdlib fallback context is CERT_NONE with check_hostname=False —
+    a MITM could terminate TLS and harvest the LOGIN credentials.
+    """
+    import ssl  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn) as mock_ssl_cls:
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com", 993, "u", "p", "ssl", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    ctx = mock_ssl_cls.call_args.kwargs.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext), "IMAP4_SSL must be given an explicit ssl_context"
+    assert ctx.verify_mode == ssl.CERT_REQUIRED, "default context must verify certificates"
+    assert ctx.check_hostname is True, "default context must check the server hostname"
+
+
+def test_ssl_mode_verify_tls_false_disables_verification():
+    """CR-01: verify_tls=False (explicit user opt-out) yields CERT_NONE + no hostname check."""
+    import ssl  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4_SSL)
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4_SSL", return_value=mock_conn) as mock_ssl_cls:
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com",
+            993,
+            "u",
+            "p",
+            "ssl",
+            'SUBJECT "shipped"',
+            "8-May-2026",
+            False,  # verify_tls opt-out
+        )
+
+    ctx = mock_ssl_cls.call_args.kwargs.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.check_hostname is False
+
+
+def test_starttls_mode_uses_verifying_context_by_default():
+    """CR-01: starttls() must receive the same verifying ssl_context as the SSL path."""
+    import ssl  # noqa: PLC0415
+
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    mock_conn = MagicMock(spec=imaplib.IMAP4)
+    mock_conn.starttls.return_value = ("OK", [b"tls started"])
+    mock_conn.login.return_value = ("OK", [b"logged in"])
+    mock_conn.select.return_value = ("OK", [b"0"])
+    mock_conn.uid.return_value = ("OK", [None])
+    mock_conn.logout.return_value = ("BYE", [b"bye"])
+
+    with patch("imaplib.IMAP4", return_value=mock_conn):
+        client = ImapClient(_inline_executor)
+        client._fetch_sync(
+            "imap.example.com", 143, "u", "p", "starttls", 'SUBJECT "shipped"', "8-May-2026"
+        )
+
+    ctx = mock_conn.starttls.call_args.kwargs.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext), "starttls() must be given an explicit ssl_context"
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+
+
+async def test_fetch_shipping_emails_forwards_verify_tls():
+    """CR-01: fetch_shipping_emails passes verify_tls through to _fetch_sync."""
+    from custom_components.shop2parcel.api.imap_client import ImapClient  # noqa: PLC0415
+
+    captured: dict = {}
+
+    async def _capturing_executor(func, *args):
+        captured["args"] = args
+        return []
+
+    client = ImapClient(_capturing_executor)
+    await client.fetch_shipping_emails(
+        host="h",
+        port=993,
+        username="u",
+        password="p",
+        tls_mode="ssl",
+        search_criteria='SUBJECT "shipped"',
+        since_date="8-May-2026",
+        verify_tls=False,
+    )
+
+    assert captured["args"][-1] is False, "verify_tls must reach the executor call"
+
+
+# ---------------------------------------------------------------------------
 # extract_text_body_imap / extract_html_body_imap — body extraction
 # ---------------------------------------------------------------------------
 

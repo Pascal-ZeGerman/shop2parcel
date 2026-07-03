@@ -51,6 +51,7 @@ from .const import (
     CONF_FIELD_NAME,
     CONF_GMAIL_QUERY,
     CONF_IMAP_SEARCH,
+    CONF_IMAP_VERIFY_TLS,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_TIMEOUT,
     CONF_OLLAMA_URL,
@@ -61,6 +62,7 @@ from .const import (
     CONNECTION_TYPE_IMAP,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
+    DEFAULT_IMAP_VERIFY_TLS,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
@@ -195,6 +197,18 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                             CONF_IMAP_SEARCH, DEFAULT_IMAP_SEARCH
                         ),
                     ): vol.All(str, vol.Length(min=1, max=500)),
+                    # CR-01: TLS certificate verification opt-out (default True).
+                    # Options value overrides the entry.data value written at setup —
+                    # the coordinator reads options first, then data (see imap_coordinator).
+                    vol.Required(
+                        CONF_IMAP_VERIFY_TLS,
+                        default=self.config_entry.options.get(
+                            CONF_IMAP_VERIFY_TLS,
+                            self.config_entry.data.get(
+                                CONF_IMAP_VERIFY_TLS, DEFAULT_IMAP_VERIFY_TLS
+                            ),
+                        ),
+                    ): bool,
                     vol.Optional(
                         CONF_DEBUG_MODE,
                         default=self.config_entry.options.get(CONF_DEBUG_MODE, False),

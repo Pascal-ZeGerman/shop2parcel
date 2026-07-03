@@ -497,6 +497,63 @@ async def test_async_step_imap_sets_unique_id_to_username_at_host():
     handler.async_set_unique_id.assert_awaited_once_with("user@example.com@imap.example.com")
 
 
+async def test_async_step_imap_defaults_verify_tls_true():
+    """CR-01: absent imap_verify_tls input defaults to True (verify certificates)."""
+    handler = _make_handler()
+    handler.async_set_unique_id = AsyncMock()
+    handler.async_step_finish = AsyncMock(return_value={"type": "create_entry"})
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=[])
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "app-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    assert handler._data.get("imap_verify_tls") is True
+    call_kwargs = mock_imap_client.fetch_shipping_emails.call_args.kwargs
+    assert call_kwargs["verify_tls"] is True
+
+
+async def test_async_step_imap_verify_tls_false_stored_and_passed():
+    """CR-01: explicit imap_verify_tls=False opt-out is passed to the client and stored in data."""
+    handler = _make_handler()
+    handler.async_set_unique_id = AsyncMock()
+    handler.async_step_finish = AsyncMock(return_value={"type": "create_entry"})
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=[])
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        await handler.async_step_imap(
+            user_input={
+                "imap_host": "imap.local",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "app-password",
+                "imap_tls": "ssl",
+                "imap_verify_tls": False,
+            }
+        )
+
+    assert handler._data.get("imap_verify_tls") is False
+    call_kwargs = mock_imap_client.fetch_shipping_emails.call_args.kwargs
+    assert call_kwargs["verify_tls"] is False
+
+
 async def test_async_step_reauth_routes_imap_entry_to_reauth_imap():
     """D-04: async_step_reauth routes IMAP entries to async_step_reauth_imap."""
     handler = _make_handler()

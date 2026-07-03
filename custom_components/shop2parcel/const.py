@@ -44,6 +44,11 @@ CONF_IMAP_PORT = "imap_port"  # int
 CONF_IMAP_USERNAME = "imap_username"  # str
 CONF_IMAP_PASSWORD = "imap_password"  # str (encrypted in entry.data)
 CONF_IMAP_TLS = "imap_tls"  # str: "ssl" | "starttls" | "none"
+# CR-01: server-certificate verification toggle for the SSL/STARTTLS paths.
+# Default True (verify). False is an explicit opt-out for self-signed
+# certificates on trusted local servers — never disable silently.
+CONF_IMAP_VERIFY_TLS = "imap_verify_tls"  # bool
+DEFAULT_IMAP_VERIFY_TLS = True
 CONF_IMAP_SEARCH = "imap_search"  # str: IMAP SEARCH criteria
 DEFAULT_IMAP_SEARCH = (
     'OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "shipment"'

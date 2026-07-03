@@ -37,12 +37,13 @@ def test_strings_settings_step(strings):
 
 
 def test_strings_settings_data_keys(strings):
-    """Test 3: settings.data has all nine field labels."""
+    """Test 3: settings.data has all ten field labels."""
     data = strings["options"]["step"]["settings"]["data"]
     expected_keys = {
         "poll_interval",
         "gmail_query",
         "imap_search",
+        "imap_verify_tls",
         "rescan_window_days",
         "debug_mode",
         "ollama_url",

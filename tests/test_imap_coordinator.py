@@ -191,3 +191,71 @@ async def test_imap_inline_posts_clean_canonical_form(hass, mock_imap_no_stage2_
     assert call_kwargs["tracking_number"] == expected_clean, (
         f"Expected tracking_number='{expected_clean}', got {call_kwargs['tracking_number']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CR-01: TLS certificate verification wiring — coordinator → ImapClient
+# ---------------------------------------------------------------------------
+
+
+async def test_imap_poll_passes_verify_tls_true_by_default(hass, mock_imap_no_stage2_entry):
+    """CR-01: with no imap_verify_tls stored anywhere, the poll passes verify_tls=True."""
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    call_kwargs = mock_imap_cls.return_value.fetch_shipping_emails.call_args.kwargs
+    assert call_kwargs["verify_tls"] is True
+
+
+async def test_imap_poll_options_verify_tls_overrides_data(hass):
+    """CR-01: an options-flow imap_verify_tls=False overrides the entry.data value."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "connection_type": "imap",
+            "imap_host": "imap.local",
+            "imap_port": 993,
+            "imap_username": "user@example.com",
+            "imap_password": "app-password-here",
+            "imap_tls": "ssl",
+            "imap_verify_tls": True,
+            "api_key": "test-parcelapp-key",
+        },
+        options={
+            "imap_search": 'SUBJECT "shipped"',
+            "poll_interval": 30,
+            "imap_verify_tls": False,
+        },
+        unique_id="imap-verify-tls-test@example.com",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+
+        coord = ImapCoordinator(hass, entry)
+        await coord._async_load_store()
+        await coord._async_update_data()
+
+    call_kwargs = mock_imap_cls.return_value.fetch_shipping_emails.call_args.kwargs
+    assert call_kwargs["verify_tls"] is False

@@ -8,6 +8,7 @@ from __future__ import annotations
 import email
 import imaplib
 import logging
+import ssl
 from collections.abc import Callable
 from typing import Any, NoReturn
 
@@ -37,6 +38,7 @@ class ImapClient:
         tls_mode: str,
         search_criteria: str,
         since_date: str,
+        verify_tls: bool = True,
     ) -> list[dict[str, Any]]:
         """Fetch shipping emails via IMAP using SINCE-date search.
 
@@ -44,6 +46,8 @@ class ImapClient:
         since_date: IMAP SEARCH date string in DD-Mon-YYYY format (e.g. "8-May-2026").
         Phase 10 D-11: full-window scanning uses SINCE date exclusively.
         Entire IMAP session runs in one executor call (RESEARCH.md Pitfall 6).
+        CR-01: verify_tls controls server-certificate verification (default True);
+        False is an explicit opt-out for self-signed local servers.
         """
         try:
             return await self._executor(
@@ -55,6 +59,7 @@ class ImapClient:
                 tls_mode,
                 search_criteria,
                 since_date,
+                verify_tls,
             )
         except ImapAuthError:
             raise  # already classified — do not re-wrap
@@ -73,6 +78,7 @@ class ImapClient:
         tls_mode: str,
         search_criteria: str,
         since_date: str,
+        verify_tls: bool = True,
     ) -> list[dict[str, Any]]:
         """Synchronous IMAP session — runs in executor thread.
 
@@ -80,15 +86,30 @@ class ImapClient:
         D-09: Uses PEEK fetch spec to avoid setting \\Seen flag.
         D-09: Never calls store(), expunge(), copy(), or uid(MOVE/STORE/EXPUNGE/COPY).
         D-11: Uses SINCE {since_date} search — UID-based search removed (Phase 10).
+        CR-01: builds an ssl.create_default_context() (CERT_REQUIRED + hostname check)
+        for both the SSL and STARTTLS paths — imaplib's stdlib fallback context does
+        NOT verify certificates, letting a MITM harvest the LOGIN credentials.
+        The context is built HERE (executor thread), never on the event loop:
+        create_default_context() loads CA certs from disk and HA flags/blocks
+        loop-blocking SSL context creation.
         """
         conn: imaplib.IMAP4 | None = None
         try:
+            ssl_context: ssl.SSLContext | None = None
+            if tls_mode in ("ssl", "starttls"):
+                ssl_context = ssl.create_default_context()
+                if not verify_tls:
+                    # Explicit user opt-out (self-signed cert on a trusted local
+                    # server). Order matters: check_hostname must be disabled
+                    # before verify_mode can be set to CERT_NONE.
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
             if tls_mode == "ssl":
-                conn = imaplib.IMAP4_SSL(host, port, timeout=30)
+                conn = imaplib.IMAP4_SSL(host, port, ssl_context=ssl_context, timeout=30)
             else:
                 conn = imaplib.IMAP4(host, port, timeout=30)
                 if tls_mode == "starttls":
-                    conn.starttls()
+                    conn.starttls(ssl_context=ssl_context)
 
             _LOGGER.debug("IMAP connecting to %s:%s", host, port)
             conn.login(username, password)

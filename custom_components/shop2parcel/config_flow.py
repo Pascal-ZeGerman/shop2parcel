@@ -56,9 +56,11 @@ from .const import (
     CONF_IMAP_PORT,
     CONF_IMAP_TLS,
     CONF_IMAP_USERNAME,
+    CONF_IMAP_VERIFY_TLS,
     CONF_STAGE2_ENABLED,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
+    DEFAULT_IMAP_VERIFY_TLS,
     DOMAIN,
 )
 
@@ -179,6 +181,9 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             username = user_input[CONF_IMAP_USERNAME]
             password = user_input[CONF_IMAP_PASSWORD]
             tls_mode = user_input[CONF_IMAP_TLS]
+            # CR-01: certificate verification defaults ON; unchecking is an explicit
+            # opt-out for self-signed certificates on trusted local servers.
+            verify_tls = user_input.get(CONF_IMAP_VERIFY_TLS, DEFAULT_IMAP_VERIFY_TLS)
 
             # Test IMAP connection in executor (synchronous imaplib call).
             # Use yesterday's date for SINCE filter — connectivity test only, not a real scan.
@@ -195,6 +200,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                     tls_mode=tls_mode,
                     search_criteria='SUBJECT "shipped"',
                     since_date=_since_date,
+                    verify_tls=verify_tls,
                 )
             except ImapAuthError:
                 errors["base"] = "invalid_auth"
@@ -212,6 +218,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                     CONF_IMAP_USERNAME: username,
                     CONF_IMAP_PASSWORD: password,
                     CONF_IMAP_TLS: tls_mode,
+                    CONF_IMAP_VERIFY_TLS: verify_tls,
                 }
                 return await self.async_step_finish()
 
@@ -224,6 +231,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                     vol.Required(CONF_IMAP_USERNAME): str,
                     vol.Required(CONF_IMAP_PASSWORD): str,
                     vol.Required(CONF_IMAP_TLS, default="ssl"): vol.In(["ssl", "starttls", "none"]),
+                    vol.Required(CONF_IMAP_VERIFY_TLS, default=DEFAULT_IMAP_VERIFY_TLS): bool,
                 }
             ),
             errors=errors,
@@ -348,6 +356,10 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             )
             password = user_input[CONF_IMAP_PASSWORD]
             tls_mode = user_input.get(CONF_IMAP_TLS, reauth_entry.data.get(CONF_IMAP_TLS, "ssl"))
+            verify_tls = user_input.get(
+                CONF_IMAP_VERIFY_TLS,
+                reauth_entry.data.get(CONF_IMAP_VERIFY_TLS, DEFAULT_IMAP_VERIFY_TLS),
+            )
 
             _yesterday_ts = int(time.time()) - 86400
             _dt = datetime.fromtimestamp(_yesterday_ts, tz=UTC)
@@ -362,6 +374,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                     tls_mode=tls_mode,
                     search_criteria='SUBJECT "shipped"',
                     since_date=_since_date,
+                    verify_tls=verify_tls,
                 )
             except ImapAuthError:
                 errors["base"] = "invalid_auth"
@@ -374,6 +387,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                 new_data[CONF_IMAP_USERNAME] = username
                 new_data[CONF_IMAP_PASSWORD] = password
                 new_data[CONF_IMAP_TLS] = tls_mode
+                new_data[CONF_IMAP_VERIFY_TLS] = verify_tls
                 return self.async_update_reload_and_abort(reauth_entry, data=new_data)
 
         # Pre-fill with existing values except password (never pre-fill credentials)
@@ -398,6 +412,12 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
                         CONF_IMAP_TLS,
                         default=reauth_entry.data.get(CONF_IMAP_TLS, "ssl"),
                     ): vol.In(["ssl", "starttls", "none"]),
+                    vol.Required(
+                        CONF_IMAP_VERIFY_TLS,
+                        default=reauth_entry.data.get(
+                            CONF_IMAP_VERIFY_TLS, DEFAULT_IMAP_VERIFY_TLS
+                        ),
+                    ): bool,
                 }
             ),
             errors=errors,
