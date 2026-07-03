@@ -1067,9 +1067,13 @@ async def test_poison_message_quarantined_after_threshold(hass, mock_stage2_conf
         assert raw_id in coord._inflight_message_ids
 
 
-async def test_imap_job_without_raw_msg_id_never_quarantined(hass, mock_stage2_config_entry):
-    """A job with no raw_msg_id (IMAP path) has no in-flight gate to quarantine;
-    it must keep releasing on every failure, never getting stuck.
+async def test_job_without_raw_msg_id_quarantined_via_tn_skip_set(
+    hass, mock_stage2_config_entry
+):
+    """WR-03: a job with no raw_msg_id (Gmail Stage-1 / IMAP paths) has no in-flight
+    gate — the quarantine must instead key the failure counter on normalized_tn and,
+    at the threshold, block re-enqueue via the _stage2_quarantined_tns skip set so
+    the poll→re-enqueue→re-fail loop actually stops on those paths too.
     """
     from custom_components.shop2parcel.api.exceptions import OllamaTransientError
 
@@ -1095,9 +1099,10 @@ async def test_imap_job_without_raw_msg_id_never_quarantined(hass, mock_stage2_c
         await coord._async_load_store()
         await coord.async_start_stage2()
 
+        tn = "1Z999AA10123456784"
         job = Stage2Job(
-            storage_key="1Z999AA10123456784",
-            normalized_tn="1Z999AA10123456784",
+            storage_key=tn,
+            normalized_tn=tn,
             shipment=_make_shipment(),
             html_body="<html/>",
             message_id="imap:42",
@@ -1105,11 +1110,100 @@ async def test_imap_job_without_raw_msg_id_never_quarantined(hass, mock_stage2_c
             raw_msg_id=None,
         )
 
-        for _ in range(STAGE2_MSG_QUARANTINE_THRESHOLD + 2):
+        for i in range(STAGE2_MSG_QUARANTINE_THRESHOLD):
             await coord._async_process_stage2_job(job)
+            if i < STAGE2_MSG_QUARANTINE_THRESHOLD - 1:
+                # Sub-threshold: still re-enqueueable (poll re-parses next cycle).
+                assert tn not in coord._stage2_quarantined_tns
+                assert coord._enqueue_stage2(
+                    tn,
+                    tn,
+                    _make_shipment(),
+                    "<html/>",
+                    message_id="imap:42",
+                    meta={},
+                ), "sub-threshold job must still be enqueueable"
+                # Drain the re-enqueued job so the next loop iteration is clean.
+                coord._stage2_queue.get_nowait()
+                coord._stage2_queue.task_done()
+                coord._stage2_enqueued_keys.discard(tn)
 
+        # At threshold: TN quarantined — the next poll's re-enqueue is skipped.
+        assert tn in coord._stage2_quarantined_tns
+        assert not coord._enqueue_stage2(
+            tn,
+            tn,
+            _make_shipment(),
+            "<html/>",
+            message_id="imap:42",
+            meta={},
+        ), "quarantined tracking number must not re-enqueue"
         # No raw_msg_id → nothing ever added to the in-flight skip set.
         assert "imap:42" not in coord._inflight_message_ids
+        assert "42" not in coord._inflight_message_ids
+
+
+async def test_stage2_msg_failure_streak_cleared_on_successful_extraction(
+    hass, mock_stage2_config_entry
+):
+    """WR-03: a successful extraction resets the per-message failure counter so a
+    recovered message doesn't carry a stale near-threshold count."""
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        tn = "1Z999AA10123456784"
+        job = Stage2Job(
+            storage_key=tn,
+            normalized_tn=tn,
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="imap:42",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            raw_msg_id=None,
+        )
+
+        # Accumulate a near-threshold failure streak.
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            side_effect=OllamaTransientError("timeout")
+        )
+        for _ in range(STAGE2_MSG_QUARANTINE_THRESHOLD - 1):
+            await coord._async_process_stage2_job(job)
+        assert coord._stage2_msg_failures.get(tn) == STAGE2_MSG_QUARANTINE_THRESHOLD - 1
+
+        # Recovery: one successful extraction clears the streak.
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={"tracking_number": tn},
+                custom={},
+                latency_ms=10.0,
+                passes_used=1,
+            )
+        )
+        await coord._async_process_stage2_job(job)
+        assert tn not in coord._stage2_msg_failures, (
+            "successful extraction must clear the failure streak"
+        )
+        assert tn not in coord._stage2_quarantined_tns
 
 
 async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):

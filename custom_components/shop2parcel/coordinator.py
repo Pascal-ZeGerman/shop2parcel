@@ -453,11 +453,20 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # RELEASES an entry on any retry-discard so a deferred job is re-fetched next poll.
         self._inflight_message_ids: OrderedDict[str, None] = OrderedDict()
         # Poison-message quarantine: per-message consecutive Stage-2 failure counts,
-        # keyed by raw Gmail message ID. In-memory only (session-scoped). When a count
-        # reaches STAGE2_MSG_QUARANTINE_THRESHOLD the worker stops releasing that message
-        # for re-fetch, breaking the observed infinite retry loop. FIFO-bounded so a long
-        # run of distinct failing messages cannot grow it without bound.
+        # keyed by raw Gmail message ID when present, else normalized_tn (WR-03 — the
+        # Gmail Stage-1 and IMAP enqueue paths pass raw_msg_id=None). In-memory only
+        # (session-scoped). When a count reaches STAGE2_MSG_QUARANTINE_THRESHOLD the
+        # worker stops releasing that message for re-fetch AND the tracking number is
+        # added to _stage2_quarantined_tns, breaking the observed infinite retry loop
+        # on ALL enqueue paths. FIFO-bounded so a long run of distinct failing messages
+        # cannot grow it without bound.
         self._stage2_msg_failures: OrderedDict[str, int] = OrderedDict()
+        # WR-03: session-scoped skip set of quarantined tracking numbers, consulted by
+        # _enqueue_stage2. The in-flight-gate quarantine only covers Gmail fallback jobs
+        # (the only path that sets raw_msg_id); Gmail Stage-1 and IMAP jobs re-enqueue
+        # from every poll's re-parse, so blocking at the enqueue seam is what actually
+        # stops their retry loop. In-memory only — a restart clears it (self-healing).
+        self._stage2_quarantined_tns: OrderedDict[str, None] = OrderedDict()
         self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
@@ -592,37 +601,54 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if job.raw_msg_id is not None:
             self._inflight_message_ids.pop(job.raw_msg_id, None)
 
+    @staticmethod
+    def _stage2_failure_key(job: Stage2Job) -> str:
+        """Quarantine-counter key for a job (WR-03).
+
+        raw_msg_id when present (Gmail fallback jobs — one message, one key), else
+        normalized_tn, which exists for EVERY job type (Gmail Stage-1 and IMAP
+        enqueues pass raw_msg_id=None).
+        """
+        return job.raw_msg_id if job.raw_msg_id is not None else job.normalized_tn
+
     def _register_stage2_msg_failure(self, job: Stage2Job) -> bool:
         """Track consecutive Stage-2 failures per message; return True to quarantine.
 
-        Increments the per-message failure count (keyed by raw_msg_id). Once it reaches
-        STAGE2_MSG_QUARANTINE_THRESHOLD the caller must NOT release the message's in-flight
-        entry, leaving it in the session-scoped skip set so the poll gate stops re-fetching
-        it — this breaks the observed infinite retry loop where one pathological email
+        Increments the per-message failure count (keyed via _stage2_failure_key so
+        ALL job types are covered — WR-03). Once it reaches
+        STAGE2_MSG_QUARANTINE_THRESHOLD:
+          - the job's normalized_tn is added to _stage2_quarantined_tns, which
+            _enqueue_stage2 consults — stopping the poll→re-enqueue→re-fail loop on
+            the Gmail Stage-1 and IMAP paths that have no in-flight gate;
+          - the caller must NOT release the message's in-flight entry (no-op for
+            raw_msg_id=None jobs), so a Gmail fallback message also stops being
+            re-fetched by the poll gate.
+        This breaks the observed infinite retry loop where one pathological email
         re-failed every poll cycle for hours.
 
-        Returns False (keep retrying) for jobs without a raw_msg_id (IMAP path has no
-        in-flight gate to quarantine) and for messages still under the threshold. The
-        counter is in-memory only, so a restart clears it and a transient Ollama outage
-        self-heals instead of permanently poisoning legitimate shipment emails.
+        Returns False (keep retrying) for messages still under the threshold. The
+        counter and skip set are in-memory only, so a restart clears them and a
+        transient Ollama outage self-heals instead of permanently poisoning
+        legitimate shipment emails.
         """
-        raw_id = job.raw_msg_id
-        if raw_id is None:
-            return False
-        count = self._stage2_msg_failures.get(raw_id, 0) + 1
+        key = self._stage2_failure_key(job)
+        count = self._stage2_msg_failures.get(key, 0) + 1
         if count >= STAGE2_MSG_QUARANTINE_THRESHOLD:
-            self._stage2_msg_failures.pop(raw_id, None)
+            self._stage2_msg_failures.pop(key, None)
+            self._stage2_quarantined_tns[job.normalized_tn] = None
+            while len(self._stage2_quarantined_tns) > SEEN_MESSAGE_IDS_MAXLEN:
+                self._stage2_quarantined_tns.popitem(last=False)
             _LOGGER.warning(
-                "Stage-2 worker: quarantining message %s ('%s' from '%s') after %d "
+                "Stage-2 worker: quarantining %s ('%s' from '%s') after %d "
                 "consecutive extraction failures; skipping it until restart",
-                raw_id,
+                key,
                 job.meta.get("subject", ""),
                 job.meta.get("from", ""),
                 count,
             )
             return True
-        self._stage2_msg_failures[raw_id] = count
-        self._stage2_msg_failures.move_to_end(raw_id)
+        self._stage2_msg_failures[key] = count
+        self._stage2_msg_failures.move_to_end(key)
         while len(self._stage2_msg_failures) > SEEN_MESSAGE_IDS_MAXLEN:
             self._stage2_msg_failures.popitem(last=False)
         return False
@@ -1153,6 +1179,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         tracking-number dedup-skip / re-fetch instead. prefetched_result and raw_msg_id are
         forwarded onto the Stage2Job (see its docstring).
         """
+        if normalized_tn in self._stage2_quarantined_tns:
+            # WR-03: poison quarantine — extraction for this tracking number failed
+            # STAGE2_MSG_QUARANTINE_THRESHOLD times in a row this session. Skip the
+            # re-enqueue: the Gmail Stage-1 and IMAP paths re-parse and re-enqueue on
+            # every poll, so without this seam the retry loop the quarantine was built
+            # to stop stayed live on those paths. Session-scoped; a restart re-tries.
+            return False
         if normalized_tn in self._stage2_enqueued_keys:
             # In-flight skip (QUE-06): a job for this tracking number already exists (this or
             # another message). Return False — THIS call did not create a job, so the caller
@@ -1477,6 +1510,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     return
                 self._release_inflight(job)  # re-fetch next poll (not lost)
                 return
+
+            # WR-03: a successful extraction clears this message's failure streak so
+            # a recovered message doesn't carry a stale near-threshold count into the
+            # next transient blip.
+            self._stage2_msg_failures.pop(self._stage2_failure_key(job), None)
 
             self._diagnostics.record_llm_call(
                 stage2_result.latency_ms,
