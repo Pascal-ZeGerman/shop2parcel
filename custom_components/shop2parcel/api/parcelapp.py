@@ -59,12 +59,17 @@ def _validate_reset_at(raw: object) -> int | None:
     or None for invalid, past, or absent values — callers treat None as "use the
     default quota window" (the coordinators fall back to _next_midnight_utc()).
     """
-    if raw is None or isinstance(raw, bool):
+    if isinstance(raw, bool):
         return None
-    try:
-        value = int(raw)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
-        return None
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str):
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            return None
+    else:
+        return None  # None, float, list, dict, ... — not an epoch int
     now = int(time.time())
     if value <= now:
         return None
@@ -228,14 +233,10 @@ class ParcelAppClient:
                 try:
                     data = await resp.json(content_type=None)
                 except (ValueError, aiohttp.ContentTypeError) as err:
-                    raise ParcelAppTransientError(
-                        "View-deliveries returned non-JSON body"
-                    ) from err
+                    raise ParcelAppTransientError("View-deliveries returned non-JSON body") from err
                 deliveries = data.get("deliveries", []) if isinstance(data, dict) else None
                 if not isinstance(deliveries, list):
-                    raise ParcelAppTransientError(
-                        "View-deliveries returned unexpected JSON shape"
-                    )
+                    raise ParcelAppTransientError("View-deliveries returned unexpected JSON shape")
                 return deliveries
         except (TimeoutError, aiohttp.ClientError) as err:
             # WR-04: catch the aiohttp base class (see async_add_delivery note).

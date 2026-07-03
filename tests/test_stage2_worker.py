@@ -1067,9 +1067,7 @@ async def test_poison_message_quarantined_after_threshold(hass, mock_stage2_conf
         assert raw_id in coord._inflight_message_ids
 
 
-async def test_job_without_raw_msg_id_quarantined_via_tn_skip_set(
-    hass, mock_stage2_config_entry
-):
+async def test_job_without_raw_msg_id_quarantined_via_tn_skip_set(hass, mock_stage2_config_entry):
     """WR-03: a job with no raw_msg_id (Gmail Stage-1 / IMAP paths) has no in-flight
     gate — the quarantine must instead key the failure counter on normalized_tn and,
     at the threshold, block re-enqueue via the _stage2_quarantined_tns skip set so
@@ -4276,9 +4274,7 @@ async def test_worker_already_added_publishes_and_consumes_no_cap_slot(
         await coord.async_stop_stage2()
 
 
-async def test_worker_auth_failure_not_counted_as_ollama_failure(
-    hass, mock_stage2_config_entry
-):
+async def test_worker_auth_failure_not_counted_as_ollama_failure(hass, mock_stage2_config_entry):
     """WR-05: a parcelapp auth error from the worker POST path must NOT feed the
     Ollama consecutive-failure streak nor fire the 'check Ollama' notification —
     it is handled distinctly (log + key discard) per the D-05 contract."""
