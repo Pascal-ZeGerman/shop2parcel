@@ -381,6 +381,16 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
             except ImapTransientError:
                 errors["base"] = "imap_cannot_connect"
             else:
+                # WR-04: host and username are editable in this form, so verify the
+                # credentials still point at the SAME account before updating the
+                # entry. Without this, the entry's unique_id (old username@host)
+                # diverges from its credentials: duplicate-account detection breaks
+                # and the old account's persisted dedup/seen state is applied to a
+                # different mailbox. Mirrors the Gmail reauth path
+                # (_abort_if_unique_id_mismatch in async_oauth_create_entry).
+                account_id = f"{username}@{host}"
+                await self.async_set_unique_id(account_id)
+                self._abort_if_unique_id_mismatch(reason="wrong_account")
                 new_data = dict(reauth_entry.data)
                 new_data[CONF_IMAP_HOST] = host
                 new_data[CONF_IMAP_PORT] = port

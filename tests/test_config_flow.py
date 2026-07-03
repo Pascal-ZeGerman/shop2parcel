@@ -631,6 +631,95 @@ async def test_reauth_imap_step_id_not_reauth_confirm_imap():
 
 
 # ---------------------------------------------------------------------------
+# WR-04: IMAP reauth must verify the account identity before updating the entry
+# ---------------------------------------------------------------------------
+
+
+async def test_reauth_imap_success_sets_unique_id_and_checks_mismatch():
+    """WR-04: successful reauth sets unique_id to username@host and runs the mismatch guard.
+
+    Host and username are editable in the reauth form. Without the guard, a user
+    could silently switch the entry to a different mailbox while keeping the old
+    unique_id — breaking duplicate-account detection and applying the old
+    account's persisted dedup/seen state to the new mailbox.
+    """
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+    handler.async_set_unique_id = AsyncMock()
+    handler._abort_if_unique_id_mismatch = MagicMock()
+    handler.async_update_reload_and_abort = MagicMock(
+        return_value={"type": "abort", "reason": "reauth_successful"}
+    )
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=[])
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        result = await handler.async_step_reauth_imap(
+            user_input={
+                "imap_host": "imap.other.example.com",
+                "imap_port": 993,
+                "imap_username": "other@example.com",
+                "imap_password": "new-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    handler.async_set_unique_id.assert_awaited_once_with("other@example.com@imap.other.example.com")
+    handler._abort_if_unique_id_mismatch.assert_called_once_with(reason="wrong_account")
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+
+
+async def test_reauth_imap_error_path_skips_unique_id_check():
+    """WR-04: failed connection test re-shows the form without touching unique_id."""
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+    handler.async_set_unique_id = AsyncMock()
+    handler._abort_if_unique_id_mismatch = MagicMock()
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(side_effect=ImapAuthError("bad password"))
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        result = await handler.async_step_reauth_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "wrong-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "invalid_auth"
+    handler.async_set_unique_id.assert_not_called()
+    handler._abort_if_unique_id_mismatch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # IN-03: IMAP error path tests — ImapAuthError and ImapTransientError
 # ---------------------------------------------------------------------------
 
