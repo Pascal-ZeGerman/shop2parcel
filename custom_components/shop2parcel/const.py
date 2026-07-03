@@ -108,6 +108,11 @@ SEEN_MESSAGE_IDS_MAXLEN: int = 10_000
 #   MAX_STAGE2_POSTS_PER_POLL (POST cap); the extraction cap fires earlier to
 #   limit Ollama load on a large first-poll backlog.
 MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL: int = 10
+# Per-poll cumulative wall-clock budget (seconds) for inline Stage-1-miss Ollama
+# fallback extraction. Checked BETWEEN extractions (a single in-flight call can still
+# run up to ollama_timeout); 60 s is comfortably below HA's 300 s bootstrap stage-2
+# global timeout and caps steady-state inline Ollama time on every poll.
+MAX_STAGE2_FALLBACK_INLINE_SECONDS: float = 60.0
 STAGE2_CAP_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_cap"
 
 

@@ -64,6 +64,7 @@ from .const import (
     DEFAULT_POLL_INTERVAL,
     DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
+    MAX_STAGE2_FALLBACK_INLINE_SECONDS,
     MAX_STAGE2_POSTS_PER_POLL,
     MAX_SUBMITTED_TRACKING_NUMBERS,
     SEEN_MESSAGE_IDS_MAXLEN,
@@ -529,6 +530,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # poll. Subsequent fallback failures in the same poll record without bumping the
         # shared consecutive-failure streak / firing the notification. Reset each poll.
         self._stage2_fallback_failed_this_poll: bool = False
+        # Quick-260703-mac fix: in-memory flag set True at the end of the first successful
+        # poll (in GmailCoordinator._async_update_data). Guards the inline Ollama fallback
+        # gatekeeper so the bootstrap first refresh never awaits async_extract. Per-instance
+        # so parallel entries and reloads each start False. NEVER persisted to the store.
+        self._first_refresh_done: bool = False
+        # Per-poll monotonic deadline for the inline Stage-1-miss Ollama fallback budget.
+        # Computed in _reset_stage2_poll_counters each poll. None until the first poll reset.
+        self._stage2_fallback_inline_deadline: float | None = None
         # M6A-01: poll-in-progress flag — set True at the top of each _async_update_data
         # call in GmailCoordinator and ImapCoordinator (after _reset_stage2_poll_counters),
         # then reset to False in the finally block before returning.  Surfaced via the
@@ -568,6 +577,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_fallback_extractions_this_poll = 0
         # Phase 27 finding #450: reset the per-poll fallback-escalation latch.
         self._stage2_fallback_failed_this_poll = False
+        # Quick-260703-mac: reset the per-poll inline-fallback wall-clock deadline.
+        # _first_refresh_done is NOT reset here — it persists across polls once set True.
+        self._stage2_fallback_inline_deadline = (
+            _time.monotonic() + MAX_STAGE2_FALLBACK_INLINE_SECONDS
+        )
         if self.config_entry is not None:
             persistent_notification.async_dismiss(
                 self.hass,
