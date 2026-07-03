@@ -135,12 +135,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # which requires google/googleapiclient stubs to be in sys.modules. Deferring to
     # function scope ensures the test harness (conftest.py) has registered the mocks
     # before this import runs. At production runtime there is no difference.
-    from .const import CONF_CONNECTION_TYPE, CONF_OLLAMA_URL, CONNECTION_TYPE_IMAP  # noqa: PLC0415
+    from .const import (  # noqa: PLC0415
+        CONF_CONNECTION_TYPE,
+        CONF_OLLAMA_URL,
+        CONNECTION_TYPE_GMAIL,
+        CONNECTION_TYPE_IMAP,
+    )
     from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
     from .gmail_coordinator import GmailCoordinator  # noqa: PLC0415
     from .imap_coordinator import ImapCoordinator  # noqa: PLC0415
 
-    conn_type = entry.data.get(CONF_CONNECTION_TYPE, "gmail")
+    # IN-06: use the constant, not a literal; the Gmail default keeps pre-1.5
+    # Gmail entries (created without CONF_CONNECTION_TYPE in data) working.
+    conn_type = entry.data.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_GMAIL)
     coordinator: Shop2ParcelCoordinator
     if conn_type == CONNECTION_TYPE_IMAP:
         coordinator = ImapCoordinator(hass, entry)
@@ -255,7 +262,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        # IN-05: .get() guard — hass.data[DOMAIN] is absent if unload runs
+        # without a prior successful setup (future refactors, direct test calls).
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         # cancel_cleanup is registered via entry.async_on_unload in async_setup_entry
         # so HA cancels it automatically — no explicit call needed here.
     return unload_ok

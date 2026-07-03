@@ -80,6 +80,25 @@ _IMAP_MONTH_ABBR = (
 )
 
 
+def _parse_imap_message(raw_bytes: bytes) -> tuple[dict, str | None]:
+    """Executor-side batch: header meta + HTML/text body extraction in ONE job.
+
+    WR-06: _extract_imap_email_meta / extract_html_body_imap /
+    extract_text_body_imap each call email.message_from_bytes + MIME-walk the
+    same raw message — three CPU-bound parses per message that previously ran
+    on the HA event loop. Batched here into a single executor job per message
+    (not one job per tiny call), including the PR4-I1 escape+<pre> wrap for
+    text-only bodies (same as the Gmail path).
+    """
+    meta = _extract_imap_email_meta(raw_bytes)
+    html = extract_html_body_imap(raw_bytes)
+    if not html:
+        text_body = extract_text_body_imap(raw_bytes)
+        if text_body:
+            html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
+    return meta, html
+
+
 class ImapCoordinator(Shop2ParcelCoordinator):
     """Coordinator for IMAP-connected Shop2Parcel entries."""
 
@@ -162,7 +181,13 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         debug_mode = entry.options.get(CONF_DEBUG_MODE, False)
         if debug_mode:
             rescan_window_days = MAX_RESCAN_WINDOW_DAYS
-        since_ts = int(time.time()) - rescan_window_days * 86400
+        # IN-08: RFC 3501 SINCE compares against the message INTERNALDATE at the
+        # SERVER's local-day granularity, while this boundary is computed from UTC.
+        # For servers west of UTC the UTC-derived date can sit one day ahead of the
+        # server's local date at the window edge, silently excluding messages still
+        # inside the configured window. Widen by one day — the overlap is cheap and
+        # fully absorbed by the tracking-number dedup / seen-ID gates.
+        since_ts = int(time.time()) - (rescan_window_days + 1) * 86400
         _since_dt = datetime.fromtimestamp(since_ts, tz=UTC)
         since_date = f"{_since_dt.day:02d}-{_IMAP_MONTH_ABBR[_since_dt.month - 1]}-{_since_dt.year}"
         _LOGGER.debug(
@@ -223,15 +248,37 @@ class ImapCoordinator(Shop2ParcelCoordinator):
 
         for msg_info in raw_messages:
             uid_str = str(msg_info["uid"])
+            # IN-04: qualify the per-message storage key with UIDVALIDITY when the
+            # server reports it — IMAP UIDs are only unique per (mailbox,
+            # UIDVALIDITY), so after a mailbox rebuild a reused UID would otherwise
+            # overwrite an unrelated persisted entry. Backward compatibility:
+            # entries persisted under the old bare-UID keys simply remain under
+            # those keys (they age out via FIFO trim / delivered-cleanup); a
+            # re-scan of their source message under the new key shape cannot
+            # double-POST because the tracking-number dedup layer
+            # (_submitted_tracking_numbers) guards the POST regardless of key
+            # shape. uid_str (display/logging) intentionally stays unqualified.
+            uidvalidity = msg_info.get("uidvalidity")
+            uid_key = f"{uidvalidity}:{uid_str}" if uidvalidity is not None else uid_str
+
+            # WR-06 (re-parse avoidance): the IMAP fetch returns the FULL rescan
+            # window every poll, so without a gate every message body was re-parsed
+            # (multiple lxml/email passes) each poll. Skip messages whose uid_key
+            # reached a terminal decision (persisted seen cache) or is transiently
+            # pinned this session (in-memory in-flight set) BEFORE any parsing.
+            # Mirrors the Gmail pre-loop gate; skipped entirely in debug mode,
+            # which re-scans every message each poll (DBG-02).
+            if not debug_mode and (
+                uid_key in self._seen_message_ids or uid_key in self._inflight_message_ids
+            ):
+                _LOGGER.debug("IMAP UID %s already seen/in-flight — skipping parse", uid_str)
+                continue
 
             raw_bytes: bytes = msg_info["raw"]
-            imap_meta = _extract_imap_email_meta(raw_bytes)
-            html = extract_html_body_imap(raw_bytes)
-            if not html:
-                text_body = extract_text_body_imap(raw_bytes)
-                if text_body:
-                    # PR4-I1: same escape+<pre> wrap as Gmail path.
-                    html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
+            # WR-06: meta + body extraction batched into one executor job per
+            # message — three email.message_from_bytes/MIME-walk passes that must
+            # not run on the HA event loop.
+            imap_meta, html = await self.hass.async_add_executor_job(_parse_imap_message, raw_bytes)
             if not html:
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
@@ -253,11 +300,20 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_html_body")
+                # WR-06 (mirrors Gmail #353/#314): a missing body is transient-ish —
+                # pin in the in-memory in-flight set (skip this session, re-evaluate
+                # after restart / FIFO eviction), never the persisted seen cache.
+                self._mark_inflight(uid_key)
                 continue
 
             # Assign a synthetic email_date (0 = unknown — IMAP does not guarantee internalDate).
+            # WR-06: parser.parse performs up to six BeautifulSoup/lxml passes per
+            # email — offloaded to the executor (one job per message), mirroring
+            # the Gmail path.
             try:
-                result: ParseResult = parser.parse(html, uid_str, 0)
+                result: ParseResult = await self.hass.async_add_executor_job(
+                    parser.parse, html, uid_str, 0
+                )
             except Exception as parse_err:  # noqa: BLE001
                 _LOGGER.error(
                     "Email parser raised an unexpected error for IMAP UID %s: %s",
@@ -290,6 +346,10 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "error")
+                # WR-06 (mirrors Gmail #353/#314): parser crashes are transient-ish —
+                # pin in the in-memory in-flight set so a restart / later parser fix
+                # can still recover the shipment; never persist to the seen cache.
+                self._mark_inflight(uid_key)
                 continue
             d.emails_scanned_total += 1
             d.last_poll_emails_scanned += 1
@@ -324,15 +384,30 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_match")
+                # WR-06: a Stage-1 no-match is TERMINAL on the IMAP path — unlike
+                # Gmail there is no Ollama fallback gatekeeper that could later
+                # judge this message, so mark it seen to stop re-parsing it every
+                # poll. Never marked in debug mode (dry-runs must not poison the
+                # persisted cache — mirrors Gmail finding #749).
+                if not debug_mode:
+                    self._mark_message_seen(uid_key)
                 continue
+            # WR-06: per-message convergence bookkeeping (mirrors the Gmail model).
+            # msg_pending_retry: a shipment is awaiting retry (quota-blocked or
+            #   transient POST error) → leave the message re-parseable.
+            # msg_enqueued: at least one Stage-2 job was queued for this message →
+            #   do NOT mark seen; the message re-parses next poll and converges to
+            #   seen via the dedup-skip branch once the worker has POSTed.
+            msg_pending_retry = False
+            msg_enqueued = False
             # Iterate all shipments from this email. Single-shipment emails have
             # extra_shipments=[] so this loop runs once. Multi-package digests
             # (e.g. USPS Informed Delivery) may have 2+ shipments; each gets its
             # own storage key so coordinator.data creates a sensor per package.
             for _si, shipment in enumerate([result.shipment, *result.extra_shipments]):
-                # First shipment uses uid_str for backward compat; extras get a
-                # composite key so they create distinct entities.
-                storage_key = uid_str if _si == 0 else f"{uid_str}::{shipment.tracking_number}"
+                # First shipment uses the (UIDVALIDITY-qualified, IN-04) uid_key;
+                # extras get a composite key so they create distinct entities.
+                storage_key = uid_key if _si == 0 else f"{uid_key}::{shipment.tracking_number}"
 
                 # D-10: tracking-number dedup check (replaces UID skip gate).
                 normalized = normalize_tracking_number(shipment.tracking_number)
@@ -375,6 +450,10 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                         message_id=f"imap:{uid_str}",
                         meta=imap_meta,
                     )
+                    # WR-06: pure convergence (same as Gmail Stage-1 — no in-flight
+                    # gate): do not mark seen while a job may be in flight; the
+                    # dedup-skip branch terminalizes the message once POSTed.
+                    msg_enqueued = True
                     continue
 
                 # DBG-04: suppress POST in debug mode; append dry_run_suppressed event and continue.
@@ -413,6 +492,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                         )
                     else:
                         _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "skipped_quota")
+                    # WR-06: quota-blocked POST is deferred — keep the message
+                    # re-parseable so it forwards once the quota window resets.
+                    msg_pending_retry = True
                     continue
 
                 # WR-02/WR-03 symmetry: Defensive carrier-format gate before the IMAP
@@ -473,11 +555,12 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                         tracking_number=shipment.tracking_number,
                     )
                     quota_blocked = True
+                    # WR-06: this shipment was not POSTed — keep the message
+                    # re-parseable so it forwards once the quota window resets.
+                    msg_pending_retry = True
                     continue
                 except ParcelAppAlreadyAddedError:
-                    self._submitted_tracking_numbers[normalized] = None
-                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                        self._submitted_tracking_numbers.popitem(last=False)
+                    self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     self._emit_scan_event(
@@ -495,10 +578,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                         uid_str,
                         err,
                     )
-                    # Record normalized tracking number to suppress infinite retries.
-                    self._submitted_tracking_numbers[normalized] = None
-                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                        self._submitted_tracking_numbers.popitem(last=False)
+                    # Record normalized tracking number to suppress infinite retries
+                    # (IN-01: shared dedup-write helper).
+                    self._record_submitted_tn(normalized)
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
@@ -528,12 +610,13 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                             "error_msg": str(err)[:100],
                         },
                     )
+                    # WR-06: transient POST failure — keep the message re-parseable
+                    # so it is retried next poll instead of being filtered forever.
+                    msg_pending_retry = True
                     continue
 
                 # Success — record tracking number dedup, save immediately (D-10/D-03).
-                self._submitted_tracking_numbers[normalized] = None
-                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                    self._submitted_tracking_numbers.popitem(last=False)
+                self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
                 current_data[storage_key] = shipment
                 self._pending_shipments = current_data
@@ -555,6 +638,15 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "posted")
+
+            # WR-06: all shipments of this message processed — mark the uid_key seen
+            # ONLY when fully terminal inline (all dedup-skipped / posted /
+            # gate-rejected / already-added / invalid), mirroring the Gmail
+            # convergence model: enqueued messages re-parse next poll and converge
+            # to seen via the dedup-skip branch once the worker has POSTed;
+            # retry-pending messages stay re-parseable. Skipped in debug mode.
+            if not debug_mode and not msg_enqueued and not msg_pending_retry:
+                self._mark_message_seen(uid_key)
 
         # Phase 7: capture per-poll timing.
         d.last_poll_time = poll_start

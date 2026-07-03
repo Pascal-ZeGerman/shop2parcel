@@ -40,7 +40,8 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from bs4 import BeautifulSoup
 
@@ -277,6 +278,12 @@ class OllamaExtractor:
         with a locked field are silently dropped with a
         ``_LOGGER.warning`` line (D-07). Locked-field descriptions are
         non-configurable in v1.3.
+      async_add_executor_job: optional executor callable (WR-06). The HA
+        caller injects ``hass.async_add_executor_job`` so the CPU-bound
+        ``preprocess_html`` BeautifulSoup/lxml pass runs off the event
+        loop; the module stays HA-free by injection (mirrors
+        ``api/imap_client.py``). ``None`` (tests, non-HA callers) keeps
+        the synchronous inline call.
 
     Exception posture (D-09):
       ``OllamaTransientError`` / ``OllamaSchemaError`` raised by the client
@@ -292,10 +299,13 @@ class OllamaExtractor:
         self,
         client: OllamaClient,
         field_list: Sequence[tuple[str, str | None]],
+        async_add_executor_job: Callable[..., Any] | None = None,
     ) -> None:
         self._client = client
         self._fields = self._validate_fields(field_list)
         self._schema = build_schema(self._fields)
+        # WR-06: optional injected executor for the CPU-bound preprocess step.
+        self._executor = async_add_executor_job
 
     @staticmethod
     def _validate_fields(
@@ -334,7 +344,12 @@ class OllamaExtractor:
             # the cap is a no-op there, but defensive uniformity is cheaper to
             # read than per-branch policy.
             safe_name = name[:64] if isinstance(name, str) else name
-            if not _FIELD_NAME_RE.fullmatch(name):
+            # IN-05: the isinstance check must run BEFORE fullmatch — re raises
+            # TypeError on a non-str name (corrupt CONF_CUSTOM_FIELDS entry, e.g.
+            # {"name": 3}) before the drop-with-WARNING branch could ever fire,
+            # aborting async_start_stage2 / entry setup instead of dropping the
+            # bad field gracefully.
+            if not isinstance(name, str) or not _FIELD_NAME_RE.fullmatch(name):
                 _LOGGER.warning(
                     "Custom Stage-2 field %r has invalid name "
                     "(must match ^[a-z][a-z0-9_]{0,31}$); dropped.",
@@ -386,7 +401,13 @@ class OllamaExtractor:
         )
         t0 = time.perf_counter()
 
-        prose, links = preprocess_html(html)
+        if self._executor is not None:
+            # WR-06: preprocess_html is a full BeautifulSoup/lxml pass over the raw
+            # email body — run it off the event loop when the caller injected an
+            # executor (the coordinator passes hass.async_add_executor_job).
+            prose, links = await self._executor(preprocess_html, html)
+        else:
+            prose, links = preprocess_html(html)
         prompt = build_prompt(prose, links, self._fields)
 
         raw, meta = await self._client.async_generate_with_metadata(prompt, self._schema)

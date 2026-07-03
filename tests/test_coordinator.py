@@ -233,6 +233,55 @@ async def test_dedup_survives_restart(hass, mock_config_entry):
         assert coord._quota_exhausted_until is None
 
 
+async def test_load_store_trims_oversized_tracking_list(hass, mock_config_entry):
+    """IN-01: an oversized store list (hand-edited / pre-fix) must be FIFO-trimmed to
+    the cap ON LOAD — previously it stayed above the cap and shrank by one per insert."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        MAX_SUBMITTED_TRACKING_NUMBERS,
+    )
+
+    oversized = [f"TN{i:05d}" for i in range(MAX_SUBMITTED_TRACKING_NUMBERS + 25)]
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": oversized,
+                "quota_exhausted_until": None,
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        assert len(coord._submitted_tracking_numbers) == MAX_SUBMITTED_TRACKING_NUMBERS
+        # FIFO: the OLDEST entries are evicted; the newest survive.
+        assert "TN00000" not in coord._submitted_tracking_numbers
+        assert oversized[-1] in coord._submitted_tracking_numbers
+
+
+async def test_record_submitted_tn_trims_with_while_loop(hass, mock_config_entry):
+    """IN-01: _record_submitted_tn converges an over-cap dedup set in ONE insert
+    (while-loop trim), instead of evicting a single entry per insert."""
+    from collections import OrderedDict as _OD  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        MAX_SUBMITTED_TRACKING_NUMBERS,
+    )
+
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        # Simulate an over-cap in-memory set (10 entries over the cap).
+        coord._submitted_tracking_numbers = _OD(
+            (f"TN{i:05d}", None) for i in range(MAX_SUBMITTED_TRACKING_NUMBERS + 10)
+        )
+        coord._record_submitted_tn("NEWTN")
+        assert len(coord._submitted_tracking_numbers) == MAX_SUBMITTED_TRACKING_NUMBERS
+        assert "NEWTN" in coord._submitted_tracking_numbers
+
+
 # -------- FWRD-03: Store load/save semantics ----------------------------
 
 

@@ -108,6 +108,25 @@ async def test_add_delivery_200_success_true_returns_none(client):
     assert result is None
 
 
+async def test_add_delivery_200_non_json_body_raises_transient(client):
+    """IN-04: a 2xx with a non-JSON body (e.g. proxy HTML error page served with
+    status 200) must be transient — NOT a silent success that writes a permanent
+    dedup entry for a shipment that was never added."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=200, body="<html>gateway error</html>")
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+
+
+async def test_add_delivery_200_non_dict_json_body_raises_transient(client):
+    """IN-04: a 2xx whose JSON body is not an object (e.g. a list) is not proof of
+    success — must map to ParcelAppTransientError so the POST retries."""
+    with aioresponses() as mock:
+        mock.post(ADD_DELIVERY_URL, status=200, payload=["unexpected"])
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_add_delivery("1Z999AA10123456784", "ups", "Order #1234")
+
+
 # ---------------------------------------------------------------------------
 # async_add_delivery — auth errors
 # ---------------------------------------------------------------------------

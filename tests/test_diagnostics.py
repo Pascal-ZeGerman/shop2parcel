@@ -106,6 +106,42 @@ async def test_diagnostics_none_coordinator_data(hass, mock_config_entry):
 
 
 @pytest.mark.asyncio
+async def test_diagnostics_corrupt_shipment_value_skipped_not_crash(hass, mock_config_entry):
+    """IN-09: a non-dataclass value in coordinator.data is skipped, not a crash.
+
+    The old code sorted first (key=lambda s: s.email_date) so a corrupt value
+    raised AttributeError before the non-dataclass guard could run — the
+    diagnostics download 500'd instead of degrading gracefully.
+    """
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
+    coordinator.data = {
+        "good1": _make_shipment("good1", email_date=1_700_000_002),
+        "corrupt": "not-a-shipment-dataclass",
+        "good2": _make_shipment("good2", email_date=1_700_000_001),
+    }
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    returned_ids = [s["message_id"] for s in result["recent_shipments"]]
+    assert returned_ids == ["good1", "good2"], (
+        "Corrupt value must be skipped; valid shipments must survive, sorted by email_date"
+    )
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_non_numeric_email_date_does_not_crash_sort(hass, mock_config_entry):
+    """IN-09: a shipment with a non-numeric email_date must not crash the sort."""
+    good = _make_shipment("good", email_date=1_700_000_000)
+    weird = _make_shipment("weird", email_date=1_700_000_005)
+    # ShipmentData is frozen — object.__setattr__ bypasses the frozen guard to
+    # simulate on-disk corruption.
+    object.__setattr__(weird, "email_date", "corrupt-string")
+    coordinator = await setup_coordinator_with_data(hass, mock_config_entry, {})
+    coordinator.data = {"good": good, "weird": weird}
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    returned_ids = {s["message_id"] for s in result["recent_shipments"]}
+    assert returned_ids == {"good", "weird"}, "Both shipments must survive a corrupt email_date"
+
+
+@pytest.mark.asyncio
 async def test_diagnostics_poll_stats_present(hass, mock_config_entry):
     """poll_stats includes the emails_scanned_total counter from PollStats."""
     await setup_coordinator_with_data(hass, mock_config_entry, {})

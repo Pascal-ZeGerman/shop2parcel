@@ -22,7 +22,6 @@ import logging
 import re
 import time as _time
 from collections import OrderedDict, deque
-from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta
@@ -81,6 +80,12 @@ from .merge import merge_llm_authoritative
 _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 3
+
+# IN-07: bound for the fallback-prefetch cache (cap-deferred Stage2Results held
+# across polls so the gatekeeper does not re-run Ollama on the same body).
+# Cap-skips per poll are bounded by the queue size (≤ 256), so a small FIFO
+# bound is ample; entries are popped on reuse.
+_FALLBACK_PREFETCH_CACHE_MAXLEN = 100
 
 # Required fields and expected types for persisted_shipments store entries.
 # Used by _async_load_store to validate each entry before reconstructing ShipmentData.
@@ -467,6 +472,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # from every poll's re-parse, so blocking at the enqueue seam is what actually
         # stops their retry loop. In-memory only — a restart clears it (self-healing).
         self._stage2_quarantined_tns: OrderedDict[str, None] = OrderedDict()
+        # IN-07: session-scoped cache of fallback-prefetched Stage2Results whose job
+        # the worker cap-skipped, keyed by raw Gmail message ID. The gatekeeper pops
+        # this cache before calling the extractor, so a cap-deferred fallback job is
+        # NOT re-run through Ollama on the re-fetch poll (previously the
+        # prefetched_result was simply discarded — doubling inference per capped
+        # job). FIFO-bounded at _FALLBACK_PREFETCH_CACHE_MAXLEN; in-memory only.
+        self._fallback_prefetch_cache: OrderedDict[str, Any] = OrderedDict()
         self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
@@ -561,6 +573,28 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self.hass,
                 notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
             )
+
+    def _record_submitted_tn(self, normalized_tn: str) -> None:
+        """Record a tracking number in the dedup set and trim FIFO to the cap.
+
+        IN-01: single helper for every dedup-write site (inline POST success,
+        AlreadyAdded/InvalidTracking suppression, worker success, drain) so the
+        trim policy cannot drift per-site. Previously each site used a
+        single-eviction ``if`` (one popitem per insert) while the seen-ID cache
+        used ``while``.
+        """
+        self._submitted_tracking_numbers[normalized_tn] = None
+        self._trim_submitted_tns()
+
+    def _trim_submitted_tns(self) -> None:
+        """FIFO-trim _submitted_tracking_numbers to MAX_SUBMITTED_TRACKING_NUMBERS.
+
+        IN-01: ``while`` (not ``if``) so an oversized set — e.g. a hand-edited or
+        pre-fix store hydrated by _async_load_store — converges to the cap in one
+        call instead of shrinking by one entry per insert.
+        """
+        while len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+            self._submitted_tracking_numbers.popitem(last=False)
 
     def _mark_message_seen(self, msg_id: str) -> None:
         """Record a Gmail message ID as processed (seen) so it is skipped on future polls.
@@ -1068,7 +1102,18 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """
         assert self.config_entry is not None
         raw = self.config_entry.options.get(CONF_QUEUE_MAXLEN, DEFAULT_QUEUE_MAXLEN)
-        maxlen = max(1, min(256, int(raw)))
+        try:
+            maxlen = max(1, min(256, int(raw)))
+        except (TypeError, ValueError):  # fmt: skip
+            # IN-05: a corrupt option (non-numeric string, None, list, ...) must not
+            # abort entry setup — fall back to the default with a WARNING, mirroring
+            # the _valid_nonneg_int discipline used for store hydration (ASVS V5).
+            _LOGGER.warning(
+                "queue_maxlen option is not a valid integer (type=%s); using default %d",
+                type(raw).__name__,
+                DEFAULT_QUEUE_MAXLEN,
+            )
+            maxlen = DEFAULT_QUEUE_MAXLEN
         self._stage2_queue = asyncio.Queue(maxsize=maxlen)
         self._stage2_enqueued_keys = set()
         _LOGGER.debug("Stage-2 queue constructed with maxsize=%d", maxlen)
@@ -1081,9 +1126,34 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         client = OllamaClient(session=session, base_url=url, model=model, timeout=timeout)
 
         # Phase 19 D-04: parse field_list from options (once at setup; never per-job).
+        # IN-05: type-guard the whole structure — a non-list option or a dict entry
+        # missing 'name' previously raised (TypeError iterating / KeyError on
+        # f["name"]) and aborted entry setup; skip malformed entries with a WARNING
+        # instead. Non-str names are dropped downstream by
+        # OllamaExtractor._validate_fields (api-review IN-05).
         raw_fields = self.config_entry.options.get(CONF_CUSTOM_FIELDS, [])
-        field_list = [(f["name"], f.get("description")) for f in raw_fields if isinstance(f, dict)]
-        self._extractor = OllamaExtractor(client=client, field_list=field_list)
+        if not isinstance(raw_fields, list):
+            _LOGGER.warning(
+                "custom_fields option is not a list (type=%s); ignoring custom fields",
+                type(raw_fields).__name__,
+            )
+            raw_fields = []
+        field_list: list[tuple[str, str | None]] = []
+        for f in raw_fields:
+            if not isinstance(f, dict) or "name" not in f:
+                _LOGGER.warning(
+                    "Skipping malformed custom field entry (type=%s, missing 'name')",
+                    type(f).__name__,
+                )
+                continue
+            field_list.append((f["name"], f.get("description")))
+        # WR-06: inject the HA executor so the extractor's preprocess_html
+        # (BeautifulSoup/lxml pass) runs off the event loop.
+        self._extractor = OllamaExtractor(
+            client=client,
+            field_list=field_list,
+            async_add_executor_job=self.hass.async_add_executor_job,
+        )
 
         # Phase 19 D-02: spawn worker after queue and extractor are ready (QUE-04).
         # async_create_background_task auto-registers task in entry._background_tasks;
@@ -1123,23 +1193,44 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # CancelledError and TimeoutError are suppressed so unload never raises (QUE-05).
         if self._stage2_worker_task is not None and not self._stage2_worker_task.done():
             self._stage2_worker_task.cancel()
-            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            try:
                 await asyncio.wait_for(self._stage2_worker_task, timeout=5.0)
+            except (asyncio.CancelledError, TimeoutError):  # fmt: skip
+                pass
+            except Exception as err:  # noqa: BLE001
+                # IN-06: a worker that died with a non-CancelledError exception
+                # re-raises here when awaited; the QUE-05 contract says on-unload
+                # never raises, so log loudly and continue the teardown.
+                _LOGGER.error(
+                    "Stage-2 worker raised during shutdown (suppressed to honour "
+                    "QUE-05 'unload never raises'): %s",
+                    err,
+                    exc_info=True,
+                )
         self._stage2_worker_task = None
         self._extractor = None  # release OllamaClient / aiohttp session reference
 
-        # Step 2 (Phase 18 CR-02): drain and reset queue, preserving maxsize.
+        # IN-03: clear the enabled flag FIRST so a poll racing this teardown routes
+        # away from the enqueue seam, and so diagnostics never report Stage-2 as
+        # enabled on a stopped coordinator. A reload constructs a fresh coordinator
+        # and async_setup_entry re-derives the flag from options.
+        self._diagnostics.stage2_enabled = False
+
+        # Step 2 (Phase 18 CR-02, reworked per IN-03): drain the queue, then null it.
+        # Recreating a live workerless queue here let a poll that raced teardown keep
+        # enqueueing jobs nothing would ever drain, and email_processing_active
+        # (queue depth > 0) read True indefinitely. The None sentinel is handled by
+        # stage2_queue_depth and _enqueue_stage2; the old "preserve maxsize" recreate
+        # is obsolete — a reload rebuilds the queue in async_start_stage2 from options.
         if self._stage2_queue is None:
             return
-        prev_maxsize = self._stage2_queue.maxsize
         while not self._stage2_queue.empty():
             try:
                 self._stage2_queue.get_nowait()
                 self._stage2_queue.task_done()
             except asyncio.QueueEmpty:
                 break
-        # CR-02: preserve maxsize so backpressure invariant holds after a reload.
-        self._stage2_queue = asyncio.Queue(maxsize=prev_maxsize)
+        self._stage2_queue = None
         self._stage2_enqueued_keys.clear()
         # CR-02: gate on debug mode too (DBG-03 zero-store-writes) — this save fires
         # on every unload path, including a failed-first-refresh teardown.
@@ -1191,6 +1282,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # another message). Return False — THIS call did not create a job, so the caller
             # must not pin its message in-flight under a job it does not own (finding #674).
             return False
+        if self._stage2_queue is None:
+            # IN-03: stop/teardown race — async_stop_stage2 nulled the queue while a
+            # poll was still iterating. Drop this enqueue; the message stays
+            # re-fetchable and re-enqueues after the next (re)start.
+            _LOGGER.debug("Stage-2 queue is stopped — dropping enqueue for %s", normalized_tn)
+            return False
         job = Stage2Job(
             storage_key=storage_key,
             normalized_tn=normalized_tn,
@@ -1201,7 +1298,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             prefetched_result=prefetched_result,
             raw_msg_id=raw_msg_id,
         )
-        assert self._stage2_queue is not None
         try:
             self._stage2_queue.put_nowait(job)
         except asyncio.QueueFull:
@@ -1238,12 +1334,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         task_done() in finally: ensures queue.join() (if used in tests) never hangs.
         """
-        assert self.config_entry is not None
-        assert self._stage2_queue is not None
+        if self.config_entry is None or self._stage2_queue is None:
+            # IN-06: startup invariant violated (worker spawned on a torn-down
+            # coordinator). The former bare asserts crashed the background task and
+            # the AssertionError re-raised at unload await time, violating QUE-05
+            # ("on-unload never raises"); exit cleanly instead.
+            _LOGGER.error("Stage-2 worker started without config entry or queue — exiting")
+            return
+        # IN-03/IN-06: bind a local reference — async_stop_stage2 nulls
+        # self._stage2_queue during teardown, and the cancelled worker may still
+        # execute its finally-block after that point.
+        queue = self._stage2_queue
         _LOGGER.debug("Stage-2 worker started for entry %s", self.config_entry.entry_id)
         try:
             while True:
-                job: Stage2Job = await self._stage2_queue.get()
+                job: Stage2Job = await queue.get()
                 normalized_tn = job.normalized_tn
                 try:
                     # D-07 / IMAP parity: drain runs on the base class — ImapCoordinator
@@ -1278,7 +1383,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     self._stage2_enqueued_keys.discard(normalized_tn)
                     self._release_inflight(job)  # re-fetch next poll (not lost)
                 finally:
-                    self._stage2_queue.task_done()
+                    queue.task_done()
         except asyncio.CancelledError:
             _LOGGER.debug("Stage-2 worker cancelled — exiting cleanly")
             raise
@@ -1416,10 +1521,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._stage2_posts_this_poll += 1
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
             self._record_stage2_success()
-            # Write dedup so next poll does not retry this TN.
-            self._submitted_tracking_numbers[normalized_tn] = None
-            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                self._submitted_tracking_numbers.popitem(last=False)
+            # Write dedup so next poll does not retry this TN (IN-01: shared helper).
+            self._record_submitted_tn(normalized_tn)
             # Pitfall 2: remove ONLY after a successful POST (never before).
             del self._pending_posts[storage_key]
             # Pitfall 5: re-snapshot immediately before async_set_updated_data to avoid
@@ -1499,6 +1602,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
+            # IN-07: preserve the fallback's already-computed extraction across the
+            # cap-defer — discarding it made the gatekeeper run a SECOND Ollama pass
+            # on the same body next poll. The gatekeeper pops this cache before
+            # extracting (gmail_coordinator fallback path).
+            if job.prefetched_result is not None and job.raw_msg_id is not None:
+                self._fallback_prefetch_cache[job.raw_msg_id] = job.prefetched_result
+                while len(self._fallback_prefetch_cache) > _FALLBACK_PREFETCH_CACHE_MAXLEN:
+                    self._fallback_prefetch_cache.popitem(last=False)
             self._release_inflight(job)  # re-fetch next poll (cap-deferred, not lost)
             return  # no extractor, no POST, no dedup write
 
@@ -1595,14 +1706,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._release_inflight(job)  # re-fetch next poll (dry-run defer)
             return  # no POST, no dedup write, no pending_posts write, no store save
 
-        # Defensive skip-POST guard (finding #1327): under current code merged_shipment.tracking_number
-        # is never None — Stage-1 hits and prefetched fallback jobs carry a validated non-None
-        # number, and merge_llm_authoritative asserts a non-None Stage-1 number and keeps it (a
-        # None-tracking Stage-1 job trips that assertion and is handled by the worker's outer
-        # except, never reaching here). This guard is therefore not expected to fire in
-        # production; it remains as a cheap belt-and-braces check so a future merge/fallback
-        # change can never POST a None tracking number to parcelapp. It does NOT release the
-        # in-flight ID: a genuine no-data result is terminal (converges to seen), not a retry.
+        # Defensive skip-POST guard (finding #1327, comment corrected per IN-02): under
+        # current code merged_shipment.tracking_number is never None —
+        # ShipmentData.tracking_number is typed non-Optional str, Stage-1 hits and
+        # prefetched fallback jobs carry a validated non-None number, and
+        # merge_llm_authoritative contains no assert: its promotion path keeps the
+        # original Stage-1 value whenever Stage-2 declines (or MRG-04 discards), so it
+        # never downgrades the field to None. This guard is therefore unreachable under
+        # the current types; it remains as a cheap belt-and-braces check so a future
+        # merge/fallback/type change can never POST a None tracking number to parcelapp.
+        # It does NOT release the in-flight ID: a genuine no-data result is terminal
+        # (converges to seen), not a retry.
         if merged_shipment.tracking_number is None:
             self._emit_scan_event(
                 message_id=job.message_id,
@@ -1711,10 +1825,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # and no parcelapp quota was consumed, so counting these ate
             # MAX_STAGE2_POSTS_PER_POLL cap slots for non-POST outcomes (the D-12
             # contract is "increment only on successful POST").
-            # Write dedup so next poll does not retry; discard in-flight key.
-            self._submitted_tracking_numbers[normalized_tn] = None
-            if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                self._submitted_tracking_numbers.popitem(last=False)
+            # Write dedup so next poll does not retry; discard in-flight key (IN-01: shared helper).
+            self._record_submitted_tn(normalized_tn)
             self._stage2_enqueued_keys.discard(normalized_tn)
             # WR-08: mirror the success path — persist AND publish. Persisting without
             # async_set_updated_data left store and live data divergent (the entry was
@@ -1739,9 +1851,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
         self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
         self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
-        self._submitted_tracking_numbers[normalized_tn] = None
-        if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-            self._submitted_tracking_numbers.popitem(last=False)
+        self._record_submitted_tn(normalized_tn)  # IN-01: shared dedup-write helper
         self._stage2_enqueued_keys.discard(normalized_tn)  # Phase 18 WR-01 fix
 
         # D-06: snapshot pattern — never mutate self.data directly.
@@ -1802,6 +1912,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._submitted_tracking_numbers = OrderedDict(
             (normalize_tracking_number(tn), None) for tn in stored_list if isinstance(tn, str)
         )
+        # IN-01: trim once after hydration — an oversized (hand-edited or pre-fix)
+        # store list previously stayed above the cap and shrank by one per insert.
+        self._trim_submitted_tns()
         qe = stored.get("quota_exhausted_until")
         self._quota_exhausted_until = qe if isinstance(qe, int) else None
         _LOGGER.debug(

@@ -336,6 +336,45 @@ def test_fedex_detect_fn_not_triggered_on_shopify_html(shopify_html: str) -> Non
     assert _detect_fedex(shopify_html) is False
 
 
+@pytest.mark.parametrize(
+    "lookalike_domain",
+    ["groups.com", "meetups.com", "signups.com", "pickups.com"],
+)
+def test_ups_detect_fn_not_triggered_on_lookalike_domains(lookalike_domain: str) -> None:
+    """WR-03: bare-substring matching fired on any domain ending in 'ups.com' —
+    a newsletter linking groups.com/meetups.com/etc. must NOT route to the UPS template."""
+    from custom_components.shop2parcel.api.email_parser import _detect_ups
+
+    html = (
+        "<html><body>"
+        f'<p>Join us! <a href="https://www.{lookalike_domain}/events">RSVP here</a></p>'
+        "</body></html>"
+    )
+    assert _detect_ups(html) is False
+
+
+@pytest.mark.parametrize(
+    ("detect_name", "html"),
+    [
+        ("_detect_ups", '<a href="https://www.ups.com/track?tracknum=1Z1">Track</a>'),
+        ("_detect_ups", "<td>Your package is arriving today. ups.com</td>"),
+        ("_detect_ups", "<p>Visit https://ups.com for details</p>"),
+        ("_detect_usps", "<p>usps.com</p>"),
+        ("_detect_usps", '<a href="https://tools.usps.com/go/Track?tLabels=9">Track</a>'),
+        ("_detect_fedex", "<td>fedex.com</td>"),
+    ],
+)
+def test_carrier_detect_fns_still_fire_on_boundary_anchored_domains(
+    detect_name: str, html: str
+) -> None:
+    """WR-03 regression guard: legitimate carrier-domain placements (href, prose,
+    tag-adjacent) must keep firing after the boundary-anchored rewrite."""
+    from custom_components.shop2parcel.api import email_parser
+
+    detect_fn = getattr(email_parser, detect_name)
+    assert detect_fn(f"<html><body>{html}</body></html>") is True
+
+
 def test_usps_detect_fn_not_triggered_on_shopify_usps_merchant_email() -> None:
     """_detect_usps must NOT fire on a Shopify merchant email that includes a USPS tracking URL."""
     from custom_components.shop2parcel.api.email_parser import _detect_usps
@@ -440,6 +479,24 @@ def test_html_template_alphanumeric_order_captured() -> None:
     assert result.shipment.tracking_number == "1Z999AA10123456784"
 
 
+@pytest.mark.parametrize(
+    "junk_paragraph",
+    [
+        "<p>#1A rated store on the web!</p>",
+        "<p>Share your unboxing with #ShipDay</p>",
+        "<p>We ordered EXTRA stock for the holidays</p>",
+    ],
+)
+def test_html_template_order_regex_ignores_bare_hashtags(junk_paragraph: str) -> None:
+    """IN-02: bare '#token' text without an 'order' anchor must NOT become order_name —
+    junk hashtags previously reached the POSTed parcelapp description."""
+    html = f"<html><body>{junk_paragraph}<p>1Z999AA10123456784</p></body></html>"
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "msg_junk_hash", 0)
+    assert result.shipment is not None
+    assert result.shipment.order_name == ""
+
+
 def test_html_template_scans_td_elements() -> None:
     """HTML template scans <td> elements — tracking in table cells is found."""
     html = (
@@ -525,6 +582,24 @@ def test_skip_reason_tracking_invalid_from_tier1() -> None:
     assert result.shipment is None
     assert result.skip_reason == "tracking_invalid"
     assert result.keyword_hits["tracking_regex"] is True
+
+
+def test_tier1_invalid_labeled_token_falls_back_to_href() -> None:
+    """IN-01: a labelled-but-invalid token (e.g. regional carrier code) must not
+    preclude the href fallback — consistent recall with the no-label branch."""
+    html = (
+        "<html><body>"
+        "<div>Tracking number: NOTRACK1234 Order #1234</div>"
+        '<a href="https://track.example.com/?num=1Z999AA10123456784">Track</a>'
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_regex_tier1(html, "x", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.shipment.order_name == "#1234"
+    assert result.skip_reason is None
+    assert result.strategy_used == "regex_fallback"
 
 
 def test_skip_reason_no_tracking_pattern_from_full_parse() -> None:

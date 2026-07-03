@@ -81,3 +81,44 @@ def test_no_ha_imports_in_exceptions():
     )
     source = exceptions_path.read_text(encoding="utf-8")
     assert "homeassistant" not in source, "exceptions.py must not import from homeassistant.*"
+
+
+# ---------------------------------------------------------------------------
+# IN-07 (api-layer review): per-service base classes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("concrete_name", "base_name"),
+    [
+        ("GmailAuthError", "GmailError"),
+        ("GmailTransientError", "GmailError"),
+        ("ParcelAppAuthError", "ParcelAppError"),
+        ("ParcelAppQuotaError", "ParcelAppError"),
+        ("ParcelAppTransientError", "ParcelAppError"),
+        ("ParcelAppInvalidTrackingError", "ParcelAppError"),
+        ("ParcelAppAlreadyAddedError", "ParcelAppError"),
+        ("ImapAuthError", "ImapError"),
+        ("ImapTransientError", "ImapError"),
+        ("OllamaTransientError", "OllamaError"),
+        ("OllamaSchemaError", "OllamaError"),
+    ],
+)
+def test_concrete_exception_derives_from_service_base(concrete_name, base_name):
+    """IN-07: each concrete exception subclasses its per-service base (and Exception)."""
+    from custom_components.shop2parcel.api import exceptions as exc_mod  # noqa: PLC0415
+
+    concrete = getattr(exc_mod, concrete_name)
+    base = getattr(exc_mod, base_name)
+    assert inspect.isclass(concrete)
+    assert issubclass(concrete, base)
+    assert issubclass(base, Exception)
+
+
+def test_already_added_is_not_invalid_tracking_subclass():
+    """D-01 (preserved by IN-07): AlreadyAdded is NOT a subclass of InvalidTracking."""
+    from custom_components.shop2parcel.api.exceptions import (  # noqa: PLC0415
+        ParcelAppAlreadyAddedError,
+    )
+
+    assert not issubclass(ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError)

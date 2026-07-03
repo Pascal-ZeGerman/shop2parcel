@@ -33,7 +33,11 @@ from custom_components.shop2parcel.const import (
     MAX_RESCAN_WINDOW_DAYS,
     MIN_RESCAN_WINDOW_DAYS,
 )
-from custom_components.shop2parcel.options_flow import _OLLAMA_LOCALHOST_URL, OptionsFlowHandler
+from custom_components.shop2parcel.options_flow import (
+    _OLLAMA_LOCALHOST_URL,
+    _OLLAMA_TAGS_TIMEOUT,
+    OptionsFlowHandler,
+)
 
 
 def _make_handler_with_options(options: dict) -> tuple[OptionsFlowHandler, MagicMock]:
@@ -246,6 +250,235 @@ async def test_settings_happy_path(hass, mock_config_entry):
     ):
         result = await handler.async_step_settings(user_input=user_input)
     assert result["type"] == "create_entry"
+
+
+async def test_tags_fetch_uses_short_timeout_not_stored_timeout(hass, mock_config_entry):
+    """IN-04: the /api/tags fetches (render AND submit) use _OLLAMA_TAGS_TIMEOUT.
+
+    The stored CONF_OLLAMA_TIMEOUT (up to 300 s) is sized for generation
+    requests; using it for the model-list fetch would freeze the options dialog
+    for minutes on a hung server.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: "qwen3.5:2b",
+            CONF_OLLAMA_TIMEOUT: 300,
+        }
+    )
+    user_input = {
+        CONF_POLL_INTERVAL: 30,
+        CONF_GMAIL_QUERY: "from:shopify",
+        CONF_RESCAN_WINDOW_DAYS: 30,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+        CONF_OLLAMA_MODEL: "qwen3.5:2b",
+        CONF_OLLAMA_TIMEOUT: 300,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["qwen3.5:2b"],
+        ) as mock_tags,
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        # Render (schema build) + submit validation — both fetch /api/tags.
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "create_entry"
+    assert mock_tags.call_count == 2, "Expected one render fetch + one submit fetch"
+    for fetch_call in mock_tags.call_args_list:
+        timeout_arg = (
+            fetch_call.args[2] if len(fetch_call.args) > 2 else fetch_call.kwargs["timeout"]
+        )
+        assert timeout_arg == _OLLAMA_TAGS_TIMEOUT, (
+            f"/api/tags fetch must use _OLLAMA_TAGS_TIMEOUT ({_OLLAMA_TAGS_TIMEOUT}), "
+            f"got {timeout_arg}"
+        )
+
+
+async def test_settings_accepts_stored_model_missing_from_server(hass, mock_config_entry):
+    """IN-07: the stored model is accepted on submit even when /api/tags lacks it.
+
+    The dropdown deliberately offers the stored model when the live server no
+    longer lists it; rejecting that same value on submit would strand the user —
+    unable to save ANY setting until the model is re-pulled.
+    """
+    stored_model = "old-model:7b"
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: stored_model,
+        }
+    )
+    user_input = {
+        CONF_POLL_INTERVAL: 30,
+        CONF_GMAIL_QUERY: "from:shopify",
+        CONF_RESCAN_WINDOW_DAYS: 30,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+        CONF_OLLAMA_MODEL: stored_model,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            # stored model is NOT in the live list
+            return_value=["qwen3.5:2b", "llama3.1:8b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "create_entry", (
+        "Stored model offered by the dropdown must be accepted on submit (IN-07)"
+    )
+    assert result["data"][CONF_OLLAMA_MODEL] == stored_model
+
+
+async def test_settings_still_rejects_new_model_missing_from_server(hass, mock_config_entry):
+    """IN-07 (negative): a NEWLY chosen model absent from /api/tags is still rejected."""
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: "llama3.1:8b",
+        }
+    )
+    user_input = {
+        CONF_POLL_INTERVAL: 30,
+        CONF_GMAIL_QUERY: "from:shopify",
+        CONF_RESCAN_WINDOW_DAYS: 30,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+        CONF_OLLAMA_MODEL: "typo-model:1b",
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["llama3.1:8b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "ollama_model_not_found"
+    assert result["description_placeholders"]["missing_model"] == "typo-model:1b"
+
+
+async def test_settings_error_rerender_preserves_user_input(hass, mock_config_entry):
+    """WR-07: a validation error re-renders the form with the SUBMITTED values.
+
+    The schema is built from stored options before validation runs; re-showing it
+    verbatim would silently revert every field the user edited. The submitted
+    input must be overlaid as suggested values so nothing is lost.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_POLL_INTERVAL: 30,
+            CONF_OLLAMA_URL: "http://192.168.0.190:11434",
+            CONF_OLLAMA_MODEL: "llama3.1:8b",
+        }
+    )
+    user_input = {
+        CONF_POLL_INTERVAL: 45,
+        CONF_GMAIL_QUERY: "from:etsy",
+        CONF_RESCAN_WINDOW_DAYS: 60,
+        CONF_DEBUG_MODE: True,
+        CONF_OLLAMA_URL: "http://10.0.0.9:11434",
+        CONF_OLLAMA_MODEL: "typo-model:1b",
+        CONF_OLLAMA_TIMEOUT: 60,
+        CONF_QUEUE_MAXLEN: 12,
+    }
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch(
+            "custom_components.shop2parcel.options_flow.OllamaClient.async_get_tags",
+            return_value=["llama3.1:8b"],
+        ),
+        patch(
+            "custom_components.shop2parcel.options_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "ollama_model_not_found"
+
+    schema = result["data_schema"]
+    schema_dict = {str(k): k for k in schema.schema}
+    for key, expected in (
+        (CONF_POLL_INTERVAL, 45),
+        (CONF_GMAIL_QUERY, "from:etsy"),
+        (CONF_RESCAN_WINDOW_DAYS, 60),
+        (CONF_DEBUG_MODE, True),
+        (CONF_OLLAMA_URL, "http://10.0.0.9:11434"),
+        (CONF_OLLAMA_MODEL, "typo-model:1b"),
+        (CONF_OLLAMA_TIMEOUT, 60),
+        (CONF_QUEUE_MAXLEN, 12),
+    ):
+        marker = schema_dict[key]
+        suggested = (marker.description or {}).get("suggested_value")
+        assert suggested == expected, (
+            f"{key}: expected submitted value {expected!r} as suggested_value, got {suggested!r}"
+        )
+
+
+async def test_settings_save_drops_dead_stage2_enabled_key(hass, mock_config_entry):
+    """IN-01: saving settings removes the dead stage2_enabled key from stored options.
+
+    Pre-1.5 entries were created with options={"stage2_enabled": False}, which
+    nothing reads (Stage-2 enablement is derived from CONF_OLLAMA_URL). The
+    options-merge must not carry the stale key forward.
+    """
+    handler, fake_entry = _make_handler_with_options(options={"stage2_enabled": False})
+    user_input = {
+        CONF_POLL_INTERVAL: 30,
+        CONF_GMAIL_QUERY: "from:shopify",
+        CONF_RESCAN_WINDOW_DAYS: 30,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "",
+        CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert "stage2_enabled" not in result["data"], (
+        "Dead stage2_enabled key must be dropped on options save (IN-01)"
+    )
 
 
 async def test_settings_ollama_timeout_validation(hass, mock_config_entry):

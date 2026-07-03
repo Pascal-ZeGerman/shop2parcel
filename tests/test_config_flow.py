@@ -631,6 +631,95 @@ async def test_reauth_imap_step_id_not_reauth_confirm_imap():
 
 
 # ---------------------------------------------------------------------------
+# WR-04: IMAP reauth must verify the account identity before updating the entry
+# ---------------------------------------------------------------------------
+
+
+async def test_reauth_imap_success_sets_unique_id_and_checks_mismatch():
+    """WR-04: successful reauth sets unique_id to username@host and runs the mismatch guard.
+
+    Host and username are editable in the reauth form. Without the guard, a user
+    could silently switch the entry to a different mailbox while keeping the old
+    unique_id — breaking duplicate-account detection and applying the old
+    account's persisted dedup/seen state to the new mailbox.
+    """
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+    handler.async_set_unique_id = AsyncMock()
+    handler._abort_if_unique_id_mismatch = MagicMock()
+    handler.async_update_reload_and_abort = MagicMock(
+        return_value={"type": "abort", "reason": "reauth_successful"}
+    )
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(return_value=[])
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        result = await handler.async_step_reauth_imap(
+            user_input={
+                "imap_host": "imap.other.example.com",
+                "imap_port": 993,
+                "imap_username": "other@example.com",
+                "imap_password": "new-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    handler.async_set_unique_id.assert_awaited_once_with("other@example.com@imap.other.example.com")
+    handler._abort_if_unique_id_mismatch.assert_called_once_with(reason="wrong_account")
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+
+
+async def test_reauth_imap_error_path_skips_unique_id_check():
+    """WR-04: failed connection test re-shows the form without touching unique_id."""
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+    handler.async_set_unique_id = AsyncMock()
+    handler._abort_if_unique_id_mismatch = MagicMock()
+
+    mock_imap_client = AsyncMock()
+    mock_imap_client.fetch_shipping_emails = AsyncMock(side_effect=ImapAuthError("bad password"))
+
+    with patch(
+        "custom_components.shop2parcel.config_flow.ImapClient",
+        return_value=mock_imap_client,
+    ):
+        result = await handler.async_step_reauth_imap(
+            user_input={
+                "imap_host": "imap.example.com",
+                "imap_port": 993,
+                "imap_username": "user@example.com",
+                "imap_password": "wrong-password",
+                "imap_tls": "ssl",
+            }
+        )
+
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "invalid_auth"
+    handler.async_set_unique_id.assert_not_called()
+    handler._abort_if_unique_id_mismatch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # IN-03: IMAP error path tests — ImapAuthError and ImapTransientError
 # ---------------------------------------------------------------------------
 
@@ -684,16 +773,16 @@ async def test_async_step_imap_transient_error_shows_cannot_connect():
 
 
 # ---------------------------------------------------------------------------
-# Phase 17 CFG-04: async_step_finish seeds options={stage2_enabled: False}
+# IN-01: async_step_finish must NOT seed dead options (stage2_enabled removed)
 # ---------------------------------------------------------------------------
 
 
-async def test_finish_seeds_stage2_enabled_false():
-    """CFG-04 / Test 1: async_step_finish success path → options == {"stage2_enabled": False}.
+async def test_finish_does_not_seed_stage2_enabled():
+    """IN-01: async_step_finish success path creates the entry WITHOUT seeding options.
 
-    New entries created via the config flow must seed stage2_enabled=False in
-    options so the backward-compat detection in async_setup_entry is consistent
-    even before the user opens the options flow.
+    The old options={"stage2_enabled": False} seed was dead data — Stage-2
+    enablement is derived from CONF_OLLAMA_URL in async_setup_entry and nothing
+    ever reads the stored key. New entries must not carry it.
     """
     handler = _make_handler()
     handler._data = dict(FAKE_TOKEN_DATA)
@@ -714,15 +803,11 @@ async def test_finish_seeds_stage2_enabled_false():
         )
 
     assert result["type"] == "create_entry"
-    assert result["options"] == {"stage2_enabled": False}
+    assert "stage2_enabled" not in (result.get("options") or {})
 
 
-async def test_finish_seeds_stage2_enabled_auth_error_unchanged():
-    """CFG-04 / Test 2: auth error path does NOT create an entry; options kwarg not surfaced.
-
-    The new options= kwarg must not affect error-path behavior — form is re-shown
-    with errors["base"] == "invalid_api_key" and no entry is created.
-    """
+async def test_finish_auth_error_path_unchanged():
+    """IN-01: auth error path still re-shows the form and creates no entry."""
     handler = _make_handler()
 
     mock_client = AsyncMock()
@@ -741,3 +826,74 @@ async def test_finish_seeds_stage2_enabled_auth_error_unchanged():
     assert result["type"] == "form"
     assert result["errors"]["base"] == "invalid_api_key"
     assert "options" not in result
+
+
+# ---------------------------------------------------------------------------
+# IN-06: Gmail entries store connection_type explicitly
+# ---------------------------------------------------------------------------
+
+
+async def test_async_oauth_create_entry_stores_gmail_connection_type():
+    """IN-06: the Gmail setup path writes connection_type='gmail' into entry data."""
+    handler = _make_handler()
+    handler.async_set_unique_id = AsyncMock()
+    handler.async_step_finish = AsyncMock(return_value={"type": "form", "step_id": "finish"})
+
+    await handler.async_oauth_create_entry(FAKE_TOKEN_DATA)
+
+    assert handler._data.get("connection_type") == "gmail"
+    # OAuth token data must be preserved alongside the new key
+    assert handler._data.get("token") == FAKE_TOKEN_DATA["token"]
+
+
+# ---------------------------------------------------------------------------
+# IN-03: IMAP port field validates the 1-65535 TCP range at schema time
+# ---------------------------------------------------------------------------
+
+_IMAP_SCHEMA_INPUT = {
+    "imap_host": "imap.example.com",
+    "imap_username": "user@example.com",
+    "imap_password": "app-password",
+    "imap_tls": "ssl",
+    "imap_verify_tls": True,
+}
+
+
+async def test_imap_schema_rejects_out_of_range_port():
+    """IN-03: async_step_imap schema rejects port 0 and >65535, accepts 1..65535."""
+    import voluptuous as real_vol
+
+    handler = _make_handler()
+    result = await handler.async_step_imap(user_input=None)
+    schema = result["data_schema"]
+
+    for bad_port in (0, -1, 65536):
+        with pytest.raises(real_vol.Invalid):
+            schema({**_IMAP_SCHEMA_INPUT, "imap_port": bad_port})
+    for good_port in (1, 143, 993, 65535):
+        validated = schema({**_IMAP_SCHEMA_INPUT, "imap_port": good_port})
+        assert validated["imap_port"] == good_port
+
+
+async def test_reauth_imap_schema_rejects_out_of_range_port():
+    """IN-03: async_step_reauth_imap schema applies the same 1-65535 port range."""
+    import voluptuous as real_vol
+
+    handler = _make_handler()
+    fake_entry = MagicMock()
+    fake_entry.data = {
+        "connection_type": "imap",
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_username": "user@example.com",
+        "imap_tls": "ssl",
+    }
+    handler._get_reauth_entry = MagicMock(return_value=fake_entry)
+
+    result = await handler.async_step_reauth_imap(user_input=None)
+    schema = result["data_schema"]
+
+    with pytest.raises(real_vol.Invalid):
+        schema({**_IMAP_SCHEMA_INPUT, "imap_port": 70000})
+    validated = schema({**_IMAP_SCHEMA_INPUT, "imap_port": 993})
+    assert validated["imap_port"] == 993

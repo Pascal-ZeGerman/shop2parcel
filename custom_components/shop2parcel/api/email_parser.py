@@ -195,41 +195,58 @@ def _extract_tracking_from_hrefs(soup: BeautifulSoup) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+# WR-03: carrier-domain detection regexes. The former bare substring match
+# ("ups.com" in html) also fired on unrelated domains that merely END in the
+# same letters — groups.com, meetups.com, signups.com, pickups.com — all
+# plausible in marketing/newsletter emails. A false detection both ran the
+# carrier regexes over an unrelated email AND permanently suppressed the
+# Tier-2 broad scan for it (parse() carrier_detected gate). Anchor the domain
+# to a host/word boundary: preceded by start-of-string or a non-domain-label
+# character (whitespace, quote, '/', '@', '.', '=', '(' or '>'), followed by
+# a word boundary. Subdomains ("www.ups.com", "tools.usps.com") still match
+# via the '.' in the boundary class. Bounded patterns — no ReDoS risk
+# (ASVS V5). Body-based detection remains best-effort classification against
+# accidental misrouting, NOT a trust decision (senders control body content).
+_UPS_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])ups\.com\b")
+_USPS_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])usps\.com\b")
+_FEDEX_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])fedex\.com\b")
+
+
 def _detect_ups(html: str) -> bool:
     """Return True if html is a UPS shipping notification email.
 
-    Marker: 'ups.com' in html AND 'shopify' not in html — prevents
-    misclassifying Shopify merchant emails for UPS-fulfilled orders (Pitfall 1
-    in RESEARCH.md). T-Spoof mitigation.
+    Marker: boundary-anchored 'ups.com' (WR-03) AND 'shopify' not in html —
+    prevents misclassifying Shopify merchant emails for UPS-fulfilled orders
+    (Pitfall 1 in RESEARCH.md). T-Spoof mitigation.
 
     The 'mcinfo@ups.com' sender check was removed because extract_html_body()
     returns only the MIME text/html part (never email headers), so the sender
     address is never present in the html argument passed here.
     """
     html_lower = html.lower()
-    return "ups.com" in html_lower and "shopify" not in html_lower
+    return bool(_UPS_DOMAIN_RE.search(html_lower)) and "shopify" not in html_lower
 
 
 def _detect_usps(html: str) -> bool:
     """Return True if html is a USPS shipping notification email.
 
-    Marker: 'usps.com' AND 'shopify' not present — prevents misclassifying
-    Shopify merchant emails for USPS-fulfilled orders (T-Spoof mitigation,
-    matching _detect_ups pattern).
+    Marker: boundary-anchored 'usps.com' (WR-03) AND 'shopify' not present —
+    prevents misclassifying Shopify merchant emails for USPS-fulfilled orders
+    (T-Spoof mitigation, matching _detect_ups pattern).
     """
     html_lower = html.lower()
-    return "usps.com" in html_lower and "shopify" not in html_lower
+    return bool(_USPS_DOMAIN_RE.search(html_lower)) and "shopify" not in html_lower
 
 
 def _detect_fedex(html: str) -> bool:
     """Return True if html is a FedEx shipping notification email.
 
-    Marker: 'fedex.com' AND 'shopify' not present — prevents misclassifying
-    Shopify merchant emails for FedEx-fulfilled orders (T-Spoof mitigation,
-    matching _detect_ups pattern).
+    Marker: boundary-anchored 'fedex.com' (WR-03) AND 'shopify' not present —
+    prevents misclassifying Shopify merchant emails for FedEx-fulfilled orders
+    (T-Spoof mitigation, matching _detect_ups pattern).
     """
     html_lower = html.lower()
-    return "fedex.com" in html_lower and "shopify" not in html_lower
+    return bool(_FEDEX_DOMAIN_RE.search(html_lower)) and "shopify" not in html_lower
 
 
 def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
@@ -478,7 +495,14 @@ class EmailParser:
         for elem in soup.find_all(["p", "td"]):
             text = elem.get_text(separator=" ", strip=True)
             if not order_name:
-                m = re.search(r"#([A-Z0-9][\w\-]{1,30})", text, re.IGNORECASE)
+                # IN-02: require an 'order' anchor + '#'/':' separator (mirrors the
+                # Tier-1 PR4-C1 tightening). The old bare '#token' pattern grabbed
+                # the first '#'-prefixed token in ANY <p>/<td> — '#1A rated!',
+                # social '#ShipDay' tags — and that junk value became order_name
+                # and could reach the POSTed parcelapp description. \b blocks
+                # 'ordered ...' matches; the optional second '#' accepts both
+                # 'Order #1234' and 'Order: #1234'.
+                m = re.search(r"order\b\s*[#:]\s*#?([A-Z0-9][\w\-]{1,30})", text, re.IGNORECASE)
                 if m:
                     order_name = f"#{m.group(1).upper()}"
             if not carrier_name:
@@ -555,33 +579,46 @@ class EmailParser:
             "carrier_regex": carrier is not None,
         }
 
-        if not tracking:
+        def _href_fallback_result() -> ParseResult | None:
+            """Try the href fallback; None when no valid TN sits in a link.
+
+            IN-01: shared by the no-label AND labelled-but-invalid branches — the
+            latter previously returned tracking_invalid without ever consulting the
+            hrefs, so an email whose 'Tracking number:' label captured a regional
+            carrier code missed a valid carrier TN sitting in its tracking link.
+            """
             href_tracking = _extract_tracking_from_hrefs(soup)
-            if href_tracking and _looks_like_tracking(href_tracking):
-                _LOGGER.debug(
-                    "Tier 1 href fallback matched TN=%s for message %s",
-                    href_tracking,
-                    message_id,
-                )
-                return ParseResult(
-                    shipment=ShipmentData(
-                        tracking_number=href_tracking,
-                        carrier_name=(
-                            next(
-                                (g for g in (carrier.group(1), carrier.group(2)) if g),
-                                "Unknown",
-                            ).strip()
-                            if carrier
-                            else _infer_carrier(href_tracking)
-                        ),
-                        order_name=f"#{order.group(1).upper()}" if order else "",
-                        message_id=message_id,
-                        email_date=email_date,
+            if not (href_tracking and _looks_like_tracking(href_tracking)):
+                return None
+            _LOGGER.debug(
+                "Tier 1 href fallback matched TN=%s for message %s",
+                href_tracking,
+                message_id,
+            )
+            return ParseResult(
+                shipment=ShipmentData(
+                    tracking_number=href_tracking,
+                    carrier_name=(
+                        next(
+                            (g for g in (carrier.group(1), carrier.group(2)) if g),
+                            "Unknown",
+                        ).strip()
+                        if carrier
+                        else _infer_carrier(href_tracking)
                     ),
-                    skip_reason=None,
-                    strategy_used=STRATEGY_REGEX,
-                    keyword_hits=hits,
-                )
+                    order_name=f"#{order.group(1).upper()}" if order else "",
+                    message_id=message_id,
+                    email_date=email_date,
+                ),
+                skip_reason=None,
+                strategy_used=STRATEGY_REGEX,
+                keyword_hits=hits,
+            )
+
+        if not tracking:
+            href_result = _href_fallback_result()
+            if href_result is not None:
+                return href_result
             return ParseResult(
                 shipment=None,
                 skip_reason="no_tracking_label",
@@ -591,6 +628,11 @@ class EmailParser:
 
         raw_tracking = tracking.group(1).upper()
         if not _looks_like_tracking(raw_tracking):
+            # IN-01: consistent recall with the no-label branch above — consult the
+            # href fallback before declaring the labelled token invalid.
+            href_result = _href_fallback_result()
+            if href_result is not None:
+                return href_result
             return ParseResult(
                 shipment=None,
                 skip_reason="tracking_invalid",

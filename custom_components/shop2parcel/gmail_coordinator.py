@@ -60,6 +60,26 @@ from .coordinator import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _extract_gmail_html(payload: dict) -> str | None:
+    """Executor-side body extraction: HTML part, else escaped text/plain wrap.
+
+    WR-06: extract_html_body / extract_text_body walk the MIME tree and
+    base64-decode potentially multi-hundred-KB bodies — CPU-bound work batched
+    into ONE executor job per message (with the <pre> wrap) instead of running
+    on the HA event loop.
+
+    PR4-I1: the text fallback escapes angle brackets/ampersands so plain-text
+    bodies with raw '<', '>', '&' don't produce malformed HTML for
+    BeautifulSoup; <pre> preserves newlines for downstream regex/text scanning.
+    """
+    html = extract_html_body(payload)
+    if not html:
+        text_body = extract_text_body(payload)
+        if text_body:
+            html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
+    return html
+
+
 class GmailCoordinator(Shop2ParcelCoordinator):
     """Coordinator for Gmail-connected Shop2Parcel entries."""
 
@@ -301,15 +321,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 continue
 
             payload = msg.get("payload", {})
-            html = extract_html_body(payload)
-            if not html:
-                text_body = extract_text_body(payload)
-                if text_body:
-                    # PR4-I1: escape angle brackets/ampersands so plain-text
-                    # bodies with raw '<', '>', '&' don't produce malformed
-                    # HTML for BeautifulSoup. Use <pre> to preserve newlines
-                    # for downstream regex/text scanning.
-                    html = f"<html><body><pre>{_html_stdlib.escape(text_body)}</pre></body></html>"
+            # WR-06: MIME walk + base64 decode run in the executor (one job per
+            # message), not on the event loop.
+            html = await self.hass.async_add_executor_job(_extract_gmail_html, payload)
             if not html:
                 # Phase 7 (D-02): no_html_body is set by the COORDINATOR — the parser
                 # never sees this case because we don't call parser.parse on empty HTML.
@@ -342,8 +356,14 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 continue
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
+            # WR-06: parser.parse performs up to six BeautifulSoup/lxml passes per
+            # email — CPU-bound work that must not block the HA event loop (HA's
+            # asyncio guidelines require offloading; a blocked loop stalls every
+            # other integration and the UI). One executor job per message.
             try:
-                result: ParseResult = parser.parse(html, msg_id, email_date)
+                result: ParseResult = await self.hass.async_add_executor_job(
+                    parser.parse, html, msg_id, email_date
+                )
             except Exception as parse_err:  # noqa: BLE001
                 _LOGGER.error(
                     "Email parser raised an unexpected error for message %s: %s",
@@ -436,79 +456,87 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     and not debug_mode
                     and self._extractor is not None
                 ):
-                    # Per-poll cap check (Design §4 / T-27-03-03 DoS guard): if we have
-                    # already run MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions this
-                    # poll, skip WITHOUT caching the ID so it is retried next poll (Pitfall 6).
-                    if (
-                        self._stage2_fallback_extractions_this_poll
-                        >= MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL
-                    ):
-                        _LOGGER.debug(
-                            "Gmail message %s: fallback cap reached (%d/%d) — skipping this poll",
-                            msg_id,
-                            self._stage2_fallback_extractions_this_poll,
-                            MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
-                        )
-                        continue  # do NOT cache (retry next poll)
+                    # IN-07: reuse a cap-deferred prefetched extraction BEFORE the cap
+                    # check or any Ollama call. A cache hit is not an extraction — it
+                    # consumes no cap slot and re-records no LLM counters (the original
+                    # run already counted the attempt and latency); previously the
+                    # worker's cap-skip discarded the prefetched result and this
+                    # gatekeeper ran a second full Ollama pass on the same body.
+                    result_fb = self._fallback_prefetch_cache.pop(msg_id, None)
+                    if result_fb is None:
+                        # Per-poll cap check (Design §4 / T-27-03-03 DoS guard): if we have
+                        # already run MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions this
+                        # poll, skip WITHOUT caching the ID so it is retried next poll (Pitfall 6).
+                        if (
+                            self._stage2_fallback_extractions_this_poll
+                            >= MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL
+                        ):
+                            _LOGGER.debug(
+                                "Gmail message %s: fallback cap reached (%d/%d) — skipping this poll",
+                                msg_id,
+                                self._stage2_fallback_extractions_this_poll,
+                                MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
+                            )
+                            continue  # do NOT cache (retry next poll)
 
-                    # Run Ollama fallback extraction (Design §3 / Pattern 3 / T-27-03-01).
-                    # Count the attempt regardless of outcome (increment before try so cap
-                    # applies even if the extractor raises).
-                    self._stage2_fallback_extractions_this_poll += 1
-                    # Finding #4: count the LLM attempt before the call (parity with the
-                    # worker) so the emails_sent_to_llm diagnostic includes fallback runs.
-                    self._diagnostics.stage2_llm_attempts_total += 1
-                    try:
-                        result_fb = await self._extractor.async_extract(html, None)
-                    except (OllamaTransientError, OllamaSchemaError) as fb_err:
-                        # Finding #2: route fallback failures through the shared failure
-                        # surface (the worker path's _record_stage2_failure equivalent) so a
-                        # sustained Ollama outage increments the consecutive-failure streak
-                        # and raises the persistent notification — instead of being swallowed
-                        # at DEBUG. Finding #450: only the FIRST fallback failure of a poll
-                        # escalates (bumps the streak / may notify); the rest are recorded
-                        # without inflating the shared streak ~10x per poll on a no-match
-                        # backlog. Still do NOT cache the ID: it is retried next poll.
-                        escalate = not self._stage2_fallback_failed_this_poll
-                        self._stage2_fallback_failed_this_poll = True
-                        self._surface_stage2_failure(
-                            meta=email_meta,
-                            message_id=f"gmail:{msg_id}",
-                            normalized_tn="",
-                            err=fb_err,
-                            escalate=escalate,
-                        )
-                        continue  # do NOT cache (retry next poll)
-                    except Exception as fb_err:  # noqa: BLE001
-                        # Finding #505: an unexpected (non-Ollama) exception must NOT abort the
-                        # whole poll mid-iteration (which would skip every later message and
-                        # drop the per-poll save). Surface it like a Stage-2 failure and move
-                        # on; the message stays un-cached, so it is retried next poll. Finding
-                        # #450: escalate at most once per poll (shared latch).
-                        _LOGGER.error(
-                            "Gmail message %s: unexpected error during Ollama fallback "
-                            "extraction — skipping this message: %s",
-                            msg_id,
-                            fb_err,
-                            exc_info=True,
-                        )
-                        escalate = not self._stage2_fallback_failed_this_poll
-                        self._stage2_fallback_failed_this_poll = True
-                        self._surface_stage2_failure(
-                            meta=email_meta,
-                            message_id=f"gmail:{msg_id}",
-                            normalized_tn="",
-                            err=fb_err,
-                            escalate=escalate,
-                        )
-                        continue  # do NOT cache (retry next poll)
+                        # Run Ollama fallback extraction (Design §3 / Pattern 3 / T-27-03-01).
+                        # Count the attempt regardless of outcome (increment before try so cap
+                        # applies even if the extractor raises).
+                        self._stage2_fallback_extractions_this_poll += 1
+                        # Finding #4: count the LLM attempt before the call (parity with the
+                        # worker) so the emails_sent_to_llm diagnostic includes fallback runs.
+                        self._diagnostics.stage2_llm_attempts_total += 1
+                        try:
+                            result_fb = await self._extractor.async_extract(html, None)
+                        except (OllamaTransientError, OllamaSchemaError) as fb_err:
+                            # Finding #2: route fallback failures through the shared failure
+                            # surface (the worker path's _record_stage2_failure equivalent) so a
+                            # sustained Ollama outage increments the consecutive-failure streak
+                            # and raises the persistent notification — instead of being swallowed
+                            # at DEBUG. Finding #450: only the FIRST fallback failure of a poll
+                            # escalates (bumps the streak / may notify); the rest are recorded
+                            # without inflating the shared streak ~10x per poll on a no-match
+                            # backlog. Still do NOT cache the ID: it is retried next poll.
+                            escalate = not self._stage2_fallback_failed_this_poll
+                            self._stage2_fallback_failed_this_poll = True
+                            self._surface_stage2_failure(
+                                meta=email_meta,
+                                message_id=f"gmail:{msg_id}",
+                                normalized_tn="",
+                                err=fb_err,
+                                escalate=escalate,
+                            )
+                            continue  # do NOT cache (retry next poll)
+                        except Exception as fb_err:  # noqa: BLE001
+                            # Finding #505: an unexpected (non-Ollama) exception must NOT abort the
+                            # whole poll mid-iteration (which would skip every later message and
+                            # drop the per-poll save). Surface it like a Stage-2 failure and move
+                            # on; the message stays un-cached, so it is retried next poll. Finding
+                            # #450: escalate at most once per poll (shared latch).
+                            _LOGGER.error(
+                                "Gmail message %s: unexpected error during Ollama fallback "
+                                "extraction — skipping this message: %s",
+                                msg_id,
+                                fb_err,
+                                exc_info=True,
+                            )
+                            escalate = not self._stage2_fallback_failed_this_poll
+                            self._stage2_fallback_failed_this_poll = True
+                            self._surface_stage2_failure(
+                                meta=email_meta,
+                                message_id=f"gmail:{msg_id}",
+                                normalized_tn="",
+                                err=fb_err,
+                                escalate=escalate,
+                            )
+                            continue  # do NOT cache (retry next poll)
 
-                    # Finding #4: record the successful extraction's latency (parity with the
-                    # worker) so the LLM-call / parse-success-rate diagnostics stay accurate.
-                    self._diagnostics.record_llm_call(
-                        result_fb.latency_ms,
-                        fence_retry=result_fb.passes_used == 2,
-                    )
+                        # Finding #4: record the successful extraction's latency (parity with the
+                        # worker) so the LLM-call / parse-success-rate diagnostics stay accurate.
+                        self._diagnostics.record_llm_call(
+                            result_fb.latency_ms,
+                            fence_retry=result_fb.passes_used == 2,
+                        )
 
                     # Extract + validate the tracking number from the Ollama result.
                     # Phase 28 Plan 04 (R1/R2/R3): strict carrier-format gate via
@@ -578,6 +606,23 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                             raw_msg_id=msg_id,
                         )
                         if enqueued:
+                            # IN-07: fallback-found shipments are real matches — count them
+                            # in the matched/found diagnostics like the Stage-1 loop does
+                            # (post-dedup, pre-POST), so LLM-found parcels are visible in
+                            # emails_matched / tracking_numbers_found / last_poll_found.
+                            d.emails_matched_total += 1
+                            d.last_poll_emails_matched += 1
+                            d.tracking_numbers_found_total += 1
+                            d.last_poll_found.append(
+                                {
+                                    "tracking_number": fb_clean,
+                                    "carrier": fb_shipment.carrier_name,
+                                    "order_name": fb_shipment.order_name,
+                                    "message_id": msg_id,
+                                    "candidates": result.candidate_tokens,
+                                    **email_meta,
+                                }
+                            )
                             # Round-4 fix #512: add to the in-memory in-flight gate so the
                             # gatekeeper does NOT re-run Ollama on this message every poll
                             # until the worker POSTs. The worker releases it on a defer; it
@@ -814,9 +859,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     msg_pending_retry = True
                     continue
                 except ParcelAppAlreadyAddedError:
-                    self._submitted_tracking_numbers[normalized] = None
-                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                        self._submitted_tracking_numbers.popitem(last=False)
+                    self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     self._emit_scan_event(
@@ -834,10 +877,9 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         msg_id,
                         err,
                     )
-                    # Record normalized tracking number to suppress infinite retries.
-                    self._submitted_tracking_numbers[normalized] = None
-                    if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                        self._submitted_tracking_numbers.popitem(last=False)
+                    # Record normalized tracking number to suppress infinite retries
+                    # (IN-01: shared dedup-write helper).
+                    self._record_submitted_tn(normalized)
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
@@ -873,9 +915,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     continue
 
                 # 6. Success — record tracking number dedup, save immediately (D-10/D-03).
-                self._submitted_tracking_numbers[normalized] = None
-                if len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-                    self._submitted_tracking_numbers.popitem(last=False)
+                self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
                 current_data[storage_key] = shipment
                 self._pending_shipments = current_data

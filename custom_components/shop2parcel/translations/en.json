@@ -78,7 +78,7 @@
       "already_configured": "Shop2Parcel is already configured for this Gmail account.",
       "already_configured_imap": "An account with this username and host is already configured.",
       "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
-      "wrong_account": "Wrong account: please authenticate with the original Gmail account.",
+      "wrong_account": "Wrong account: please re-authenticate with the originally configured account. To switch accounts, remove this entry and add a new one.",
       "oauth_error": "[%key:common::config_flow::abort::oauth2_error%]",
       "oauth_failed": "[%key:common::config_flow::abort::oauth2_failed%]",
       "oauth_timeout": "[%key:common::config_flow::abort::oauth2_timeout%]",
@@ -96,7 +96,7 @@
       },
       "settings": {
         "title": "Shop2Parcel Settings",
-        "description": "Configure polling and Ollama AI extraction. Always-extracted fields: {locked_fields}.",
+        "description": "Configure polling and Ollama AI extraction. Stage-2 AI extraction is currently {stage2_status}. Always-extracted fields: {locked_fields}.",
         "data": {
           "poll_interval": "Poll Interval (minutes)",
           "gmail_query": "Gmail Search Query",

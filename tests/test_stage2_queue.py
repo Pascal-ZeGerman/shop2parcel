@@ -196,6 +196,53 @@ async def test_queue_maxsize_clamped(hass, mock_stage2_config_entry):
         assert coord3._stage2_queue.maxsize == DEFAULT_QUEUE_MAXLEN
 
 
+async def test_start_stage2_survives_corrupt_options(hass, mock_stage2_config_entry, caplog):
+    """IN-05 (coordinators): corrupt queue_maxlen / custom_fields options must not
+    abort async_start_stage2 (entry setup) — default gracefully with a WARNING."""
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        hass.config_entries.async_update_entry(
+            mock_stage2_config_entry,
+            options={
+                CONF_OLLAMA_URL: "http://localhost:11434",
+                CONF_QUEUE_MAXLEN: "not-a-number",
+                "custom_fields": [
+                    {"description": "missing name key"},
+                    "not-a-dict",
+                    {"name": "valid_field", "description": "ok"},
+                ],
+            },
+        )
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        with caplog.at_level(logging.WARNING):
+            await coord.async_start_stage2()
+
+        # Queue constructed with the default maxlen despite the corrupt option.
+        assert coord._stage2_queue is not None
+        assert coord._stage2_queue.maxsize == DEFAULT_QUEUE_MAXLEN
+        # Extractor constructed; the valid custom field survived, junk was skipped.
+        assert coord._extractor is not None
+        field_names = [name for name, _desc in coord._extractor._fields]
+        assert "valid_field" in field_names
+        assert "queue_maxlen option is not a valid integer" in caplog.text
+        assert "malformed custom field entry" in caplog.text
+
+        await coord.async_stop_stage2()
+
+
 # ---------------------------------------------------------------------------
 # Test 4: async_stop_stage2 clears all state (QUE-01 lifecycle)
 # ---------------------------------------------------------------------------
@@ -233,12 +280,32 @@ async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
         )
         coord._stage2_queue.put_nowait(job)
         coord._stage2_enqueued_keys.add("1Z999AA10123456784")
+        coord._diagnostics.stage2_enabled = True
         assert not coord._stage2_queue.empty()
         assert len(coord._stage2_enqueued_keys) == 1
 
         await coord.async_stop_stage2()
-        assert coord._stage2_queue.empty() is True
+        # IN-03: stop nulls the queue (no live workerless queue), clears the
+        # in-flight keys, resets stage2_enabled, and email_processing_active
+        # can no longer read True from a stale queue depth.
+        assert coord._stage2_queue is None
         assert len(coord._stage2_enqueued_keys) == 0
+        assert coord._diagnostics.stage2_enabled is False
+        assert coord.stage2_queue_depth == 0
+        assert coord.email_processing_active is False
+
+        # IN-03: an enqueue racing the teardown is dropped gracefully (no assert crash).
+        assert (
+            coord._enqueue_stage2(
+                "1Z999AA10123456785",
+                "key-after-stop",
+                shipment,
+                "<html/>",
+                message_id="late-msg",
+                meta={"subject": "late", "from": "t@example.com"},
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +542,16 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
         await coord._async_load_store()
         coord._diagnostics.stage2_enabled = True
         await coord.async_start_stage2()
+
+        # WR-06: the poll now yields to the event loop at its executor awaits, which
+        # would let the live worker drain the pre-filled queue before the enqueue —
+        # cancel the worker so the queue STAYS full and QueueFull is actually hit
+        # (the drop-newest path under test). With `await put` instead of put_nowait
+        # the poll would now hang here with no worker, so the assertion below still
+        # proves the put_nowait contract.
+        assert coord._stage2_worker_task is not None
+        coord._stage2_worker_task.cancel()
+        await asyncio.sleep(0)
 
         # Pre-fill queue to maxsize=1 with a filler job (different TN to avoid dedup skip).
         filler_shipment = _make_shipment("filler_msg")
