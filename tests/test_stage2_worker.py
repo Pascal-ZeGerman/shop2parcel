@@ -4213,6 +4213,75 @@ async def test_gmail_poll_drains_pending_posts_without_new_jobs(hass, mock_stage
     assert "deferred_key" in data, "drained shipment must survive the poll-end merge (CR-01)"
 
 
+async def test_worker_auth_failure_not_counted_as_ollama_failure(
+    hass, mock_stage2_config_entry
+):
+    """WR-05: a parcelapp auth error from the worker POST path must NOT feed the
+    Ollama consecutive-failure streak nor fire the 'check Ollama' notification —
+    it is handled distinctly (log + key discard) per the D-05 contract."""
+    from homeassistant.components import persistent_notification
+
+    from custom_components.shop2parcel.api.exceptions import ParcelAppAuthError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(persistent_notification, "async_create") as mock_create,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        tn = "1Z999AA10123456784"
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(
+                locked={"tracking_number": tn}, custom={}, passes_used=1, latency_ms=10.0
+            )
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAuthError("401")
+        )
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+        await coord.async_start_stage2()
+
+        job = Stage2Job(
+            storage_key=tn,
+            normalized_tn=tn,
+            shipment=_make_shipment(),
+            html_body="<html/>",
+            message_id="test-msg-id",
+            meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+        )
+        # Three auth failures — enough to trip the old (buggy) Ollama-streak
+        # notification threshold if they were miscounted.
+        for _ in range(3):
+            coord._stage2_queue.put_nowait(job)
+            await asyncio.sleep(0)
+            await hass.async_block_till_done()
+            coord._stage2_enqueued_keys.discard(tn)
+
+        assert coord._stage2_consecutive_failures == 0, (
+            "parcelapp auth errors must not inflate the Ollama failure streak (D-05)"
+        )
+        assert mock_create.call_count == 0, (
+            "the 'Stage-2 Failing / check Ollama' notification must not fire for auth errors"
+        )
+        assert tn not in coord._stage2_enqueued_keys
+        # Worker must survive the auth error and keep running.
+        assert not coord._stage2_worker_task.done()
+
+        await coord.async_stop_stage2()
+
+
 async def test_imap_poll_drains_pending_posts_without_new_jobs(hass, mock_imap_config_entry):
     """WR-04 (IMAP): same guarantee on the IMAP poll path."""
     import time as stdlib_time

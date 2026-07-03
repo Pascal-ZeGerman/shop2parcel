@@ -1255,6 +1255,23 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
                     self._release_inflight(job)  # re-fetch on next start (not lost)
                     raise  # propagate — shuts down the worker
+                except ConfigEntryAuthFailed as err:
+                    # WR-05: parcelapp auth failure — NOT an Ollama failure. The D-05
+                    # contract says _record_stage2_failure tracks Ollama failures only;
+                    # routing auth errors through the generic handler inflated the
+                    # streak and fired the misleading "check Ollama" notification for
+                    # a parcelapp API-key problem. Log the real cause, discard the key
+                    # + release the message so the job re-runs after reauth; the next
+                    # inline poll raises ConfigEntryAuthFailed from poll context and
+                    # triggers HA's reauth flow (T-19-08).
+                    _LOGGER.error(
+                        "Stage-2 worker: parcelapp auth error for %s — check the "
+                        "ParcelApp API key (reauth is requested on the next poll): %s",
+                        normalized_tn,
+                        err,
+                    )
+                    self._stage2_enqueued_keys.discard(normalized_tn)
+                    self._release_inflight(job)  # re-fetch next poll (not lost)
                 except Exception as err:  # noqa: BLE001
                     # FAIL-01/02/04: surface the failure loudly via the centralized helper (D-01..D-04).
                     self._record_stage2_failure(job, err)
