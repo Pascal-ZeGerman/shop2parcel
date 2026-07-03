@@ -626,6 +626,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._stage2_msg_failures.popitem(last=False)
         return False
 
+    def _debug_mode_active(self) -> bool:
+        """True when this entry is in debug/dry-run mode.
+
+        CR-02: single helper for the DBG-03 "zero store writes in debug mode"
+        contract, so timer-driven persist paths (_maybe_reset_used_today,
+        _on_quota_expiry, async_stop_stage2) apply the same gate the poll paths
+        already honour. Safe on bare-coordinator tests: returns False when no
+        config_entry is attached.
+        """
+        return self.config_entry is not None and bool(
+            self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        )
+
     def _maybe_reset_used_today(self) -> None:
         """Reset used_today to 0 on UTC date rollover.
 
@@ -642,7 +655,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # not restore yesterday's count. Fires only on an actual rollover (at most
             # once per UTC day); _persist_state is await-free so it is safe here even
             # when reached via the synchronous used_today property read path.
-            self._persist_state()
+            # CR-02: skipped in debug mode (DBG-03 zero-store-writes) — previously this
+            # timer-driven persist snapshotted the empty debug-mode _pending_shipments
+            # and wiped persisted_shipments from disk at the first UTC midnight.
+            if not self._debug_mode_active():
+                self._persist_state()
 
     def _record_forward(self) -> None:
         """Record one genuine 2xx POST success to ParcelApp.
@@ -941,7 +958,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._quota_expiry_unsub = None
         if self._quota_exhausted_until is not None:
             self._quota_exhausted_until = None
-            self._persist_state()
+            # CR-02: honour DBG-03 (zero store writes in debug mode) — the in-memory
+            # clear still happens so quota_is_exhausted reads False immediately.
+            if not self._debug_mode_active():
+                self._persist_state()
         self.async_update_listeners()
 
     def _schedule_midnight_refresh(self) -> None:
@@ -1094,7 +1114,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # CR-02: preserve maxsize so backpressure invariant holds after a reload.
         self._stage2_queue = asyncio.Queue(maxsize=prev_maxsize)
         self._stage2_enqueued_keys.clear()
-        if self._store_loaded:
+        # CR-02: gate on debug mode too (DBG-03 zero-store-writes) — this save fires
+        # on every unload path, including a failed-first-refresh teardown.
+        if self._store_loaded and not self._debug_mode_active():
             await self._async_save_store()
         _LOGGER.debug("Stage-2 queue stopped and cleared")
 
@@ -1764,6 +1786,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     err,
                 )
         self._restored_shipments = restored
+        # CR-02: seed _pending_shipments from the restored shipments so any store save
+        # that fires before the first successful non-debug poll (async_stop_stage2 on a
+        # failed first refresh, _maybe_reset_used_today rollover, _on_quota_expiry) never
+        # snapshots an empty dict and wipes persisted_shipments from disk.
+        self._pending_shipments = dict(restored)
         # Phase 23 D-03 / LD-05: hydrate pending_posts — post-deferred merged shipments
         # that survived an HA restart while ParcelApp quota was exhausted.
         # Uses stored.get("pending_posts", {}) so v3 stores without this key load cleanly
