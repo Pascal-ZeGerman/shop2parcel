@@ -1292,3 +1292,22 @@ async def test_quota_expiry_persist_before_first_poll_preserves_restored_shipmen
     assert "MSG_RESTORED" in snapshot["persisted_shipments"], (
         "quota-expiry persist before the first poll must not wipe restored shipments"
     )
+
+
+async def test_load_store_renormalizes_submitted_tracking_numbers(hass, mock_config_entry):
+    """WR-01: entries persisted under the old strip().upper() scheme (internal
+    separators retained) must be re-normalized to the canonical separator-free
+    form on load so they stay effective as dedup keys."""
+    mock_config_entry.add_to_hass(hass)
+    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": ["1Z999 AA10 1234 56784", "TN-WITH-DASH"],
+                "quota_exhausted_until": None,
+            }
+        )
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+    assert "TNWITHDASH" in coord._submitted_tracking_numbers
+    assert "1Z999 AA10 1234 56784" not in coord._submitted_tracking_numbers

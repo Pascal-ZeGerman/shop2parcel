@@ -226,7 +226,9 @@ async def test_dedup_survives_restart(hass, mock_config_entry):
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
-        assert list(coord._submitted_tracking_numbers.keys()) == ["TN-A", "TN-B"]
+        # WR-01: stored keys are re-normalized to the canonical separator-free
+        # form on load (insertion order preserved).
+        assert list(coord._submitted_tracking_numbers.keys()) == ["TNA", "TNB"]
         assert isinstance(coord._submitted_tracking_numbers, OrderedDict)
         assert coord._quota_exhausted_until is None
 

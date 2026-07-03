@@ -71,6 +71,7 @@ from .const import (
     STAGE2_MSG_QUARANTINE_THRESHOLD,
     STAGE2_NOTIFY_COOLDOWN_S,
     STAGE2_NOTIFY_THRESHOLD,
+    normalize_tracking_number,
     stage2_cap_notification_id,
     stage2_failing_notification_id,
 )
@@ -1729,8 +1730,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 type(stored_list).__name__,
             )
             stored_list = []
+        # WR-01: re-normalize stored keys through the (now separator-stripping)
+        # canonical form so entries written by older versions under the
+        # strip().upper() scheme stay effective as dedup keys.
         self._submitted_tracking_numbers = OrderedDict(
-            (tn, None) for tn in stored_list if isinstance(tn, str)
+            (normalize_tracking_number(tn), None) for tn in stored_list if isinstance(tn, str)
         )
         qe = stored.get("quota_exhausted_until")
         self._quota_exhausted_until = qe if isinstance(qe, int) else None
