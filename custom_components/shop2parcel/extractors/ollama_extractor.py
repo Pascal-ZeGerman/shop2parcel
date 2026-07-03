@@ -334,7 +334,12 @@ class OllamaExtractor:
             # the cap is a no-op there, but defensive uniformity is cheaper to
             # read than per-branch policy.
             safe_name = name[:64] if isinstance(name, str) else name
-            if not _FIELD_NAME_RE.fullmatch(name):
+            # IN-05: the isinstance check must run BEFORE fullmatch — re raises
+            # TypeError on a non-str name (corrupt CONF_CUSTOM_FIELDS entry, e.g.
+            # {"name": 3}) before the drop-with-WARNING branch could ever fire,
+            # aborting async_start_stage2 / entry setup instead of dropping the
+            # bad field gracefully.
+            if not isinstance(name, str) or not _FIELD_NAME_RE.fullmatch(name):
                 _LOGGER.warning(
                     "Custom Stage-2 field %r has invalid name "
                     "(must match ^[a-z][a-z0-9_]{0,31}$); dropped.",

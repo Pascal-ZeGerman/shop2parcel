@@ -510,6 +510,26 @@ def test_invalid_field_name_warning_escapes_control_chars(mock_client, caplog):
     assert "x" * 64 in overlong_msg
 
 
+def test_non_str_field_name_dropped_with_warning(mock_client, caplog):
+    """IN-05: a non-str field name (corrupt CONF_CUSTOM_FIELDS entry, e.g.
+    {'name': 3}) must be dropped with a WARNING — not raise TypeError from
+    _FIELD_NAME_RE.fullmatch and abort async_start_stage2 / entry setup."""
+    with caplog.at_level(logging.WARNING):
+        extractor = OllamaExtractor(
+            client=mock_client,
+            field_list=[(3, "desc"), (None, None), ("valid_field", "desc")],
+        )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert all("invalid name" in r.getMessage() for r in warnings)
+
+    field_names = [name for name, _desc in extractor._fields]
+    assert 3 not in field_names
+    assert None not in field_names
+    assert "valid_field" in field_names
+
+
 def test_custom_field_collision_dropped(mock_client, caplog):
     """A custom field colliding with a locked field is dropped with WARNING (D-07)."""
     with caplog.at_level(logging.WARNING):
