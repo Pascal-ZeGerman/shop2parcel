@@ -579,6 +579,16 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             self._arm_quota_expiry_timer()  # finding 3: cancel the now-obsolete expiry timer
             await self._async_save_store()
 
+        # CR-01: re-merge onto the LIVE self.data before trim/save/return. The Stage-2
+        # worker (and the pending-posts drain) publish merged shipments via
+        # async_set_updated_data while this poll is awaiting; returning the stale
+        # start-of-poll snapshot would overwrite self.data without those entries and
+        # the poll-end save would drop them from the store — permanently, because the
+        # tracking-number dedup gate prevents them from ever being re-added.
+        # Merge direction: keys this poll wrote win on collision (the poll's writes
+        # are newest for its own keys); worker-published keys survive via self.data.
+        current_data = {**(self.data or {}), **current_data}
+
         if not debug_mode:
             # FIFO trim: current_data is a plain dict (not OrderedDict), so
             # popitem(last=False) is not available. next(iter(...)) yields the
