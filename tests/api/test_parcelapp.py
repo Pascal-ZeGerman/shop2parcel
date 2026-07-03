@@ -461,6 +461,46 @@ async def test_get_deliveries_transient_error(client):
             await client.async_get_deliveries()
 
 
+async def test_get_deliveries_2xx_non_json_body_maps_to_transient(client):
+    """WR-06: a 2xx response with a non-JSON body must raise ParcelAppTransientError
+    instead of leaking a raw ValueError out of the documented taxonomy."""
+    with aioresponses() as mock:
+        mock.get(
+            VIEW_DELIVERIES_URL + "?filter_mode=recent",
+            body="<html>proxy error page</html>",
+            status=200,
+            content_type="text/html",
+        )
+        with pytest.raises(ParcelAppTransientError, match="non-JSON"):
+            await client.async_get_deliveries()
+
+
+async def test_get_deliveries_2xx_non_dict_body_maps_to_transient(client):
+    """WR-06: a 2xx JSON body that is not a dict (e.g. a bare array) must raise
+    ParcelAppTransientError instead of leaking AttributeError."""
+    with aioresponses() as mock:
+        mock.get(
+            VIEW_DELIVERIES_URL + "?filter_mode=recent",
+            payload=["not", "a", "dict"],
+            status=200,
+        )
+        with pytest.raises(ParcelAppTransientError, match="unexpected JSON shape"):
+            await client.async_get_deliveries()
+
+
+async def test_get_deliveries_2xx_non_list_deliveries_maps_to_transient(client):
+    """WR-06: a dict body whose 'deliveries' value is not a list must raise
+    ParcelAppTransientError."""
+    with aioresponses() as mock:
+        mock.get(
+            VIEW_DELIVERIES_URL + "?filter_mode=recent",
+            payload={"success": True, "deliveries": "oops"},
+            status=200,
+        )
+        with pytest.raises(ParcelAppTransientError, match="unexpected JSON shape"):
+            await client.async_get_deliveries()
+
+
 async def test_get_deliveries_uses_filter_mode_param(client):
     """GET with filter_mode=active → URL includes filter_mode=active."""
     with aioresponses() as mock:

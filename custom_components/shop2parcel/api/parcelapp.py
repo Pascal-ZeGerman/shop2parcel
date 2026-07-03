@@ -220,9 +220,23 @@ class ParcelAppClient:
                     raise ParcelAppTransientError(f"Server error: HTTP {resp.status}")
                 if 400 <= resp.status < 500:
                     raise ParcelAppTransientError(f"Unexpected client error: HTTP {resp.status}")
-                resp.raise_for_status()
-                data = await resp.json(content_type=None)
-                return data.get("deliveries", [])
+                # WR-06: the raise_for_status() that used to sit here was dead code —
+                # every >= 400 status is already converted to an exception above.
+                # Guard the 2xx body parse + shape so a non-JSON or non-dict body maps
+                # into the documented taxonomy instead of escaping as a raw
+                # ValueError/AttributeError coordinator error.
+                try:
+                    data = await resp.json(content_type=None)
+                except (ValueError, aiohttp.ContentTypeError) as err:
+                    raise ParcelAppTransientError(
+                        "View-deliveries returned non-JSON body"
+                    ) from err
+                deliveries = data.get("deliveries", []) if isinstance(data, dict) else None
+                if not isinstance(deliveries, list):
+                    raise ParcelAppTransientError(
+                        "View-deliveries returned unexpected JSON shape"
+                    )
+                return deliveries
         except (TimeoutError, aiohttp.ClientError) as err:
             # WR-04: catch the aiohttp base class (see async_add_delivery note).
             raise ParcelAppTransientError(f"Network error: {err}") from err
