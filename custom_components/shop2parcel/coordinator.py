@@ -473,6 +473,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # from every poll's re-parse, so blocking at the enqueue seam is what actually
         # stops their retry loop. In-memory only — a restart clears it (self-healing).
         self._stage2_quarantined_tns: OrderedDict[str, None] = OrderedDict()
+        # ollama-fallback-retry-loop: per-message consecutive OllamaSchemaError count for the
+        # INLINE Gmail fallback gatekeeper, keyed by raw Gmail message ID. The worker path uses
+        # _stage2_msg_failures + _stage2_quarantined_tns (tn-keyed) but the inline gatekeeper
+        # fails BEFORE any tracking number exists, so it needs its own msg_id-keyed counter and
+        # a terminal action that does not depend on a tn (it marks the message seen). Only
+        # OllamaSchemaError (deterministic — same body always fails) is counted here; a
+        # OllamaTransientError (network/5xx) is never counted, so a transient outage keeps
+        # retrying and never marks a legitimate shipment email seen (finding #594 constraint).
+        # In-memory only (session-scoped); a restart clears it and re-evaluates the message.
+        # FIFO-bounded so a long run of distinct schema-failing messages cannot grow it unbounded.
+        self._stage2_inline_schema_failures: OrderedDict[str, int] = OrderedDict()
         # IN-07: session-scoped cache of fallback-prefetched Stage2Results whose job
         # the worker cap-skipped, keyed by raw Gmail message ID. The gatekeeper pops
         # this cache before calling the extractor, so a cap-deferred fallback job is
@@ -699,6 +710,41 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_msg_failures.move_to_end(key)
         while len(self._stage2_msg_failures) > SEEN_MESSAGE_IDS_MAXLEN:
             self._stage2_msg_failures.popitem(last=False)
+        return False
+
+    def _register_inline_schema_failure(self, msg_id: str) -> bool:
+        """Track consecutive inline-fallback OllamaSchemaError failures per message.
+
+        ollama-fallback-retry-loop: the inline Gmail fallback gatekeeper has no Stage2Job
+        and no tracking number at failure time (extraction itself failed), so it cannot use
+        the worker path's tn-keyed quarantine (_register_stage2_msg_failure /
+        _stage2_quarantined_tns). This helper is the inline-path equivalent: it increments a
+        msg_id-keyed counter and returns True once the count reaches
+        STAGE2_MSG_QUARANTINE_THRESHOLD, at which point the caller marks the message SEEN
+        (terminal) so the poll gate stops re-fetching it — breaking the infinite per-poll
+        re-inference loop observed on a deterministically-unparseable email (a USPS Informed
+        Delivery digest re-failed 93x over ~15h).
+
+        ONLY OllamaSchemaError is routed here. A deterministic schema failure repeats with
+        the same body every poll, so N repeats is strong evidence the model cannot parse it.
+        OllamaTransientError (network/5xx) is deliberately NOT counted by the caller, so a
+        transient outage keeps retrying and never marks a legitimate shipment email seen
+        (findings #1/#594: optimistic seen-marking of transiently-failing messages loses
+        deferred jobs).
+
+        The counter is in-memory only (session-scoped): a restart clears it and re-evaluates
+        the message, so a genuinely transient blip that happened to surface as a schema error
+        self-heals. FIFO-bounded at SEEN_MESSAGE_IDS_MAXLEN. Returns False (keep retrying) for
+        messages still under the threshold.
+        """
+        count = self._stage2_inline_schema_failures.get(msg_id, 0) + 1
+        if count >= STAGE2_MSG_QUARANTINE_THRESHOLD:
+            self._stage2_inline_schema_failures.pop(msg_id, None)
+            return True
+        self._stage2_inline_schema_failures[msg_id] = count
+        self._stage2_inline_schema_failures.move_to_end(msg_id)
+        while len(self._stage2_inline_schema_failures) > SEEN_MESSAGE_IDS_MAXLEN:
+            self._stage2_inline_schema_failures.popitem(last=False)
         return False
 
     def _debug_mode_active(self) -> bool:
