@@ -5291,6 +5291,8 @@ async def test_fallback_valid_tracking_enqueues_stage2_job(hass, mock_stage2_ent
         # Manually wire stage2 state (mirrors what async_setup_entry does)
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         await coord._async_update_data()
 
     # Valid tracking: _enqueue_stage2 must be called once
@@ -5352,6 +5354,8 @@ async def test_fallback_queuefull_does_not_mark_seen(hass, mock_stage2_entry):
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         await coord._async_update_data()
 
     assert mock_enqueue.called  # enqueue WAS attempted
@@ -5411,6 +5415,8 @@ async def test_fallback_skips_already_submitted_tracking(hass, mock_stage2_entry
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         # Tracking number already forwarded in a prior poll.
         coord._submitted_tracking_numbers[normalize_tracking_number("1Z999AA10123456784")] = None
         await coord._async_update_data()
@@ -5509,6 +5515,8 @@ async def test_fallback_unexpected_exception_does_not_abort_poll(hass, mock_stag
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         # Must NOT raise — the poll completes despite the unexpected extraction error.
         await coord._async_update_data()
 
@@ -5618,6 +5626,8 @@ async def test_fallback_enqueue_marks_inflight_not_seen(hass, mock_stage2_entry)
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         # Provide a real queue so the real _enqueue_stage2 can put_nowait.
         import asyncio as _asyncio
 
@@ -5713,6 +5723,8 @@ async def test_fallback_invalid_tracking_no_enqueue_but_cached(hass, mock_stage2
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         await coord._async_update_data()
 
     # No enqueue for invalid/null tracking
@@ -5758,6 +5770,8 @@ async def test_fallback_transient_error_not_cached(hass, mock_stage2_entry):
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         await coord._async_update_data()
 
     # Transient error: msg_id must NOT be cached (so it retries next poll)
@@ -5804,6 +5818,8 @@ async def test_fallback_failure_escalates_consecutive_streak(hass, mock_stage2_e
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         await coord._async_update_data()
 
     # Failure surfaced: streak incremented, lifetime counter bumped, and an event emitted.
@@ -5851,6 +5867,8 @@ async def test_fallback_schema_error_not_cached(hass, mock_stage2_entry):
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         await coord._async_update_data()
 
     assert "msg_fb_schema" not in coord._seen_message_ids
@@ -5912,6 +5930,8 @@ async def test_fallback_per_poll_cap(hass, mock_stage2_entry):
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         await coord._async_update_data()
 
     # Only MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions should run

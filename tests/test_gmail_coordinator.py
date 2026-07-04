@@ -157,6 +157,8 @@ async def test_fallback_gate_reject_order_number_no_enqueue(hass, mock_stage2_en
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
 
         with caplog.at_level(logging.DEBUG):
             await coord._async_update_data()
@@ -248,6 +250,8 @@ async def test_fallback_gate_pass_spaced_usps_uses_clean_form(hass, mock_stage2_
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
 
         await coord._async_update_data()
 
@@ -592,6 +596,8 @@ async def test_fallback_cache_hit_skips_extractor_and_cap(hass, mock_stage2_entr
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
         # Simulate the worker's cap-skip having cached the prefetched result.
         coord._fallback_prefetch_cache[msg_id] = cached_result
 
@@ -658,6 +664,8 @@ async def test_fallback_enqueue_counts_matched_found_diagnostics(hass, mock_stag
         coord._email_client = mock_gmail
         coord._diagnostics.stage2_enabled = True
         coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
 
         await coord._async_update_data()
 
@@ -668,3 +676,199 @@ async def test_fallback_enqueue_counts_matched_found_diagnostics(hass, mock_stag
     assert len(found) == 1
     assert found[0]["tracking_number"] == "1Z999AA10123456784"
     assert found[0]["message_id"] == msg_id
+
+
+# ---------------------------------------------------------------------------
+# Quick-260703-mac: first-refresh skip, subsequent-poll run, wall-clock budget
+# ---------------------------------------------------------------------------
+
+
+async def test_first_refresh_skips_inline_fallback(hass, mock_stage2_entry):
+    """Quick-260703-mac T-mac-01: the bootstrap first refresh (before _first_refresh_done
+    is set) must NOT await async_extract on a Stage-1-miss email. The message must remain
+    un-marked (not in seen/inflight) so it is re-inspected on the next poll."""
+    mock_stage2_entry.add_to_hass(hass)
+    msg_id = "msg_first_refresh_miss"
+    mock_gmail = _make_stage1_miss_poll(msg_id)
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock()  # must never be awaited
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>first refresh body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Confirm the flag starts False (bootstrap first refresh scenario).
+        assert coord._first_refresh_done is False
+
+        await coord._async_update_data()
+
+    # async_extract must NEVER have been called on the first refresh.
+    mock_extractor.async_extract.assert_not_awaited()
+    # No LLM attempt counted.
+    assert coord._diagnostics.stage2_llm_attempts_total == 0
+    # Message must be left un-marked so the next poll re-inspects it.
+    assert msg_id not in coord._seen_message_ids, (
+        "Stage-1-miss must not be marked seen on first refresh"
+    )
+    assert msg_id not in coord._inflight_message_ids, (
+        "Stage-1-miss must not be marked inflight on first refresh"
+    )
+    # Flag must be True after the first successful poll completes.
+    assert coord._first_refresh_done is True
+
+
+async def test_second_poll_runs_inline_fallback(hass, mock_stage2_entry):
+    """Quick-260703-mac T-mac-01 (steady-state): after the first refresh sets
+    _first_refresh_done = True, a second poll on the same Stage-1-miss email
+    must await async_extract (inline fallback runs normally)."""
+    mock_stage2_entry.add_to_hass(hass)
+    msg_id = "msg_second_poll_miss"
+    mock_gmail = _make_stage1_miss_poll(msg_id)
+    mock_extractor = AsyncMock()
+    # Return a gate-failing result so the extraction runs but does not enqueue
+    # (keeps the test focused on whether async_extract is called, not on enqueue).
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    fallback_result = Stage2Result(
+        locked={"tracking_number": "ORDER-SKIP", "carrier_name": "", "order_name": ""},
+        custom={},
+        passes_used=1,
+        latency_ms=5.0,
+    )
+    mock_extractor.async_extract = AsyncMock(return_value=fallback_result)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>second poll body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+
+        # First poll: skips extraction, sets _first_refresh_done = True.
+        await coord._async_update_data()
+        assert coord._first_refresh_done is True
+        mock_extractor.async_extract.assert_not_awaited()
+
+        # Second poll: the message is still un-marked so it re-appears; inline
+        # fallback must now run (flag is True).
+        mock_extractor.async_extract.reset_mock()
+        await coord._async_update_data()
+
+    # async_extract must have been awaited exactly once on the second poll
+    # (single message; a double-extraction bug would make this fail).
+    mock_extractor.async_extract.assert_awaited_once()
+
+
+async def test_wall_clock_budget_stops_inline_fallback(hass, mock_stage2_entry):
+    """Quick-260703-mac T-mac-02: when the per-poll monotonic deadline has already
+    elapsed by the time the budget check runs, a Stage-1-miss email must NOT trigger
+    async_extract and must be left un-marked (deferred to next poll).
+
+    The budget is checked between extractions (a single in-flight call is not interrupted).
+    Strategy: wrap _reset_stage2_poll_counters with a side-effect that forces the
+    deadline to 0.0 (always in the past) after the normal reset runs, so that the
+    budget check in the gatekeeper sees an exhausted deadline regardless of real time.
+    """
+    from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
+
+    mock_stage2_entry.add_to_hass(hass)
+    msg_id = "msg_budget_exhausted"
+    mock_gmail = _make_stage1_miss_poll(msg_id)
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock()  # must never be awaited
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>budget body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Skip the first-refresh guard so only the budget guard is under test.
+        coord._first_refresh_done = True
+
+        # Wrap _reset_stage2_poll_counters to force the deadline to epoch 0 (always past)
+        # immediately after the normal reset sets it to time.monotonic() + 60.
+        _orig_reset = Shop2ParcelCoordinator._reset_stage2_poll_counters
+
+        def _reset_and_exhaust_budget(self_inner):
+            _orig_reset(self_inner)
+            self_inner._stage2_fallback_inline_deadline = 0.0  # force exhausted
+
+        with patch.object(
+            Shop2ParcelCoordinator,
+            "_reset_stage2_poll_counters",
+            _reset_and_exhaust_budget,
+        ):
+            await coord._async_update_data()
+
+    # Budget was already exhausted at check time — no Ollama call must have run.
+    mock_extractor.async_extract.assert_not_awaited()
+    # Message must be left un-marked so it is deferred to the next poll.
+    assert msg_id not in coord._seen_message_ids, (
+        "Budget-deferred Stage-1-miss must not be marked seen"
+    )
+    assert msg_id not in coord._inflight_message_ids, (
+        "Budget-deferred Stage-1-miss must not be marked inflight"
+    )
