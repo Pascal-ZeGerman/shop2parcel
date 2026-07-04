@@ -872,3 +872,132 @@ async def test_wall_clock_budget_stops_inline_fallback(hass, mock_stage2_entry):
     assert msg_id not in coord._inflight_message_ids, (
         "Budget-deferred Stage-1-miss must not be marked inflight"
     )
+
+
+# ---------------------------------------------------------------------------
+# ollama-fallback-retry-loop: inline OllamaSchemaError poison-message quarantine
+# ---------------------------------------------------------------------------
+
+
+async def _run_inline_fallback_polls(
+    hass,
+    entry,
+    *,
+    msg_id: str,
+    extract_side_effect,
+    polls: int,
+) -> GmailCoordinator:
+    """Drive `polls` poll cycles on one Stage-1-miss message.
+
+    async_extract uses `extract_side_effect` (an exception instance/class or callable).
+    The message is left un-marked by the inline fallback failure paths, so — absent a
+    quarantine — it re-appears in every poll's message list and is re-inferred each time.
+    Returns the coordinator so the caller can assert on call counts / seen state.
+    """
+    entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll(msg_id)
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(side_effect=extract_side_effect)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>unparseable digest body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Skip the bootstrap first-refresh guard so the inline fallback runs from poll 1.
+        coord._first_refresh_done = True
+
+        for _ in range(polls):
+            await coord._async_update_data()
+
+    coord._test_extractor = mock_extractor  # type: ignore[attr-defined]
+    return coord
+
+
+async def test_inline_schema_error_quarantines_after_threshold(hass, mock_stage2_entry):
+    """ollama-fallback-retry-loop: a deterministically-unparseable Stage-1-miss email
+    (async_extract raises OllamaSchemaError every time) must STOP being re-inferred once
+    the per-message schema-failure count reaches STAGE2_MSG_QUARANTINE_THRESHOLD.
+
+    Before the fix the inline fallback `continue`s without any per-message quarantine, so
+    the same email is re-fetched and re-inferred on every poll forever (observed 93x live).
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError
+    from custom_components.shop2parcel.const import STAGE2_MSG_QUARANTINE_THRESHOLD
+
+    threshold = STAGE2_MSG_QUARANTINE_THRESHOLD
+    msg_id = "msg_usps_digest_unparseable"
+
+    # Run one poll PAST the threshold so we can prove the (threshold+1)-th poll no longer
+    # re-infers.
+    coord = await _run_inline_fallback_polls(
+        hass,
+        mock_stage2_entry,
+        msg_id=msg_id,
+        extract_side_effect=OllamaSchemaError("No JSON object found in LLM response (len=518)"),
+        polls=threshold + 3,
+    )
+
+    extractor = coord._test_extractor  # type: ignore[attr-defined]
+    # async_extract must have run at most `threshold` times, then stopped — NOT once per poll.
+    assert extractor.async_extract.await_count == threshold, (
+        f"Expected exactly {threshold} inference attempts before quarantine, "
+        f"got {extractor.async_extract.await_count} (infinite-loop regression?)"
+    )
+    # The message must now be terminal (marked seen) so the poll gate skips it.
+    assert msg_id in coord._seen_message_ids, (
+        "A quarantined schema-failing email must be marked seen so it stops being re-fetched"
+    )
+
+
+async def test_inline_transient_error_never_quarantines(hass, mock_stage2_entry):
+    """ollama-fallback-retry-loop (design constraint / finding #594): a TRANSIENT Ollama
+    outage (async_extract raises OllamaTransientError) must NEVER mark a message seen and
+    must keep retrying every poll — a network blip must not permanently poison a legitimate
+    shipment email.
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import STAGE2_MSG_QUARANTINE_THRESHOLD
+
+    polls = STAGE2_MSG_QUARANTINE_THRESHOLD + 3
+    msg_id = "msg_transient_outage"
+
+    coord = await _run_inline_fallback_polls(
+        hass,
+        mock_stage2_entry,
+        msg_id=msg_id,
+        extract_side_effect=OllamaTransientError("connection refused"),
+        polls=polls,
+    )
+
+    extractor = coord._test_extractor  # type: ignore[attr-defined]
+    # A transient error must be retried on EVERY poll — one inference per poll, no quarantine.
+    assert extractor.async_extract.await_count == polls, (
+        f"Transient errors must keep retrying every poll: expected {polls} attempts, "
+        f"got {extractor.async_extract.await_count}"
+    )
+    # The message must NEVER be marked seen (would permanently skip a legit email on restart-persist).
+    assert msg_id not in coord._seen_message_ids, (
+        "A transient Ollama outage must NOT mark the message seen (finding #594 regression)"
+    )

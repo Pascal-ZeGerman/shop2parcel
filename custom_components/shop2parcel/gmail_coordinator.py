@@ -46,6 +46,7 @@ from .const import (
     MAX_RESCAN_WINDOW_DAYS,
     MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    STAGE2_MSG_QUARANTINE_THRESHOLD,
     debug_mode_notification_id,
     normalize_tracking_number,
 )
@@ -537,7 +538,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                             # at DEBUG. Finding #450: only the FIRST fallback failure of a poll
                             # escalates (bumps the streak / may notify); the rest are recorded
                             # without inflating the shared streak ~10x per poll on a no-match
-                            # backlog. Still do NOT cache the ID: it is retried next poll.
+                            # backlog.
                             escalate = not self._stage2_fallback_failed_this_poll
                             self._stage2_fallback_failed_this_poll = True
                             self._surface_stage2_failure(
@@ -547,7 +548,38 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                                 err=fb_err,
                                 escalate=escalate,
                             )
-                            continue  # do NOT cache (retry next poll)
+                            # ollama-fallback-retry-loop: split the two error classes.
+                            # OllamaSchemaError is DETERMINISTIC — the same body yields the same
+                            # unparseable model output every poll, so without a terminal action
+                            # the message re-infers forever (observed 93x/15h on a USPS digest).
+                            # Count per-message schema failures; once the count reaches
+                            # STAGE2_MSG_QUARANTINE_THRESHOLD, mark the message seen (terminal —
+                            # mirrors the carrier-format-reject branch below) so the poll gate
+                            # stops re-fetching it. Below threshold it is left un-cached and
+                            # retried next poll (a rare few schema errors may be a model warm-up
+                            # blip). OllamaTransientError (network/5xx) is NEVER counted or marked
+                            # seen: a transient outage must keep retrying and must not permanently
+                            # skip a legitimate shipment email (findings #1/#594).
+                            if isinstance(
+                                fb_err, OllamaSchemaError
+                            ) and self._register_inline_schema_failure(msg_id):
+                                _LOGGER.warning(
+                                    "Gmail message %s ('%s' from '%s'): quarantining after "
+                                    "%d consecutive inline OllamaSchemaError failures — marking "
+                                    "seen to stop the per-poll re-inference loop (session-scoped; "
+                                    "cleared on restart)",
+                                    msg_id,
+                                    email_meta.get("subject", ""),
+                                    email_meta.get("from", ""),
+                                    STAGE2_MSG_QUARANTINE_THRESHOLD,
+                                )
+                                self._mark_message_seen(msg_id)
+                                self._emit_scan_event(
+                                    message_id=f"gmail:{msg_id}",
+                                    meta=email_meta,
+                                    outcome="stage2_no_data",
+                                )
+                            continue  # do NOT cache (below threshold: retry next poll)
                         except Exception as fb_err:  # noqa: BLE001
                             # Finding #505: an unexpected (non-Ollama) exception must NOT abort the
                             # whole poll mid-iteration (which would skip every later message and
