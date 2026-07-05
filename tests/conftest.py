@@ -10,12 +10,34 @@ from unittest.mock import MagicMock
 # which imports coordinator.py, which imports gmail_client.py. The mocks must
 # be in sys.modules before `from custom_components.shop2parcel.const import DOMAIN`
 # (below) triggers the package __init__.py on first access.
+# gmail_client.py imports `from google.auth.exceptions import RefreshError, TransportError` at
+# module level and uses those classes in isinstance() checks inside _classify_gmail_error. When
+# `google` below is a MagicMock, `from google.auth.exceptions import ...` raises ModuleNotFoundError
+# ('google' is not a package). Import the REAL google.auth / google.auth.exceptions modules FIRST
+# (before the MagicMock setdefault of `google`) and pin them in sys.modules so the import resolves
+# the genuine exception classes (required for the stale-token 401 → GmailStaleTokenError
+# reclassification and its regression tests). google-auth ships with HA, so these modules always exist.
+try:  # pragma: no cover - defensive; google-auth is always present in the HA test env
+    import google.auth as _real_google_auth
+    import google.auth.exceptions as _real_google_auth_exceptions
+except ImportError:  # pragma: no cover
+    _real_google_auth = None
+    _real_google_auth_exceptions = None
+
 _GOOGLE_MOCK = MagicMock()
 sys.modules.setdefault("google", _GOOGLE_MOCK)
 sys.modules.setdefault("google.oauth2", _GOOGLE_MOCK)
 sys.modules.setdefault("google.oauth2.credentials", _GOOGLE_MOCK)
 sys.modules.setdefault("googleapiclient", _GOOGLE_MOCK)
 sys.modules.setdefault("googleapiclient.discovery", _GOOGLE_MOCK)
+
+# Pin the real google.auth submodules AFTER the MagicMock overwrites `google`, so
+# `from google.auth.exceptions import ...` resolves the genuine classes even though the
+# `google` package object in sys.modules is a MagicMock. Direct assignment (not setdefault)
+# because the MagicMock may have shadowed any prior google.auth entry.
+if _real_google_auth is not None and _real_google_auth_exceptions is not None:
+    sys.modules["google.auth"] = _real_google_auth
+    sys.modules["google.auth.exceptions"] = _real_google_auth_exceptions
 # Phase 7 fix: tests/test_coordinator.py must be collectable standalone (without
 # tests/api/test_gmail_client.py running first).  The gmail_client module-level
 # `from googleapiclient.errors import HttpError` fails when googleapiclient is a

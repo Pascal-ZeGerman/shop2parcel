@@ -14,11 +14,12 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any, NoReturn
 
+from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from .exceptions import GmailAuthError, GmailTransientError
+from .exceptions import GmailAuthError, GmailStaleTokenError, GmailTransientError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -187,6 +188,8 @@ def _classify_gmail_error(err: Exception) -> NoReturn:
     """Translate Google API exceptions to custom taxonomy. Never returns normally.
 
     EMAIL-06: HttpError 401/403 → GmailAuthError (coordinator raises ConfigEntryAuthFailed).
+    Stale-token 401-retry: google.auth RefreshError/TransportError → GmailStaleTokenError so the
+      coordinator can force-refresh the token and retry the call once (self-healing, NOT reauth).
     EMAIL-07: All other failures → GmailTransientError (coordinator raises UpdateFailed).
     Security: never include access_token in exception message.
     """
@@ -194,4 +197,11 @@ def _classify_gmail_error(err: Exception) -> NoReturn:
         if err.resp.status in (401, 403):
             raise GmailAuthError(str(err)) from err
         raise GmailTransientError(str(err)) from err
+    # The token-only Credentials object cannot self-refresh. When Gmail returns HTTP 401,
+    # google_auth_httplib2's transport calls credentials.refresh() as a retry, which raises
+    # RefreshError/TransportError ("credentials do not contain the necessary fields..."). This is
+    # NOT an HttpError — route it to the dedicated recoverable class BEFORE the transient fallthrough
+    # so the coordinator can force a fresh token and retry once instead of skipping the poll.
+    if isinstance(err, (RefreshError, TransportError)):
+        raise GmailStaleTokenError(str(err)) from err
     raise GmailTransientError(str(err)) from err

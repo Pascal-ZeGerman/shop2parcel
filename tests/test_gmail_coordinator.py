@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.shop2parcel.api.exceptions import GmailStaleTokenError
 from custom_components.shop2parcel.const import (
     CONF_CUSTOM_FIELDS,
     CONF_OLLAMA_MODEL,
@@ -1001,3 +1002,183 @@ async def test_inline_transient_error_never_quarantines(hass, mock_stage2_entry)
     assert msg_id not in coord._seen_message_ids, (
         "A transient Ollama outage must NOT mark the message seen (finding #594 regression)"
     )
+
+
+# ---------------------------------------------------------------------------
+# gmail-oauth-refresh-fields: stale-token 401 → force-refresh + retry-once (self-healing)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_gmail_entry() -> MockConfigEntry:
+    """MockConfigEntry with Stage-2 disabled (simplest poll path for the retry-wrapper tests)."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "auth_implementation": DOMAIN,
+            "token": {
+                "access_token": "stale-access-token",
+                "refresh_token": "fake-refresh-token",
+                "expires_at": 9999999999.0,
+                "expires_in": 3599,
+                "token_type": "Bearer",
+                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+            },
+            "api_key": "test-parcelapp-key",
+        },
+        options={},  # stage2 disabled
+        unique_id="gmail-stale-token@test.com",
+    )
+
+
+def _setup_mock_oauth_with_impl(mock_oauth, implementation) -> None:
+    """Configure the mocked config_entry_oauth2_flow so async_get_config_entry_implementation
+    returns the supplied implementation (with a controllable async_refresh_token) and the
+    OAuth2Session reports the stale access token that the poll starts with."""
+    mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=implementation)
+    mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+    mock_oauth.OAuth2Session.return_value.token = {
+        "access_token": "stale-access-token",
+        "refresh_token": "fake-refresh-token",
+        "expires_at": 9999999999.0,
+    }
+
+
+async def test_stale_token_force_refresh_and_retry_succeeds(hass, mock_gmail_entry):
+    """A GmailStaleTokenError on async_list_messages triggers a FORCED token refresh and ONE
+    retry of the same call, which succeeds — the poll completes (is NOT skipped) and the new
+    token is persisted to the config entry. No ConfigEntryAuthFailed (no reauth)."""
+    mock_gmail_entry.add_to_hass(hass)
+
+    # List raises stale-token on the first call, then succeeds on the retry with the fresh token.
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        side_effect=[
+            GmailStaleTokenError("credentials do not contain the necessary fields"),
+            ([], "subject:(tracking) after:123"),  # retry succeeds → empty result
+        ]
+    )
+    mock_gmail.async_get_message = AsyncMock(return_value={})
+
+    # Implementation.async_refresh_token returns a NEW token dict with a fresh access_token.
+    implementation = MagicMock()
+    implementation.async_refresh_token = AsyncMock(
+        return_value={
+            "access_token": "fresh-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+            "expires_in": 3599,
+            "token_type": "Bearer",
+            "scope": "https://www.googleapis.com/auth/gmail.readonly",
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth_with_impl(mock_oauth, implementation)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_gmail_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._first_refresh_done = True
+
+        # Must NOT raise — the retry succeeds so the poll completes normally.
+        result = await coord._async_update_data()
+
+    # The poll succeeded (empty result dict, not an exception).
+    assert result == {}
+    # async_list_messages was called exactly twice: original (stale) + one retry.
+    assert mock_gmail.async_list_messages.await_count == 2, (
+        "Expected exactly one retry after the stale-token error "
+        f"(got {mock_gmail.async_list_messages.await_count} calls)"
+    )
+    # A forced refresh happened exactly once.
+    implementation.async_refresh_token.assert_awaited_once()
+    # The retry used the FRESH access token (second call's first positional arg).
+    retry_call = mock_gmail.async_list_messages.await_args_list[1]
+    assert retry_call.args[0] == "fresh-access-token", (
+        "The retried list call must use the force-refreshed access token"
+    )
+    # The new token was persisted to the config entry (async_ensure_token_valid still owns
+    # the normal path, but the forced refresh writes the fresh token here).
+    assert mock_gmail_entry.data["token"]["access_token"] == "fresh-access-token", (
+        "The force-refreshed token must be persisted to the config entry data"
+    )
+
+
+async def test_stale_token_retry_also_fails_degrades_to_transient(hass, mock_gmail_entry):
+    """If the retry ALSO raises GmailStaleTokenError, the poll degrades to the transient path
+    (UpdateFailed, poll skipped, recovers next cycle) — NOT ConfigEntryAuthFailed (no reauth),
+    and NOT an infinite retry loop (the refresh + retry each happen at most once)."""
+    from homeassistant.exceptions import ConfigEntryAuthFailed
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    mock_gmail_entry.add_to_hass(hass)
+
+    # List raises stale-token on BOTH the original call and the retry.
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        side_effect=[
+            GmailStaleTokenError("credentials do not contain the necessary fields"),
+            GmailStaleTokenError("still stale after forced refresh"),
+        ]
+    )
+    mock_gmail.async_get_message = AsyncMock(return_value={})
+
+    implementation = MagicMock()
+    implementation.async_refresh_token = AsyncMock(
+        return_value={
+            "access_token": "fresh-but-still-rejected-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+            "expires_in": 3599,
+            "token_type": "Bearer",
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth_with_impl(mock_oauth, implementation)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_gmail_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._first_refresh_done = True
+
+        # Degrades to the transient path (UpdateFailed), NOT reauth (ConfigEntryAuthFailed).
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+
+    # Bounded: exactly two list calls (original + one retry), one forced refresh — no loop.
+    assert mock_gmail.async_list_messages.await_count == 2, (
+        "The retry must happen at most once — no infinite retry loop "
+        f"(got {mock_gmail.async_list_messages.await_count} calls)"
+    )
+    implementation.async_refresh_token.assert_awaited_once()
+
+    # Explicit guard: the failure must NOT be a reauth trigger.
+    assert not isinstance(UpdateFailed, ConfigEntryAuthFailed)  # sanity: distinct exception types

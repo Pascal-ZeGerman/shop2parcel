@@ -9,8 +9,9 @@ from __future__ import annotations
 import html as _html_stdlib
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import replace as dc_replace
-from typing import cast
+from typing import Any, TypeVar, cast
 
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -23,6 +24,7 @@ from .api.carrier_codes import normalize_carrier
 from .api.email_parser import EmailParser, ParseResult, ShipmentData, validate_carrier_format
 from .api.exceptions import (
     GmailAuthError,
+    GmailStaleTokenError,
     GmailTransientError,
     OllamaSchemaError,
     OllamaTransientError,
@@ -60,6 +62,8 @@ from .coordinator import (
 
 _LOGGER = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 
 def _extract_gmail_html(payload: dict) -> str | None:
     """Executor-side body extraction: HTML part, else escaped text/plain wrap.
@@ -87,10 +91,80 @@ class GmailCoordinator(Shop2ParcelCoordinator):
     def __init__(self, hass, entry):
         super().__init__(hass, entry)
         self._email_client = GmailClient(hass.async_add_executor_job)
+        # Current Gmail access_token for the in-progress poll. Set at poll start; a
+        # stale-token force-refresh (self-healing retry) updates it so every subsequent
+        # per-message async_get_message call in the same poll uses the refreshed token.
+        self._gmail_access_token: str | None = None
         if not entry.options.get(CONF_DEBUG_MODE, False):
             persistent_notification.async_dismiss(
                 hass, notification_id=debug_mode_notification_id(entry.entry_id)
             )
+
+    async def _async_force_refresh_gmail_token(self, implementation) -> str:
+        """Force a fresh OAuth access_token, persist it, and return the new access_token.
+
+        A FORCED refresh (implementation.async_refresh_token) is used deliberately: HA's
+        async_ensure_token_valid() may consider the stored token still-valid-by-expiry and
+        refuse to refresh a token Google has already rejected with a 401. async_refresh_token
+        hits Google's token endpoint unconditionally and mints a new access_token.
+
+        The refreshed token dict is persisted to the config entry via async_update_entry using
+        a NEW dict (the config-entry data dict is immutable-by-convention — never mutate in place).
+        Security: never log the token values.
+        """
+        assert self.config_entry is not None  # guaranteed by the caller
+        data = self.config_entry.data
+        old_token = data.get("token")
+        if not isinstance(old_token, dict):
+            # Should never happen (caller validated it), but fail safely as a transient error.
+            raise GmailTransientError("Gmail OAuth token missing during force-refresh")
+        new_token = await implementation.async_refresh_token(old_token)
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, data={**data, "token": new_token}
+        )
+        access_token = new_token.get("access_token")
+        if not access_token:
+            raise GmailTransientError("Forced Gmail token refresh returned no access_token")
+        self._gmail_access_token = access_token
+        return cast(str, access_token)
+
+    async def _gmail_call_with_stale_token_retry(
+        self,
+        implementation,
+        make_call: Callable[[str], Awaitable[_T]],
+    ) -> _T:
+        """Run a Gmail client call; on a stale-token 401 force-refresh and retry ONCE.
+
+        ``make_call`` receives the access_token to use and returns the coroutine for the
+        client call (async_list_messages / async_get_message). On GmailStaleTokenError the
+        token is force-refreshed (self-healing — NOT reauth) and the SAME call is re-run once
+        with the new token so the poll succeeds instead of skipping.
+
+        Bounded to a single retry: if the retry also raises GmailStaleTokenError it is
+        re-raised as a plain GmailTransientError so the poll degrades to the transient path
+        (skips this cycle, recovers next). Never triggers reauth, never loops.
+        """
+        token = self._gmail_access_token
+        assert token is not None  # set by _async_update_data_inner before any client call
+        try:
+            return await make_call(token)
+        except GmailStaleTokenError as err:
+            _LOGGER.info(
+                "Gmail access token was rejected mid-poll (stale-token 401); forcing a token "
+                "refresh and retrying the request once (self-healing — no reauth)."
+            )
+            try:
+                fresh_token = await self._async_force_refresh_gmail_token(implementation)
+            except GmailStaleTokenError:
+                # A forced refresh should not itself surface as a stale-token error, but guard
+                # so we never recurse into a second retry — degrade to the transient path.
+                raise GmailTransientError(str(err)) from err
+            try:
+                return await make_call(fresh_token)
+            except GmailStaleTokenError as retry_err:
+                # Retry also hit a stale token — do not retry again. Surface as a plain
+                # transient failure so the poll skips and recovers on the next cycle.
+                raise GmailTransientError(str(retry_err)) from retry_err
 
     async def _async_update_data(self) -> dict[str, ShipmentData]:
         """Run one poll cycle: list Gmail, parse new emails, forward to parcelapp."""
@@ -191,6 +265,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         access_token = oauth_session.token.get("access_token")
         if not access_token:
             raise ConfigEntryAuthFailed("OAuth2 token missing access_token field") from None
+        # Seed the per-poll token used by _gmail_call_with_stale_token_retry. A stale-token
+        # force-refresh during this poll updates this attribute so later async_get_message
+        # calls automatically use the refreshed token.
+        self._gmail_access_token = access_token
 
         # 2. List Gmail messages matching the configured query.
         gmail = cast(GmailClient, self._email_client)
@@ -222,10 +300,13 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         )
 
         try:
-            messages, effective_query = await gmail.async_list_messages(
-                access_token,
-                query,
-                rescan_window_days=rescan_window_days,
+            messages, effective_query = await self._gmail_call_with_stale_token_retry(
+                implementation,
+                lambda tok: gmail.async_list_messages(
+                    tok,
+                    query,
+                    rescan_window_days=rescan_window_days,
+                ),
             )
         except GmailAuthError as err:
             raise ConfigEntryAuthFailed(f"Gmail auth error: {err}") from err
@@ -293,7 +374,16 @@ class GmailCoordinator(Shop2ParcelCoordinator):
             msg_id = msg_meta["id"]
 
             try:
-                msg = await gmail.async_get_message(access_token, msg_id)
+                # Explicitly-typed closure captures the current loop msg_id (no lambda
+                # late-binding pitfall) and calls async_get_message with the message_id
+                # POSITIONALLY — matching the client's (access_token, message_id) signature.
+                def _get_message(tok: str, _mid: str = msg_id) -> Awaitable[dict[str, Any]]:
+                    return gmail.async_get_message(tok, _mid)
+
+                msg = await self._gmail_call_with_stale_token_retry(
+                    implementation,
+                    _get_message,
+                )
             except GmailAuthError as err:
                 raise ConfigEntryAuthFailed(f"Gmail auth error: {err}") from err
             except GmailTransientError as err:

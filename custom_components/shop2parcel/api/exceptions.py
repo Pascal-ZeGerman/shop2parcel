@@ -37,6 +37,24 @@ class GmailTransientError(GmailError):
     """Network failure or Gmail 5xx — coordinator raises UpdateFailed, retries next poll."""
 
 
+class GmailStaleTokenError(GmailTransientError):
+    """Gmail API returned 401 and the transport tried to refresh a refresh-incapable Credentials.
+
+    Root cause: gmail_client builds a token-only ``Credentials(token=access_token)`` (no
+    refresh_token/token_uri/client_id/client_secret). When Google momentarily rejects the
+    access token with HTTP 401, google_auth_httplib2's transport calls ``credentials.refresh()``
+    on that object, which raises ``google.auth.exceptions.RefreshError``/``TransportError``
+    ("credentials do not contain the necessary fields...").
+
+    This is NOT a fatal auth failure — the 401 self-heals. Subclass of GmailTransientError so
+    any un-refined handling still treats it as recoverable (never fatal, never triggers reauth).
+    The coordinator catches it specifically to FORCE a fresh token and retry the call once; if the
+    retry also fails it degrades to the plain transient path (poll skips, recovers next cycle).
+
+    Security: the message must NEVER include the access_token (mirrors GmailAuthError/Transient).
+    """
+
+
 class ParcelAppAuthError(ParcelAppError):
     """Invalid api-key — coordinator raises ConfigEntryAuthFailed."""
 
