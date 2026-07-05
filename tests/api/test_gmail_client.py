@@ -55,6 +55,7 @@ sys.modules.setdefault("google.oauth2.credentials", _mock_credentials_module)
 import custom_components.shop2parcel.api.gmail_client as _gmail_client_module  # noqa: E402
 from custom_components.shop2parcel.api.exceptions import (  # noqa: E402
     GmailAuthError,
+    GmailStaleTokenError,
     GmailTransientError,
 )
 from custom_components.shop2parcel.api.gmail_client import (  # noqa: E402
@@ -308,6 +309,61 @@ async def test_transient_error_on_network_failure():
     client = GmailClient(executor)
     with pytest.raises(GmailTransientError):
         await client.async_list_messages("fake-token", "from:shopify")
+
+
+# ---------------------------------------------------------------------------
+# Stale-token 401-retry reclassification (gmail-oauth-refresh-fields debug session)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_messages_refresh_error_classified_as_stale_token():
+    """RefreshError from the transport 401-retry → GmailStaleTokenError (NOT a bare transient).
+
+    Root cause: the token-only Credentials cannot self-refresh; on a Gmail 401 the transport calls
+    credentials.refresh(), which raises google.auth.exceptions.RefreshError. This must be routed to
+    GmailStaleTokenError so the coordinator can force-refresh + retry once (self-healing, no reauth).
+    """
+    from google.auth.exceptions import RefreshError  # noqa: PLC0415 — real class pinned by conftest
+
+    refresh_err = RefreshError(
+        "The credentials do not contain the necessary fields need to refresh the access token."
+    )
+    executor = _CapturingExecutor(service=MagicMock(), raise_on_execute=refresh_err)
+    client = GmailClient(executor)
+    with pytest.raises(GmailStaleTokenError):
+        await client.async_list_messages("fake-token", "from:shopify")
+
+
+async def test_get_message_transport_error_classified_as_stale_token():
+    """TransportError from the transport 401-retry on async_get_message → GmailStaleTokenError."""
+    from google.auth.exceptions import (
+        TransportError,  # noqa: PLC0415 — real class pinned by conftest
+    )
+
+    transport_err = TransportError("token refresh failed at transport layer")
+    executor = _CapturingExecutor(service=MagicMock(), raise_on_execute=transport_err)
+    client = GmailClient(executor)
+    with pytest.raises(GmailStaleTokenError):
+        await client.async_get_message("fake-token", "msg123")
+
+
+async def test_stale_token_error_is_subclass_of_transient():
+    """GmailStaleTokenError MUST subclass GmailTransientError so any un-refined handling stays
+    recoverable (never fatal, never reauth). Un-refined callers catching GmailTransientError still
+    catch the stale-token case."""
+    assert issubclass(GmailStaleTokenError, GmailTransientError)
+
+
+async def test_stale_token_error_message_excludes_access_token():
+    """Security: the reclassified error message must never leak the access_token value."""
+    from google.auth.exceptions import RefreshError  # noqa: PLC0415
+
+    refresh_err = RefreshError("credentials do not contain the necessary fields")
+    executor = _CapturingExecutor(service=MagicMock(), raise_on_execute=refresh_err)
+    client = GmailClient(executor)
+    with pytest.raises(GmailStaleTokenError) as exc_info:
+        await client.async_list_messages("super-secret-access-token", "from:shopify")
+    assert "super-secret-access-token" not in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
