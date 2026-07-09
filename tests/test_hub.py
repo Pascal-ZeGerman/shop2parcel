@@ -288,8 +288,14 @@ async def test_remove_one_of_two_accounts_leaves_hub(hass, mock_config_entry, mo
         mock_hub_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
 
+        # Both entries were added_to_hass before any setup call, so a single
+        # hass.config_entries.async_setup() call bootstraps the "shop2parcel"
+        # domain, which sets up ALL of its not-yet-loaded entries together
+        # (homeassistant/config_entries.py: "Setting up the component will set
+        # up all its config entries") — a second explicit async_setup() call
+        # for mock_config_entry_b would raise OperationNotAllowed (already
+        # loaded).
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        await hass.config_entries.async_setup(mock_config_entry_b.entry_id)
 
         hub = hass.data[DOMAIN]["__shared__"]
         assert hub._refcount == 2
@@ -330,8 +336,9 @@ async def test_remove_last_account_tears_down_hub(hass, mock_config_entry, mock_
         mock_hub_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
 
+        # See test_remove_one_of_two_accounts_leaves_hub: a single async_setup()
+        # call bootstraps the domain and sets up both pre-added entries together.
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        await hass.config_entries.async_setup(mock_config_entry_b.entry_id)
         hub = hass.data[DOMAIN]["__shared__"]
 
         with patch.object(hub, "async_shutdown", wraps=hub.async_shutdown) as spy_shutdown:

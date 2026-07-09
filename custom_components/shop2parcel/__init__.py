@@ -130,7 +130,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     Step 2 MUST precede step 3 — RESEARCH.md Pitfall 1: an empty forwarded_ids
     set on first poll re-POSTs every previously forwarded shipment, wasting quota.
+
+    Phase 29 (hub skeleton): hass.data[DOMAIN] init + the "_init_lock" asyncio.Lock
+    MUST be the first hass.data touch, before any await or lazy import — this is
+    the SPEC constraint that closes the multi-account constructor race (LIFE-05).
+    The Shop2ParcelHub singleton is created at most once (behind that lock) in
+    hass.data[DOMAIN]["__shared__"] and reference-counted per coordinator on
+    attach/detach (LIFE-01..04). D-01: this does not touch the per-entry
+    Stage-2 worker — that stays 100% intact.
     """
+    import asyncio  # stdlib — already available
+
+    # MUST be the first hass.data touch in this function — no await may precede
+    # this block (SPEC constraint; closes the hub constructor race, LIFE-05).
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault("_init_lock", asyncio.Lock())
+
+    async with hass.data[DOMAIN]["_init_lock"]:
+        if "__shared__" not in hass.data[DOMAIN]:
+            from .hub import Shop2ParcelHub  # noqa: PLC0415
+
+            hub = Shop2ParcelHub(hass)
+            await hub.async_setup()
+            hass.data[DOMAIN]["__shared__"] = hub
+            _LOGGER.info("shared hub created")
+    hub = hass.data[DOMAIN]["__shared__"]
+
     # Lazy import: gmail_coordinator.py and imap_coordinator.py depend on gmail_client.py
     # which requires google/googleapiclient stubs to be in sys.modules. Deferring to
     # function scope ensures the test harness (conftest.py) has registered the mocks
@@ -153,6 +178,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator = ImapCoordinator(hass, entry)
     else:
         coordinator = GmailCoordinator(hass, entry)
+    hub.attach(coordinator)
     await coordinator._async_load_store()
     # Phase 26 Plan 02 (P26-REG-01..03): sweep orphaned entity registry entries
     # (shipment_* per-message uids + has_active_shipments) left by prior versions.
@@ -205,8 +231,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # This prevents the orphaned-timer leak from async_track_time_interval.
     entry.async_on_unload(cancel_cleanup)
 
-    hass.data.setdefault(DOMAIN, {})
     # Phase 5 D-10: dict-shaped value — sensor.py / binary_sensor.py read ["coordinator"].
+    # (hass.data[DOMAIN] itself was already initialized at the top of this
+    # function, before the hub lock — Phase 29.)
     hass.data[DOMAIN][entry.entry_id] = {"coordinator": coordinator}
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -259,12 +286,26 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Symmetric with async_setup_entry: unload platforms first, then drop coordinator
     from hass.data only if the platform unload succeeded. Phase 5 benefits
     automatically when it populates PLATFORMS.
+
+    Phase 29 (hub skeleton, D-04): after dropping this entry's coordinator,
+    detach it from the shared hub explicitly (looked up from the per-entry
+    hass.data dict captured before the pop — NOT via entry.async_on_unload;
+    RESEARCH.md Open Question 1). If the hub's refcount reaches 0, shut it
+    down and delete hass.data[DOMAIN]["__shared__"] — the hub itself never
+    touches hass.data (D-06).
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         # IN-05: .get() guard — hass.data[DOMAIN] is absent if unload runs
         # without a prior successful setup (future refactors, direct test calls).
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        entry_data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        coordinator = entry_data.get("coordinator") if entry_data else None
+        hub = hass.data.get(DOMAIN, {}).get("__shared__")
+        if hub is not None and coordinator is not None:
+            hub.detach(coordinator)
+        if hub is not None and hub._refcount == 0:
+            await hub.async_shutdown()
+            del hass.data[DOMAIN]["__shared__"]
         # cancel_cleanup is registered via entry.async_on_unload in async_setup_entry
         # so HA cancels it automatically — no explicit call needed here.
     return unload_ok
