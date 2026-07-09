@@ -144,6 +144,11 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         # Success path: HA's base coordinator dispatches listeners after we return, so just
         # reset the flag here — no redundant dispatch (finding 7).
         self._poll_in_progress = False
+        # PAR-02 / Quick-260703-mac parity: mark the first refresh done on the success
+        # return only (mirrors GmailCoordinator._async_update_data, gmail_coordinator.py:200).
+        # A poll that raises stays "first" until one clean pass completes, so the bootstrap
+        # window guard remains active across any transient first-poll failures.
+        self._first_refresh_done = True
         return result
 
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
