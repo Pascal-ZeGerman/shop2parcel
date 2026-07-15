@@ -1,95 +1,52 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.4
-milestone_name: Stage-2 Reliability
-current_phase: 23
-status: complete
-stopped_at: "Phase 23 complete on branch feat/v1.4-p23-decouple-stage2-post (11 commits). Stage-2 extract/POST decoupled; debug suppresses POST; quota-deferred items drain without re-extract; WARNING throttled. Gate green (682 pass, ruff/mypy clean); goal-backward VERIFICATION passed 9/9. Ready for deploy to live HA + PR/merge."
-last_updated: "2026-06-24T16:23:17.181Z"
-last_activity: 2026-06-24
-last_activity_desc: Phase 23 complete
+milestone: v1.5
+milestone_name: Shared Pools & IMAP Parity
+current_phase: 30
+current_phase_name: Shared Dedup
+status: verifying
+stopped_at: Phase 30 context gathered
+last_updated: "2026-07-09T20:11:44.243Z"
+last_activity: 2026-07-09
+last_activity_desc: Phase 29 complete, transitioned to Phase 30
 progress:
-  total_phases: 1
-  completed_phases: 1
-  total_plans: 4
-  completed_plans: 4
-  percent: 100
-current_phase_name: Decouple Stage-2 LLM Extraction from parcelapp POST + debug POST suppression
+  total_phases: 10
+  completed_phases: 5
+  total_plans: 17
+  completed_plans: 17
+  percent: 50
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-06-05)
+See: .planning/PROJECT.md (updated 2026-07-03)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** v1.4 Phase 23 — decouple Stage-2 LLM extraction from the parcelapp POST; fix debug-mode POST suppression.
+**Current focus:** Phase 29 — Hub Skeleton + Foundational Safety
 
 ## Current Position
 
-Phase: 23
+Phase: 30 — Shared Dedup
 Plan: Not started
-Status: v1.4 opened. Phase 23 is bug-fix-driven: live root-cause found debug_mode + POST-coupled-to-quota causing a quota-skip flood with 0 LLM parses.
-Last activity: 2026-06-24 — Phase 23 complete
+Status: Phase complete — ready for verification
+Last activity: 2026-07-09 — Phase 29 complete, transitioned to Phase 30
+
+```
+Progress: [          ] 0% (0/6 phases complete)
+```
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
-- Phase 23 added (v1.4): Decouple Stage-2 LLM extraction from parcelapp POST + honor debug-mode POST suppression. Backlog ideas renumbered: Custom Extraction Field Persistence → 24, Stage-2 Observability → 25.
-
-## Performance Metrics
-
-**Velocity:**
-
-- Total plans completed: 59
-- Average duration: -
-- Total execution time: 0 hours
-
-**By Phase:**
-
-| Phase | Plans | Total | Avg/Plan |
-|-------|-------|-------|----------|
-| 02 | 3 | - | - |
-| 04 | 3 | - | - |
-| 05 | 2 | - | - |
-| 06 | 4 | - | - |
-| 07 | 3 | - | - |
-| 08 | 3 | - | - |
-| 9 | 5 | - | - |
-| 10 | 3 | - | - |
-| 11 | 3 | - | - |
-| 12 | 3 | - | - |
-| 15 | 4 | - | - |
-| 16 | 3 | - | - |
-| 17 | 4 | - | - |
-| 18 | 2 | - | - |
-| 19 | 2 | - | - |
-| 20 | 3 | - | - |
-| 22 | 2 | - | - |
-| 21 | 3 | - | - |
-| 23 | 4 | - | - |
-
-**Recent Trend:**
-
-- Last 5 plans: -
-- Trend: -
-
-*Updated after each plan completion*
-| Phase 02-api-clients P01 | 9 | 2 tasks | 9 files |
-| Phase 02-api-clients P02 | 4 | 2 tasks | 5 files |
-| Phase 02-api-clients P03 | 9 | 1 tasks | 2 files |
-| Phase 05-sensor-entities P01 | 10 | 3 tasks | 4 files |
-| Phase 15-ollamaclient-foundation P03 | 7 | 3 tasks | 2 files |
-| Phase 15-ollamaclient-foundation P04 | 4 | 3 tasks | 2 files |
-| Phase 22 P01 | 15 | 2 tasks | 1 files |
-| Phase 22 P02 | 2 | 1 tasks | 1 files |
-| Phase 21 P01 | 25 | 2 tasks | 7 files |
-| Phase 21 P02 | 26 | 2 tasks | 4 files |
-| Phase 21 P03 | 8m | 2 tasks | 5 files |
-
-## Accumulated Context
+- Phase 23 added (v1.4): Decouple Stage-2 LLM extraction from parcelapp POST + honor debug-mode POST suppression. Completed 2026-06-24.
+- Phase 26 added (v1.4, completed 2026-06-24): Operational Health Sensor Rework — coordinator-owned health counters replacing one-way per-shipment sensors; additive store keys; Gmail+IMAP parity.
+- Phase 27 added (v1.4, completed 2026-06-30): Subject-Only Gmail Filter + Hybrid Ollama Gatekeeper — subject-line pre-filter, inline Ollama fallback with volume guards, first-refresh skip, wall-clock budget.
+- Phase 28 added (v1.4, completed 2026-06-30): Carrier Format Pre-POST Validation + Full-Body Gmail Scan — validate_carrier_format() gate, DHL branch removal, full-body fallback, CarrierFormatRejectionsSensor (14th diagnostic).
+- v1.5 Phases 29–34 added (2026-07-03): Hub skeleton + foundational safety, shared dedup, shared budget, shared queue+worker, IMAP parity, lifecycle tests + global sensors.
+- Phase numbering is continuous: last v1.3/v1.4 phase was 28; v1.5 starts at 29.
 
 ### Decisions
 
@@ -127,6 +84,16 @@ Recent decisions affecting current work:
 - Phase 20-01: merge_llm_authoritative returns tuple[ShipmentData, list[dict]] (Option A) — merge.py stays HA-free per D-02; coordinator emits stage2_conflict event using returned conflicts list
 - Phase 20-01: type: ignore[arg-type] on dataclasses.replace(**overrides) — mypy cannot resolve dict[str, str | None] spread against ShipmentData typed replace() overload; runtime values always valid
 - [Phase ?]: Phase 22 D-12/D-13/D-14/D-15: tests/test_stage2_e2e_live.py ships with live_ollama marker, OLLAMA_URL gate, and OllamaExtractor construction — fulfills Phase 15 D-13 deferral
+- v1.5 architecture: Shop2ParcelHub singleton in hass.data[DOMAIN]["__shared__"]; asyncio.Lock (_init_lock) created synchronously before first await in async_setup_entry; hub reference-counted via attach(coordinator)/detach(coordinator); worker registered via hass.async_create_background_task (not entry-scoped)
+- v1.5: try_consume() is synchronous (no await) — lock-free by design; the single shared worker serializes all POSTs sequentially
+- v1.5: SHARED_STORAGE_VERSION=1 in shop2parcel.__shared__ store; independent version chain from per-entry STORAGE_VERSION=3
+- v1.5: Migration strategy — used_today=0 on migration day; max() across all quota_exhausted_until; union-merge submitted_tracking_numbers capped at 1000
+- v1.5: Stage2Job gains entry_id + callback fields for per-account result routing; hub worker calls job.callback(result) after each extraction
+- [Phase ?]: Phase 29-01: explicit hub.detach(coordinator) in async_unload_entry (not via entry.async_on_unload) — sidesteps the async_on_unload/async_unload_platforms ordering assumption
+- [Phase ?]: Phase 29-01: hub.async_shutdown() never touches hass.data — async_unload_entry owns deleting hass.data[DOMAIN]['__shared__'] only after refcount reaches 0 (D-04/D-06)
+- [Phase ?]: Phase 29-01: SHARED_STORAGE_VERSION=1 lives only in hub.py — separate version chain from coordinator.py's STORAGE_VERSION=3
+- [Phase ?]: Phase 29-01: hub worker stub tested via hub._queue.put_nowait() directly (D-02) — no coordinator wiring or test-only helper added
+- [Phase ?]: PAR-02: ImapCoordinator now sets _first_refresh_done=True on success path only, mirroring GmailCoordinator (gmail_coordinator.py:200)
 
 ### Roadmap Evolution
 
@@ -138,6 +105,7 @@ Recent decisions affecting current work:
 - Phase 12 added: Address tech debt
 - Phase 13.1 inserted after Phase 13: Sensor Restore on Restart — coordinator.data not persisted means all sensors unavailable after restart (HA log audit finding) (URGENT)
 - v1.3 Phases 15–22 added: OllamaClient foundation → extractor → config-flow → queue → worker → merge+quota guards → failure surface+diagnostics → README+e2e. Phases 16, 19, 20 flagged NEEDS RESEARCH.
+- v1.5 Phases 29–34 added (2026-07-03): Hub Skeleton → Shared Dedup → Shared Budget → Shared Queue+Worker → IMAP Parity → Lifecycle Tests + Global Sensors
 
 ### Pending Todos
 
@@ -147,7 +115,7 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-None — v1.3 roadmap drafted, 37/37 requirements mapped, three NEEDS RESEARCH phases flagged. Ready to run `/gsd:plan-phase 15`.
+None — v1.5 roadmap created, 24/24 requirements mapped. Ready to run `/gsd:plan-phase 29`.
 
 ### Quick Tasks Completed
 
@@ -168,6 +136,62 @@ None — v1.3 roadmap drafted, 37/37 requirements mapped, three NEEDS RESEARCH p
 | 260618-iro | Fix 10 issues from PR 20 code review: I1 (cap notification dismiss), I2 (remove_entry missing dismiss), I3 (drain loop task_done), I4 (cancel-mid-success store flush), I5 (wrong error message in _split_and_coerce), I6 (MRG-04 tracking_number=None invariant), I7 (cap counter includes AlreadyAdded), S1 (BeautifulSoup error handling), S2 (snapshot-before-set_updated_data), S3 (empty URL UX note) | 2026-06-18 | d1b2a09 | [260618-iro-fix-10-issues-from-pr-20-code-review-i1-](./quick/260618-iro-fix-10-issues-from-pr-20-code-review-i1-/) |
 | 260623-d9s | Add description attribute to all 7 diagnostic sensors so users can read what each sensor measures in the HA entity detail panel | 2026-06-23 | a9296fa | [260623-d9s-add-description-attrs-to-diagnostic-sensors](./quick/260623-d9s-add-description-attrs-to-diagnostic-sensors/) |
 | 260623-f2k | Add 3 LLM performance diagnostic sensors: OllamaLatencySensor (avg/last/min/max ms), OllamaParseQualitySensor (fence-strip retry count + rate), Stage2ConsecutiveFailuresSensor (failure streak) | 2026-06-23 | 34385e0 | [260623-f2k-add-llm-performance-diagnostic-sensors](./quick/260623-f2k-add-llm-performance-diagnostic-sensors/) |
+| 260701-l5r | Fix success-field gap in parcelapp async_add_delivery — honor documented API response contract by asserting `success is True` on 2xx and routing `success:false` to the ParcelAppAlreadyAddedError/ParcelAppInvalidTrackingError taxonomy | 2026-07-01 | a7f9382 | [260701-l5r-fix-the-success-field-gap-in-parcelapp-a](./quick/260701-l5r-fix-the-success-field-gap-in-parcelapp-a/) |
+| 260701-loh | parcelapp delivery `description` = order-email summary (merchant + contents, e.g. "Target — Coffee maker") via new locked Ollama field `order_summary` with bespoke composition prompt; precedence `order_summary or order_name or tracking_number` at all 4 POST sites; Stage-1/no-LLM fallback preserved; CR-01 fix restores order_summary across HA restart. --full: research + plan-check + code-review + verify (8/8 passed) | 2026-07-01 | eb58360 | [260701-loh-make-parcelapp-delivery-description-a-sh](./quick/260701-loh-make-parcelapp-delivery-description-a-sh/) |
+| 260703-mac | Fix startup LLM timeout: Gmail Ollama fallback gatekeeper ran inline LLM extraction during `async_config_entry_first_refresh` (inside HA's 300s bootstrap stage-2 window), so a Stage-1-miss backlog cancelled setup and downed the integration. Fix: (1) skip inline fallback on the first refresh via in-memory `_first_refresh_done` flag (skipped misses left un-marked → re-inspected next poll); (2) per-poll wall-clock budget `MAX_STAGE2_FALLBACK_INLINE_SECONDS=60.0` as defense-in-depth. Gmail-only; 10/poll cap unchanged. --full: research + plan-check + code-review (2 warnings fixed) + verify (5/5 passed). Verified. | 2026-07-03 | 9e7d8bc | [260703-mac-fix-startup-llm-problem-defer-inline-oll](./quick/260703-mac-fix-startup-llm-problem-defer-inline-oll/) |
+
+## Performance Metrics
+
+**Velocity:**
+
+- Total plans completed: 61
+- Average duration: -
+- Total execution time: 0 hours
+
+**By Phase:**
+
+| Phase | Plans | Total | Avg/Plan |
+|-------|-------|-------|----------|
+| 02 | 3 | - | - |
+| 04 | 3 | - | - |
+| 05 | 2 | - | - |
+| 06 | 4 | - | - |
+| 07 | 3 | - | - |
+| 08 | 3 | - | - |
+| 9 | 5 | - | - |
+| 10 | 3 | - | - |
+| 11 | 3 | - | - |
+| 12 | 3 | - | - |
+| 15 | 4 | - | - |
+| 16 | 3 | - | - |
+| 17 | 4 | - | - |
+| 18 | 2 | - | - |
+| 19 | 2 | - | - |
+| 20 | 3 | - | - |
+| 22 | 2 | - | - |
+| 21 | 3 | - | - |
+| 23 | 4 | - | - |
+| 29 | 2 | - | - |
+
+**Recent Trend:**
+
+- Last 5 plans: -
+- Trend: -
+
+*Updated after each plan completion*
+| Phase 02-api-clients P01 | 9 | 2 tasks | 9 files |
+| Phase 02-api-clients P02 | 4 | 2 tasks | 5 files |
+| Phase 02-api-clients P03 | 9 | 1 tasks | 2 files |
+| Phase 05-sensor-entities P01 | 10 | 3 tasks | 4 files |
+| Phase 15-ollamaclient-foundation P03 | 7 | 3 tasks | 2 files |
+| Phase 15-ollamaclient-foundation P04 | 4 | 3 tasks | 2 files |
+| Phase 22 P01 | 15 | 2 tasks | 1 files |
+| Phase 22 P02 | 2 | 1 tasks | 1 files |
+| Phase 21 P01 | 25 | 2 tasks | 7 files |
+| Phase 21 P02 | 26 | 2 tasks | 4 files |
+| Phase 21 P03 | 8m | 2 tasks | 5 files |
+| Phase 29 P01 | 25min | 3 tasks | 3 files |
+| Phase 29 P02 | 15min | 2 tasks | 2 files |
 
 ## Deferred Items
 
@@ -214,12 +238,14 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-Last session: 2026-06-24T16:13:25.644Z
-Stopped at: PR #20 CI all green — waiting for UAT in live HA before cutting v1.3.0 final tag.
-Next action: Run UAT on HA instance, then cut v1.3.0 final tag and merge PR #20.
+**Resume file:** .planning/phases/30-shared-dedup/30-CONTEXT.md
+
+Last session: 2026-07-09T19:59:34.813Z
+Stopped at: Phase 30 context gathered
+Next action: `/gsd:execute-phase 29` — execute the 2 planned Phase 29 plans (hub lifecycle + IMAP first-refresh fix).
 
 ## Operator Next Steps
 
-- Run UAT on live HA instance — install v1.3.0-rc1 via HACS, test Stage-2 Ollama extraction end-to-end
-- After UAT passes: `git tag v1.3.0 origin/main && git push origin v1.3.0` (after merging PR #20)
-- `/gsd-new-milestone` — start v1.4 milestone planning
+- `/gsd:execute-phase 29` — execute Phase 29: Hub Skeleton + Foundational Safety (2 plans, both Wave 1)
+- After Phase 29 complete: proceed to Phase 30 (Shared Dedup)
+- Full sequence: 29 → 30 → 31 → 32 → 33 → 34
