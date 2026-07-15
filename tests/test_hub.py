@@ -475,6 +475,141 @@ def test_seed_from_list_ignores_non_str_items(hass):
     assert set(hub._submitted_tracking_numbers.keys()) == {"A", "B"}
 
 
+# ---------------------------------------------------------------------------
+# Persistence tests (Plan 30-02 — async_save / async_load)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_save_writes_version_and_submitted_tracking_numbers(hass):
+    """async_save persists both 'version' and 'submitted_tracking_numbers'
+    (the current dedup set keys) to the shared store."""
+    from custom_components.shop2parcel.hub import (  # noqa: PLC0415
+        SHARED_STORAGE_VERSION,
+        Shop2ParcelHub,
+    )
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        hub.check_and_mark("TN-A")
+        hub.check_and_mark("TN-B")
+
+        await hub.async_save()
+
+        last_call = mock_store_cls.return_value.async_save.call_args
+        payload = last_call.args[0]
+        assert payload["version"] == SHARED_STORAGE_VERSION
+        assert set(payload["submitted_tracking_numbers"]) == {"TN-A", "TN-B"}
+
+        await hub.async_shutdown()
+
+
+async def test_async_shutdown_flushes_submitted_tracking_numbers(hass):
+    """async_shutdown must flush the dedup set, not just the version — guards
+    against regressing to the Phase 29 shutdown that saved only {'version': 1}."""
+    from custom_components.shop2parcel.hub import (  # noqa: PLC0415
+        SHARED_STORAGE_VERSION,
+        Shop2ParcelHub,
+    )
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        hub.check_and_mark("TN-SHUTDOWN")
+
+        await hub.async_shutdown()
+
+        last_call = mock_store_cls.return_value.async_save.call_args
+        payload = last_call.args[0]
+        assert payload["version"] == SHARED_STORAGE_VERSION
+        assert "TN-SHUTDOWN" in payload["submitted_tracking_numbers"]
+
+
+# ---------------------------------------------------------------------------
+# Restart round-trip tests (Plan 30-02 — async_load)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_load_restart_round_trip_restores_tns(hass):
+    """A save-then-reload round-trip restores every TN: hubA marks TNs and
+    async_saves; hubB (whose store returns hubA's payload) has is_submitted
+    True and check_and_mark True for each prior TN after async_setup."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub_a = Shop2ParcelHub(hass)
+        await hub_a.async_setup()
+        hub_a.check_and_mark("TN-1")
+        hub_a.check_and_mark("TN-2")
+        await hub_a.async_save()
+        saved_payload = mock_store_cls.return_value.async_save.call_args.args[0]
+        await hub_a.async_shutdown()
+
+        # Simulated restart: a fresh hub's store returns hubA's saved payload.
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=saved_payload)
+        mock_store_cls.return_value.async_save.reset_mock()
+
+        hub_b = Shop2ParcelHub(hass)
+        await hub_b.async_setup()
+
+        assert hub_b.is_submitted("TN-1") is True
+        assert hub_b.is_submitted("TN-2") is True
+        assert hub_b.check_and_mark("TN-1") is True
+        assert hub_b.check_and_mark("TN-2") is True
+
+        await hub_b.async_shutdown()
+
+
+async def test_async_load_non_list_submitted_tracking_numbers_loads_empty(hass, caplog):
+    """T-30-04: a non-list 'submitted_tracking_numbers' value loads as empty
+    with a WARNING — no crash."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={"version": 1, "submitted_tracking_numbers": "notalist"}
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        with caplog.at_level(logging.WARNING):
+            await hub.async_setup()
+
+        assert hub.submitted_count == 0
+        assert "submitted_tracking_numbers" in caplog.text
+
+        await hub.async_shutdown()
+
+
+async def test_async_load_absent_key_loads_empty_set(hass):
+    """R2 empty backstop: a restart with an empty/absent
+    'submitted_tracking_numbers' key loads an empty set with no crash
+    (Phase 29 seeds {'version': 1})."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value={"version": 1})
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        assert hub.submitted_count == 0
+
+        await hub.async_shutdown()
+
+
 async def test_remove_last_account_tears_down_hub(hass, mock_config_entry, mock_config_entry_b):
     """R3/R4/LIFE-04: removing the last account tears down the hub —
     hass.data[DOMAIN]["__shared__"] is absent and hub.async_shutdown() was called.
