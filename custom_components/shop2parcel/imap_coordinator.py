@@ -149,12 +149,19 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         # A poll that raises stays "first" until one clean pass completes, so the bootstrap
         # window guard remains active across any transient first-poll failures.
         self._first_refresh_done = True
+        # D-01: persist the shared hub's dedup set at the end of every successful poll —
+        # unconditional (no dirty flag) so a crash/restart never loses a mark made this
+        # poll. This is the FINAL await of a successful poll (after all coordinator.py
+        # dedup writes for this poll have already happened via check_and_mark).
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
+        await self._hub.async_save()
         return result
 
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
         """Inner implementation of the IMAP poll cycle (called from _async_update_data)."""
         entry = self.config_entry
         assert entry is not None  # guaranteed by _async_update_data
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
         imap_client = cast(ImapClient, self._email_client)
 
         # WR-04: drain quota-deferred POSTs on EVERY poll, honouring the documented
@@ -417,7 +424,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 # D-10: tracking-number dedup check (replaces UID skip gate).
                 normalized = normalize_tracking_number(shipment.tracking_number)
                 if not debug_mode:
-                    if normalized in self._submitted_tracking_numbers:
+                    if self._hub.is_submitted(normalized):
                         d.last_poll_emails_skipped_dedup += 1
                         self._emit_scan_event(
                             message_id=f"imap:{uid_str}",
@@ -565,7 +572,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     msg_pending_retry = True
                     continue
                 except ParcelAppAlreadyAddedError:
-                    self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
+                    self._hub.check_and_mark(normalized)  # DEDUP-01: shared dedup-write
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     self._emit_scan_event(
@@ -584,8 +591,8 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                         err,
                     )
                     # Record normalized tracking number to suppress infinite retries
-                    # (IN-01: shared dedup-write helper).
-                    self._record_submitted_tn(normalized)
+                    # (DEDUP-01: shared dedup-write).
+                    self._hub.check_and_mark(normalized)
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
@@ -621,7 +628,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     continue
 
                 # Success — record tracking number dedup, save immediately (D-10/D-03).
-                self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
+                self._hub.check_and_mark(normalized)  # DEDUP-01: shared dedup-write
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
                 current_data[storage_key] = shipment
                 self._pending_shipments = current_data
@@ -656,7 +663,7 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         # Phase 7: capture per-poll timing.
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
-        d.submitted_tracking_count = len(self._submitted_tracking_numbers)
+        d.submitted_tracking_count = self._hub.submitted_count
 
         # DBG-06: persistent notification while debug mode is active.
         if debug_mode:
