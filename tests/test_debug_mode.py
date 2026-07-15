@@ -303,7 +303,7 @@ async def test_dbg03_gmail_dedup_bypass(hass, mock_config_entry):
         # Pre-seed the tracking number that would trigger dedup in non-debug mode
         from custom_components.shop2parcel.const import normalize_tracking_number
 
-        coord._submitted_tracking_numbers[normalize_tracking_number("1Z999AA10123456784")] = None
+        coord._hub.check_and_mark(normalize_tracking_number("1Z999AA10123456784"))
         await coord._async_update_data()
 
     # No skipped_dedup event — dedup check was bypassed
@@ -359,7 +359,7 @@ async def test_dbg03_imap_dedup_bypass(hass, mock_imap_config_entry):
         # Pre-seed the tracking number
         from custom_components.shop2parcel.const import normalize_tracking_number
 
-        coord._submitted_tracking_numbers[normalize_tracking_number("1Z999AA10123456784")] = None
+        coord._hub.check_and_mark(normalize_tracking_number("1Z999AA10123456784"))
         await coord._async_update_data()
 
     skipped_dedup_events = [

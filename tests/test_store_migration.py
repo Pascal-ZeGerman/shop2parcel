@@ -30,6 +30,28 @@ def store() -> Shop2ParcelStore:
     return s
 
 
+def _make_bare_hub():
+    """Return a Shop2ParcelHub that bypasses Hub.__init__ — no hass required.
+
+    Phase 30-03: tests in this file build a bare Shop2ParcelCoordinator via
+    __new__ (deliberately avoiding the hass fixture — see module docstring),
+    so the conftest.py autouse hub-attach fixture (which patches
+    Shop2ParcelCoordinator.__init__) never runs for them. _async_load_store
+    now asserts self._hub is not None, so every such coordinator needs one
+    attached manually. Only _submitted_tracking_numbers and _store are set —
+    the two attributes check_and_mark/is_submitted/seed_from_list/async_save
+    actually touch; no real I/O occurs (async_save is a no-op AsyncMock).
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub.__new__(Shop2ParcelHub)
+    hub._submitted_tracking_numbers = OrderedDict()
+    hub._store = MagicMock()
+    hub._store.async_load = AsyncMock(return_value=None)
+    hub._store.async_save = AsyncMock()
+    return hub
+
+
 async def test_migrate_func_v1_drops_old_keys_and_seeds_submitted_tracking_numbers(
     store: Shop2ParcelStore,
 ) -> None:
@@ -187,7 +209,7 @@ async def test_load_store_skips_corrupt_persisted_shipments_entry(
         }
     )
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -793,7 +815,7 @@ async def test_load_store_skips_corrupt_entry_wrong_type_correct_count(
     )
     mock_store.key = "shop2parcel.test_entry"
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -828,7 +850,7 @@ async def test_load_store_non_dict_persisted_shipments_emits_warning(
     )
     mock_store.key = "shop2parcel.test_entry"
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -877,7 +899,7 @@ async def test_async_load_store_old_record_without_custom_attributes_defaults_to
         }
     )
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -914,7 +936,7 @@ async def test_async_load_store_new_record_with_custom_attributes_restores_value
         }
     )
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -951,7 +973,7 @@ async def test_async_load_store_wrong_type_custom_attributes_degrades_silently_w
         }
     )
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -1072,7 +1094,7 @@ async def test_load_store_restores_order_summary_in_persisted_shipments() -> Non
     )
     mock_store.key = "shop2parcel.test_entry"
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -1117,7 +1139,7 @@ async def test_load_store_restores_order_summary_in_pending_posts() -> None:
     )
     mock_store.key = "shop2parcel.test_entry"
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -1158,7 +1180,7 @@ async def test_load_store_order_summary_absent_defaults_to_none_persisted() -> N
     )
     mock_store.key = "shop2parcel.test_entry"
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -1198,7 +1220,7 @@ async def test_load_store_order_summary_absent_defaults_to_none_pending_posts() 
     )
     mock_store.key = "shop2parcel.test_entry"
     coordinator._store = mock_store
-    coordinator._submitted_tracking_numbers = OrderedDict()
+    coordinator._hub = _make_bare_hub()
     coordinator._quota_exhausted_until = None
     coordinator._pending_shipments = {}
     coordinator._restored_shipments = {}
@@ -1306,8 +1328,12 @@ async def test_load_store_renormalizes_submitted_tracking_numbers(hass, mock_con
                 "quota_exhausted_until": None,
             }
         )
+        # Phase 30-03: a non-empty migration now persists (hub save + per-entry
+        # save dropping the key) at the end of _async_load_store — async_save
+        # must be mocked as an AsyncMock, not the class default MagicMock.
+        mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
-    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
-    assert "TNWITHDASH" in coord._submitted_tracking_numbers
-    assert "1Z999 AA10 1234 56784" not in coord._submitted_tracking_numbers
+    assert coord._hub.is_submitted("1Z999AA10123456784")
+    assert coord._hub.is_submitted("TNWITHDASH")
+    assert not coord._hub.is_submitted("1Z999 AA10 1234 56784")

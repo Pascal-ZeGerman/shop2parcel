@@ -136,9 +136,9 @@ async def test_imap_inline_rejects_malformed_tracking_no_post(
         f"{coord._diagnostics.last_carrier_format_rejected_reason!r}"
     )
 
-    # (c) the malformed TN must NOT be written to _submitted_tracking_numbers.
-    assert all("NOTATRACKINGNUM" not in str(k) for k in coord._submitted_tracking_numbers), (
-        "Malformed TN must not be written to _submitted_tracking_numbers"
+    # (c) the malformed TN must NOT be written to the shared hub's dedup set.
+    assert all("NOTATRACKINGNUM" not in str(k) for k in coord._hub._submitted_tracking_numbers), (
+        "Malformed TN must not be written to the shared hub's dedup set"
     )
 
     # (d) rejected value must not appear in INFO+ logs (DEBUG-only per D-07/T-28-09).

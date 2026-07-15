@@ -647,4 +647,131 @@ async def test_remove_last_account_tears_down_hub(hass, mock_config_entry, mock_
             await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
             spy_shutdown.assert_called_once()
 
+
+# ---------------------------------------------------------------------------
+# Phase 30-03 (DEDUP-01..03): migration union + restart persistence
+#
+# Both tests below construct coordinators directly (GmailCoordinator /
+# ImapCoordinator). They rely on conftest.py's autouse
+# `_auto_attach_test_hub` fixture, which caches ONE shared, I/O-free test
+# hub per hass instance under hass.data[DOMAIN]["_test_hub"] and assigns it
+# to coordinator._hub on construction — exactly mirroring the production
+# topology where every account attaches to the SAME hass-scoped hub. Two
+# coordinators constructed in the same test therefore automatically share
+# one hub, which is what the migration-union scenario requires.
+# ---------------------------------------------------------------------------
+
+
+async def test_migration_union_merges_overlapping_per_entry_lists(
+    hass, mock_config_entry, mock_imap_config_entry
+):
+    """DEDUP-03: two coordinators (Gmail + IMAP), each with an overlapping
+    per-entry submitted_tracking_numbers list, union-merge into the shared
+    hub set via seed_from_list when each runs _async_load_store() — no
+    duplicates, FIFO-capped, and neither per-entry store snapshot contains
+    the 'submitted_tracking_numbers' key afterward (the key lives only in
+    the shared shop2parcel.__shared__ store from this plan onward).
+    """
+    from custom_components.shop2parcel.const import MAX_SUBMITTED_TRACKING_NUMBERS  # noqa: PLC0415
+    from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator  # noqa: PLC0415
+    from custom_components.shop2parcel.imap_coordinator import ImapCoordinator  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_imap_config_entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls_a,
+    ):
+        mock_store_cls_a.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": ["1Z999AA10123456784", "TN_SHARED"],
+                "quota_exhausted_until": None,
+            }
+        )
+        mock_store_cls_a.return_value.async_save = AsyncMock()
+        coord_a = GmailCoordinator(hass, mock_config_entry)
+        await coord_a._async_load_store()
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls_b:
+        mock_store_cls_b.return_value.async_load = AsyncMock(
+            return_value={
+                # TN_SHARED overlaps with account A's list (R3 adjacency:
+                # same TN in two per-entry stores must not double-count).
+                "submitted_tracking_numbers": ["TN_SHARED", "9400111899223197428490"],
+                "quota_exhausted_until": None,
+            }
+        )
+        mock_store_cls_b.return_value.async_save = AsyncMock()
+        coord_b = ImapCoordinator(hass, mock_imap_config_entry)
+        await coord_b._async_load_store()
+
+    # Both coordinators attached to the SAME per-test hub (the autouse fixture
+    # caches one hub per hass instance) — this IS the shared-set topology.
+    assert coord_a._hub is coord_b._hub
+    hub = coord_a._hub
+
+    assert hub.is_submitted("1Z999AA10123456784")
+    assert hub.is_submitted("TN_SHARED")
+    assert hub.is_submitted("9400111899223197428490")
+    # Union, not sum of 2+2: TN_SHARED is counted exactly once.
+    assert hub.submitted_count == 3
+    assert hub.submitted_count <= MAX_SUBMITTED_TRACKING_NUMBERS
+
+    # Neither per-entry snapshot persists the migrated key anymore (DEDUP-03 —
+    # it lives only in the shared store from this plan onward).
+    assert "submitted_tracking_numbers" not in coord_a._store_snapshot()
+    assert "submitted_tracking_numbers" not in coord_b._store_snapshot()
+
+
+async def test_restart_persistence_after_migration_reloads_migrated_tns(hass, mock_config_entry):
+    """DEDUP-02 end-to-end: after a coordinator's one-time migration seeds and
+    saves the shared hub, a FRESH hub instance whose shared store returns the
+    saved payload restores the migrated tracking numbers as submitted — no
+    re-POST on restart.
+    """
+    from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": ["1Z999AA10123456784"],
+                "quota_exhausted_until": None,
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+    hub = coord._hub
+    assert hub.is_submitted("1Z999AA10123456784")
+
+    # Capture the payload the migration's hub.async_save() actually wrote to
+    # this test's mocked shared Store — this is what a real restart would
+    # read back from shop2parcel.__shared__.
+    save_calls = hub._store.async_save.await_args_list
+    assert save_calls, "a non-empty migration must call hub.async_save()"
+    saved_payload = save_calls[-1].args[0]
+    assert saved_payload["submitted_tracking_numbers"] == ["1Z999AA10123456784"]
+
+    # Simulated restart: a brand-new hub whose shared store returns that payload.
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls:
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=saved_payload)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+
+        fresh_hub = Shop2ParcelHub(hass)
+        await fresh_hub.async_setup()
+
+        assert fresh_hub.is_submitted("1Z999AA10123456784")
+        # check_and_mark returning True (already-present) is the no-re-POST contract.
+        assert fresh_hub.check_and_mark("1Z999AA10123456784") is True
+
+        await fresh_hub.async_shutdown()
+
     assert "__shared__" not in hass.data.get(DOMAIN, {})
