@@ -647,6 +647,8 @@ async def test_remove_last_account_tears_down_hub(hass, mock_config_entry, mock_
             await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
             spy_shutdown.assert_called_once()
 
+    assert "__shared__" not in hass.data.get(DOMAIN, {})
+
 
 # ---------------------------------------------------------------------------
 # Phase 30-03 (DEDUP-01..03): migration union + restart persistence
@@ -774,4 +776,61 @@ async def test_restart_persistence_after_migration_reloads_migrated_tns(hass, mo
 
         await fresh_hub.async_shutdown()
 
-    assert "__shared__" not in hass.data.get(DOMAIN, {})
+
+async def test_second_restart_after_migration_reseeds_nothing(hass, mock_config_entry):
+    """DEDUP-02/DEDUP-03 end-to-end: a SECOND coordinator restart (this
+    account's per-entry store now saved WITHOUT the migrated key, per
+    _store_snapshot()) migrates nothing new — seed_from_list([]) is a no-op —
+    yet the coordinator still serves dedup correctly because the shared hub
+    itself was durably persisted by the first restart's migration. No re-POST
+    on the second restart either.
+    """
+    from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+
+    # First restart (initial migration): per-entry store still has the old key.
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "submitted_tracking_numbers": ["1Z999AA10123456784"],
+                "quota_exhausted_until": None,
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord1 = GmailCoordinator(hass, mock_config_entry)
+        await coord1._async_load_store()
+
+    per_entry_snapshot_after_first_restart = coord1._store_snapshot()
+    assert "submitted_tracking_numbers" not in per_entry_snapshot_after_first_restart, (
+        "the per-entry store must never persist the key again after this plan"
+    )
+
+    # Second restart: THIS account's per-entry store now returns the
+    # post-migration snapshot (no 'submitted_tracking_numbers' key at all —
+    # exactly what _store_snapshot() produces). A fresh coordinator (sharing
+    # the SAME per-test hub via the autouse fixture, mirroring the same
+    # hass-scoped hub in production) must migrate/seed nothing new.
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls2,
+    ):
+        mock_store_cls2.return_value.async_load = AsyncMock(
+            return_value=per_entry_snapshot_after_first_restart
+        )
+        mock_store_cls2.return_value.async_save = AsyncMock()
+        coord2 = GmailCoordinator(hass, mock_config_entry)
+        await coord2._async_load_store()
+
+    # Same shared hub (per-test fixture) — dedup is served from it, not re-seeded.
+    assert coord2._hub is coord1._hub
+    assert coord2._hub.is_submitted("1Z999AA10123456784"), (
+        "dedup must still be served from the shared hub after a second restart "
+        "with no per-entry key to migrate"
+    )
+    # The second restart's migration was a no-op — its per-entry mock's
+    # async_save was never called (nothing to migrate: migrated_tns is empty).
+    mock_store_cls2.return_value.async_save.assert_not_called()
