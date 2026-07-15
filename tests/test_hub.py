@@ -311,6 +311,170 @@ async def test_remove_one_of_two_accounts_leaves_hub(hass, mock_config_entry, mo
         await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
 
 
+async def test_check_and_mark_new_tn_returns_false_then_true(hass):
+    """R1: check_and_mark on a NEW tn returns False and inserts it; a
+    subsequent call with the same tn returns True (already present).
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    assert hub.check_and_mark("1Z999AA") is False
+    assert hub.is_submitted("1Z999AA") is True
+    assert hub.check_and_mark("1Z999AA") is True
+
+
+def test_check_and_mark_existing_tn_does_not_change_length(hass):
+    """R1: marking an already-present tn returns True without changing the
+    set length.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.check_and_mark("1Z999AA")
+    length_before = hub.submitted_count
+
+    assert hub.check_and_mark("1Z999AA") is True
+    assert hub.submitted_count == length_before
+
+
+def test_check_and_mark_fifo_evicts_oldest_at_1001st_insert(hass):
+    """R1/AC: after marking 1001 distinct TNs, len == 1000, the first-inserted
+    TN was FIFO-evicted, and the 1001st TN is present.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    tns = [f"TN{i:05d}" for i in range(1001)]
+    for tn in tns:
+        hub.check_and_mark(tn)
+
+    assert len(hub._submitted_tracking_numbers) == 1000
+    assert hub.is_submitted(tns[0]) is False
+    assert hub.is_submitted(tns[-1]) is True
+
+
+def test_is_submitted_does_not_mutate_set(hass):
+    """R1: is_submitted is a read-only accessor — length is unchanged after
+    calls for both present and absent tns.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.check_and_mark("1Z999AA")
+    length_before = hub.submitted_count
+
+    assert hub.is_submitted("1Z999AA") is True
+    assert hub.submitted_count == length_before
+
+    assert hub.is_submitted("NEVER-SEEN") is False
+    assert hub.submitted_count == length_before
+
+
+def test_submitted_count_matches_set_length(hass):
+    """R1: submitted_count equals len(_submitted_tracking_numbers) after a
+    sequence of marks.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for tn in ["A", "B", "C"]:
+        hub.check_and_mark(tn)
+
+    assert hub.submitted_count == 3
+    assert hub.submitted_count == len(hub._submitted_tracking_numbers)
+
+
+def test_check_and_mark_stores_tn_verbatim_no_normalization(hass):
+    """R1/Prohibition: the hub does not re-normalize — a lowercase or
+    whitespace-padded tn is stored/read back exactly as passed.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.check_and_mark("1z 999aa")
+
+    assert hub.is_submitted("1z 999aa") is True
+    assert hub.is_submitted("1Z999AA") is False
+
+
+# ---------------------------------------------------------------------------
+# seed_from_list tests (Task 2 — union-merge migration seeding)
+# ---------------------------------------------------------------------------
+
+
+def test_seed_from_list_union_no_reorder_on_overlap(hass):
+    """R3: seed_from_list of two overlapping lists yields the union with no
+    duplicate keys; an overlapping key keeps its first-write position (not
+    moved to the end).
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.seed_from_list(["A", "B"])
+    hub.seed_from_list(["B", "C"])
+
+    assert set(hub._submitted_tracking_numbers.keys()) == {"A", "B", "C"}
+    assert list(hub._submitted_tracking_numbers.keys()) == ["A", "B", "C"]
+
+
+def test_seed_from_list_double_seed_is_idempotent(hass):
+    """R3: seeding the same list twice is idempotent — no duplicate, no
+    position move, len unchanged.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.seed_from_list(["A", "B", "C"])
+    keys_before = list(hub._submitted_tracking_numbers.keys())
+    len_before = hub.submitted_count
+
+    hub.seed_from_list(["A", "B", "C"])
+
+    assert list(hub._submitted_tracking_numbers.keys()) == keys_before
+    assert hub.submitted_count == len_before
+
+
+def test_seed_from_list_caps_at_1000_after_seeding(hass):
+    """R3/Prohibition: seed_from_list of 1200 distinct TNs leaves len == 1000
+    — the FIFO cap is enforced AFTER seeding, not only inside check_and_mark.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    tns = [f"TN{i:05d}" for i in range(1200)]
+    hub.seed_from_list(tns)
+
+    assert len(hub._submitted_tracking_numbers) == 1000
+    assert hub.is_submitted(tns[0]) is False
+    assert hub.is_submitted(tns[-1]) is True
+
+
+def test_seed_from_list_empty_is_safe_no_op(hass):
+    """R3/AC: seed_from_list([]) is a safe no-op — no crash, set unchanged."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.check_and_mark("A")
+
+    hub.seed_from_list([])
+
+    assert list(hub._submitted_tracking_numbers.keys()) == ["A"]
+    assert hub.submitted_count == 1
+
+
+def test_seed_from_list_ignores_non_str_items(hass):
+    """T-30-02: non-str items passed to seed_from_list are dropped (defensive,
+    mirrors the coordinator's isinstance guard).
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.seed_from_list(["A", 123, None, "B", 4.5])
+
+    assert set(hub._submitted_tracking_numbers.keys()) == {"A", "B"}
+
+
 async def test_remove_last_account_tears_down_hub(hass, mock_config_entry, mock_config_entry_b):
     """R3/R4/LIFE-04: removing the last account tears down the hub —
     hass.data[DOMAIN]["__shared__"] is absent and hub.async_shutdown() was called.

@@ -8,6 +8,17 @@ Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) 
 
 Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
 
+## Current Milestone: v1.5 Shared Pools & IMAP Parity
+
+**Goal:** Let up to ~10 mixed Gmail/IMAP accounts on one HA instance share a single global parcelapp quota, one LLM queue+worker, and one dedup set — with full Gmail↔IMAP feature parity.
+
+**Target features:**
+- Gmail↔IMAP full parity audit — close every Gmail-only divergence (startup inline-Ollama-fallback deferral, per-poll wall-clock budget, coordinator paths), backed by cross-parity tests
+- Global shared parcelapp 20/day budget across all accounts (first-come-first-served), persisted across restart
+- Single shared Stage-2 LLM queue + long-lived Ollama worker for the whole HA instance
+- Global shared submitted-tracking-number dedup set — same TN seen in two mailboxes is POSTed once
+- Multi-account lifecycle — support ~10 accounts, any mix of Gmail + IMAP; per-account add/remove never disrupts others; last account tears down shared singletons (10 is a support target, not an enforced cap)
+
 ## Current State: v1.3 AI-based Email Analysis — SHIPPED 2026-06-17
 
 Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local Ollama LLM (Stage 2), always-on, with bounded async queue, LLM-authoritative merge, five quota-burn mitigations, loud failure surface, `Stage2Sensor` diagnostic entity, and complete README setup section.
@@ -95,7 +106,15 @@ Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local O
 - ✓ `Stage2Sensor` diagnostic entity + PollStats Stage-2 counters + user custom extraction fields as sensor attributes — v1.3 (Phase 21)
 - ✓ README "AI-based email analysis (v1.3)" section with Ollama networking guide and reachability sanity-check — v1.3 (Phase 22)
 
-### Active (v1.4+)
+### Active (v1.5 — Shared Pools & IMAP Parity)
+
+- [ ] Gmail↔IMAP feature parity: audit and close all Gmail-only divergences (startup inline-fallback deferral, per-poll wall-clock budget)
+- [ ] Global shared parcelapp 20/day budget across all accounts (FCFS), persisted across restart
+- [ ] Single shared Stage-2 LLM queue + long-lived Ollama worker for the whole HA instance
+- [ ] Global shared submitted-tracking-number dedup set across all accounts
+- [ ] Multi-account lifecycle: ~10 mixed Gmail/IMAP accounts; clean per-account add/remove; last account tears down shared singletons
+
+### Active (v1.4+ backlog)
 
 - [ ] Custom extraction fields persisted across HA restarts (STORAGE_VERSION 3→4 migration)
 - [ ] Stage-2 inference-latency rolling-average sensor
@@ -182,4 +201,4 @@ Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local O
 5. Update Context with current state
 
 ---
-*Last updated: 2026-06-17 after v1.3 AI-based email analysis milestone*
+*Last updated: 2026-07-03 — started milestone v1.5 Shared Pools & IMAP Parity*
