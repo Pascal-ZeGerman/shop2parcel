@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
@@ -66,7 +66,6 @@ from .const import (
     DOMAIN,
     MAX_STAGE2_FALLBACK_INLINE_SECONDS,
     MAX_STAGE2_POSTS_PER_POLL,
-    MAX_SUBMITTED_TRACKING_NUMBERS,
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
     STAGE2_NOTIFY_COOLDOWN_S,
@@ -77,6 +76,12 @@ from .const import (
 )
 from .extractors.ollama_extractor import OllamaExtractor
 from .merge import merge_llm_authoritative
+
+if TYPE_CHECKING:
+    # Phase 30-03: hub.py imports coordinator.py, so a module-level runtime import
+    # here would create a circular import. TYPE_CHECKING-only import lets self._hub
+    # be typed without one.
+    from .hub import Shop2ParcelHub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -442,6 +447,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._store: Shop2ParcelStore = Shop2ParcelStore(
             hass, version=STORAGE_VERSION, key=f"shop2parcel.{entry.entry_id}"
         )
+        # Phase 30-03 (DEDUP-01..03): assigned by Shop2ParcelHub.attach() before
+        # _async_load_store and before any poll (__init__.py:181-182). All dedup
+        # reads/writes route through this shared hub — see _hub.is_submitted /
+        # _hub.check_and_mark call sites below.
+        self._hub: Shop2ParcelHub | None = None
+        # RETAINED (SPEC out-of-scope): vestigial — no longer read/written for dedup.
         self._submitted_tracking_numbers: OrderedDict[str, None] = OrderedDict()
         # Phase 27 Plan 02: seen-message-ID cache (mirrors _submitted_tracking_numbers).
         # Tracks Gmail message IDs already processed (any outcome) in a prior poll so
@@ -599,35 +610,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 notification_id=stage2_cap_notification_id(self.config_entry.entry_id),
             )
 
-    def _record_submitted_tn(self, normalized_tn: str) -> None:
-        """Record a tracking number in the dedup set and trim FIFO to the cap.
-
-        IN-01: single helper for every dedup-write site (inline POST success,
-        AlreadyAdded/InvalidTracking suppression, worker success, drain) so the
-        trim policy cannot drift per-site. Previously each site used a
-        single-eviction ``if`` (one popitem per insert) while the seen-ID cache
-        used ``while``.
-        """
-        self._submitted_tracking_numbers[normalized_tn] = None
-        self._trim_submitted_tns()
-
-    def _trim_submitted_tns(self) -> None:
-        """FIFO-trim _submitted_tracking_numbers to MAX_SUBMITTED_TRACKING_NUMBERS.
-
-        IN-01: ``while`` (not ``if``) so an oversized set — e.g. a hand-edited or
-        pre-fix store hydrated by _async_load_store — converges to the cap in one
-        call instead of shrinking by one entry per insert.
-        """
-        while len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
-            self._submitted_tracking_numbers.popitem(last=False)
-
     def _mark_message_seen(self, msg_id: str) -> None:
         """Record a Gmail message ID as processed (seen) so it is skipped on future polls.
 
         Idempotent: re-marking an existing ID is a no-op (the key already exists in the
         OrderedDict; no re-ordering of existing entries occurs).  After adding, the cache
-        is trimmed FIFO if it exceeds SEEN_MESSAGE_IDS_MAXLEN — mirrors the
-        _submitted_tracking_numbers trim at coordinator lines 1114-1116.
+        is trimmed FIFO if it exceeds SEEN_MESSAGE_IDS_MAXLEN — mirrors the shared hub's
+        _trim_submitted_tns policy (Shop2ParcelHub, hub.py).
 
         Phase 27 Plan 02 (seen-ID gate).
         """
@@ -1339,7 +1328,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         QUE-06: skips silently if normalized_tn already in _stage2_enqueued_keys.
         QUE-03: on QueueFull, logs warning + emits stage2_dropped_backpressure event,
-                does NOT write to _submitted_tracking_numbers.
+                does NOT write to the shared hub's dedup set.
         Uses put_nowait (never await put) per QUE-07.
 
         The add to _stage2_enqueued_keys happens ONLY after successful put_nowait
@@ -1502,6 +1491,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not self._pending_posts:
             return
         assert self.config_entry is not None
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
         debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
         if debug_mode:
             return  # debug mode never accumulates _pending_posts; early exit is safe (Pitfall 1)
@@ -1606,8 +1596,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._stage2_posts_this_poll += 1
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
             self._record_stage2_success()
-            # Write dedup so next poll does not retry this TN (IN-01: shared helper).
-            self._record_submitted_tn(normalized_tn)
+            # Write dedup so next poll does not retry this TN (DEDUP-01: shared hub).
+            self._hub.check_and_mark(normalized_tn)
             # Pitfall 2: remove ONLY after a successful POST (never before).
             del self._pending_posts[storage_key]
             # Pitfall 5: re-snapshot immediately before async_set_updated_data to avoid
@@ -1643,6 +1633,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         by the next _async_update_data poll cycle instead.
         """
         assert self.config_entry is not None
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
         normalized_tn = job.normalized_tn
         _LOGGER.debug(
             "Stage-2: dequeued job tn=%s extractor=%s",
@@ -1656,7 +1647,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # it — do NOT POST again. A second POST double-consumes the parcelapp 20/day quota and
         # creates a duplicate delivery. Discard the in-flight key and return; leave the
         # in-flight message entry so it converges to a persisted seen ID normally.
-        if normalized_tn in self._submitted_tracking_numbers:
+        # DEDUP-01: read-only — this is a skip-gate, not a write (see design note in
+        # 30-03-PLAN.md); the terminal write happens at the check_and_mark call sites below.
+        if self._hub.is_submitted(normalized_tn):
             _LOGGER.debug(
                 "Stage-2: tn=%s already forwarded — skipping duplicate POST", normalized_tn
             )
@@ -1910,8 +1903,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # and no parcelapp quota was consumed, so counting these ate
             # MAX_STAGE2_POSTS_PER_POLL cap slots for non-POST outcomes (the D-12
             # contract is "increment only on successful POST").
-            # Write dedup so next poll does not retry; discard in-flight key (IN-01: shared helper).
-            self._record_submitted_tn(normalized_tn)
+            # Write dedup so next poll does not retry; discard in-flight key (DEDUP-01: shared hub).
+            self._hub.check_and_mark(normalized_tn)
             self._stage2_enqueued_keys.discard(normalized_tn)
             # WR-08: mirror the success path — persist AND publish. Persisting without
             # async_set_updated_data left store and live data divergent (the entry was
@@ -1936,7 +1929,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
         self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
         self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
-        self._record_submitted_tn(normalized_tn)  # IN-01: shared dedup-write helper
+        self._hub.check_and_mark(normalized_tn)  # DEDUP-01: shared dedup-write
         self._stage2_enqueued_keys.discard(normalized_tn)  # Phase 18 WR-01 fix
 
         # D-06: snapshot pattern — never mutate self.data directly.
@@ -1952,10 +1945,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """Hydrate dedup, quota, and persisted shipments state from Store.
 
         MUST be called before async_config_entry_first_refresh(). Failing to do so
-        leaves _submitted_tracking_numbers empty, causing every previously submitted
-        tracking number to be re-POSTed on startup. It also leaves _restored_shipments
-        empty, causing all previously persisted sensors to disappear until their email
-        is re-scanned.
+        leaves this account's per-entry dedup list un-migrated into the shared hub,
+        causing every previously submitted tracking number to be re-POSTed on startup.
+        It also leaves _restored_shipments empty, causing all previously persisted
+        sensors to disappear until their email is re-scanned.
 
         async_setup_entry in __init__.py is the canonical caller; do not call this
         method from any other site without careful thought about sequencing.
@@ -1983,6 +1976,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # ConfigEntryNotReady signals HA to retry async_setup_entry with
             # exponential backoff rather than treating this as a polling failure.
             raise ConfigEntryNotReady(f"Shop2Parcel store load failed: {err}") from err
+        assert self._hub is not None  # attach() runs before _async_load_store (__init__.py:181-182)
         stored_list = stored.get("submitted_tracking_numbers", [])
         if not isinstance(stored_list, list):
             _LOGGER.warning(
@@ -1994,17 +1988,18 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # WR-01: re-normalize stored keys through the (now separator-stripping)
         # canonical form so entries written by older versions under the
         # strip().upper() scheme stay effective as dedup keys.
-        self._submitted_tracking_numbers = OrderedDict(
-            (normalize_tracking_number(tn), None) for tn in stored_list if isinstance(tn, str)
-        )
-        # IN-01: trim once after hydration — an oversized (hand-edited or pre-fix)
-        # store list previously stayed above the cap and shrank by one per insert.
-        self._trim_submitted_tns()
+        # DEDUP-03: one-time migration — union-merge this account's per-entry list into
+        # the shared hub set (idempotent: seed_from_list uses setdefault). The actual
+        # persistence of this migration (hub save, then per-entry save dropping the
+        # key) is deferred to the end of this method — see the comment near
+        # self._store_loaded = True below for why.
+        migrated_tns = [normalize_tracking_number(tn) for tn in stored_list if isinstance(tn, str)]
+        self._hub.seed_from_list(migrated_tns)
         qe = stored.get("quota_exhausted_until")
         self._quota_exhausted_until = qe if isinstance(qe, int) else None
         _LOGGER.debug(
-            "Loaded %d submitted tracking numbers from store",
-            len(self._submitted_tracking_numbers),
+            "Migrated %d submitted tracking numbers from per-entry store into the shared hub",
+            len(migrated_tns),
         )
         # Phase 27 Plan 02: hydrate seen-message-ID cache (additive store key).
         # A store without the key (e.g. a v3 store written before Plan 02) loads
@@ -2137,6 +2132,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             len(self._restored_shipments),
             len(self._pending_posts),
         )
+        # DEDUP-03 / Prohibition 2: persist the migration only now — AFTER every field
+        # above (_restored_shipments/_pending_shipments/_pending_posts/counters) has
+        # been hydrated from `stored`. _store_snapshot() reads those live attributes,
+        # so saving any earlier (e.g. right after seed_from_list above) would snapshot
+        # them at their __init__ defaults ({}/{}/0/None) and silently wipe the real
+        # per-entry store contents — a Rule 1 correctness fix over the plan's literal
+        # placement. Ordering still satisfies Prohibition 2: the shared hub is saved
+        # durably FIRST, then the per-entry store is saved (which now omits the
+        # 'submitted_tracking_numbers' key unconditionally — see _store_snapshot). A
+        # crash between the two awaits leaves the per-entry key intact; seed_from_list's
+        # setdefault makes re-seeding on the next restart idempotent (no duplicate, no
+        # loss).
+        if migrated_tns:
+            await self._hub.async_save()
+            await self._async_save_store(immediate=True)
 
     async def _async_save_store(self, *, immediate: bool = False) -> None:
         """Persist dedup, quota, shipment, and operational-counter state to Store.
@@ -2161,9 +2171,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         failure surfaces immediately (loud-failure convention) rather than producing a
         stale snapshot. Shared by the debounced (_persist_state) and immediate
         (_async_save_store_now) write paths so the two can never drift.
+
+        DEDUP-03: 'submitted_tracking_numbers' is deliberately ABSENT — that dedup
+        state now lives only in the shared hub's shop2parcel.__shared__ store
+        (Shop2ParcelHub.async_save). Every per-entry save after this plan omits the
+        key unconditionally, which is what makes the one-time migration delete
+        permanent (see _async_load_store).
         """
         return {
-            "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
             "quota_exhausted_until": self._quota_exhausted_until,
             "persisted_shipments": {
                 msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
@@ -2198,9 +2213,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         try:
             self._store.async_delay_save(lambda: snapshot, delay=5)
             _LOGGER.debug(
-                "Scheduled debounced save for %d submitted tracking numbers, "
-                "%d persisted shipments, and %d pending posts",
-                len(snapshot["submitted_tracking_numbers"]),
+                "Scheduled debounced save for %d persisted shipments and %d pending posts "
+                "(dedup state now lives in the shared hub store)",
                 len(snapshot["persisted_shipments"]),
                 len(snapshot["pending_posts"]),
             )
