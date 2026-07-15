@@ -717,7 +717,7 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
         await hass.async_block_till_done()
 
         assert "1Z999" not in coord._stage2_enqueued_keys
-        assert "1Z999" in coord._submitted_tracking_numbers
+        assert coord._hub.is_submitted("1Z999")
 
 
 async def test_enqueued_key_discarded_on_ollama_failure_without_dedup(
@@ -768,7 +768,7 @@ async def test_enqueued_key_discarded_on_ollama_failure_without_dedup(
 
         # Worker-level except Exception block discards key without dedup write.
         assert "1Z999" not in coord._stage2_enqueued_keys
-        assert "1Z999" not in coord._submitted_tracking_numbers
+        assert not coord._hub.is_submitted("1Z999")
 
 
 async def test_worker_does_not_swallow_cancelled_error_during_process_job(
@@ -1094,7 +1094,7 @@ async def test_ollama_transient_no_post_no_dedup(hass, mock_stage2_config_entry)
         # FAIL-03: POST must NOT be called.
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
         # FAIL-03: Tracking number must NOT be written to dedup store.
-        assert job.normalized_tn not in coord._submitted_tracking_numbers
+        assert not coord._hub.is_submitted(job.normalized_tn)
 
 
 async def test_poison_message_quarantined_after_threshold(hass, mock_stage2_config_entry):
@@ -1334,7 +1334,7 @@ async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
         # FAIL-03: POST must NOT be called.
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 0
         # FAIL-03: Tracking number must NOT be written to dedup store.
-        assert job.normalized_tn not in coord._submitted_tracking_numbers
+        assert not coord._hub.is_submitted(job.normalized_tn)
 
 
 # ---------------------------------------------------------------------------
@@ -1469,7 +1469,7 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
         # Exactly 2 POSTs (cap = 2).
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 2
         # 3rd job NOT in dedup store — retryable next poll.
-        assert "TN000003" not in coord._submitted_tracking_numbers
+        assert not coord._hub.is_submitted("TN000003")
         # 3rd job NOT in enqueued keys (was discarded by cap gate).
         assert "TN000003" not in coord._stage2_enqueued_keys
 
@@ -3323,7 +3323,7 @@ async def test_debug_mode_extractor_runs_no_post_no_store_write(hass, mock_stage
         # AC-5d: _pending_posts is empty — debug mode never accumulates post-pending items.
         assert coord._pending_posts == {}
         # AC-5e: tracking number NOT written to submitted_tracking_numbers (dedup not written).
-        assert job.normalized_tn not in coord._submitted_tracking_numbers
+        assert not coord._hub.is_submitted(job.normalized_tn)
 
 
 async def test_quota_skip_warning_throttled_after_first(hass, mock_stage2_config_entry, caplog):
@@ -3914,10 +3914,10 @@ async def test_cap_skip_caches_prefetched_result_for_gatekeeper(hass, mock_stage
 
 
 async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stage2_config_entry):
-    """Finding #501 (iter 4): the worker must not POST a tracking number that is already in
-    _submitted_tracking_numbers (e.g. the drain just POSTed a quota-deferred copy of it before
-    a re-enqueued job for the same tn ran). A second POST double-consumes the parcelapp 20/day
-    quota and creates a duplicate delivery."""
+    """Finding #501 (iter 4): the worker must not POST a tracking number that is already
+    submitted in the shared hub's dedup set (e.g. the drain just POSTed a quota-deferred
+    copy of it before a re-enqueued job for the same tn ran). A second POST
+    double-consumes the parcelapp 20/day quota and creates a duplicate delivery."""
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -3940,7 +3940,7 @@ async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stag
         await coord.async_start_stage2()
 
         # tn already forwarded (e.g. by the pending-posts drain).
-        coord._submitted_tracking_numbers["1Z999AA10123456784"] = None
+        coord._hub.check_and_mark("1Z999AA10123456784")
         coord._stage2_enqueued_keys = {"1Z999AA10123456784"}
 
         job = Stage2Job(
@@ -4412,7 +4412,7 @@ async def test_worker_already_added_publishes_and_consumes_no_cap_slot(
             "AlreadyAdded must not consume a MAX_STAGE2_POSTS_PER_POLL slot"
         )
         # Existing semantics preserved: dedup written, key discarded.
-        assert tn in coord._submitted_tracking_numbers
+        assert coord._hub.is_submitted(tn)
         assert tn not in coord._stage2_enqueued_keys
 
         await coord.async_stop_stage2()

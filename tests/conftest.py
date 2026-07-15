@@ -146,6 +146,87 @@ async def setup_coordinator_with_data(hass, mock_config_entry, data: dict[str, S
         return coordinator
 
 
+def _make_test_hub(hass):
+    """Construct a Shop2ParcelHub with a mocked, I/O-free shared Store.
+
+    Phase 30-03: does NOT call hub.async_setup() — that spawns the hass-scoped
+    background worker task (hub.py's _stub_worker/real worker), which is never
+    needed by dedup-focused unit tests and would otherwise leak a lingering
+    task at test teardown. Only the synchronous dedup core (check_and_mark,
+    is_submitted, submitted_count, seed_from_list) and async_save/async_load
+    (which only touch hub._store, set here directly) are exercised.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub._store = MagicMock()
+    hub._store.async_load = AsyncMock(return_value=None)
+    hub._store.async_save = AsyncMock()
+    return hub
+
+
+def attach_hub(hass, coordinator):
+    """Attach a fresh, I/O-free test hub to a directly-constructed coordinator.
+
+    Phase 30-03 (DEDUP-01..03): mirrors Shop2ParcelHub.attach() in production
+    (sets coordinator._hub) minus the real Store I/O and the background worker
+    task. Every coordinator constructed during a test already gets a shared
+    hub automatically via the autouse `_auto_attach_test_hub` fixture below —
+    call this explicitly only when a test needs its OWN hub instance distinct
+    from that per-test shared one (e.g. proving two hubs do NOT share state).
+    Returns the hub so the caller can assert on its dedup state directly.
+    """
+    hub = _make_test_hub(hass)
+    hub.attach(coordinator)
+    return hub
+
+
+@pytest.fixture(autouse=True)
+def _auto_attach_test_hub(hass):
+    """Auto-attach a shared, I/O-free Shop2ParcelHub to every coordinator
+    constructed directly during a test (bypassing hass.config_entries.async_setup).
+
+    Phase 30-03 (DEDUP-01..03): every dedup read/write in coordinator.py,
+    gmail_coordinator.py, and imap_coordinator.py now routes through
+    coordinator._hub, which production code sets via Shop2ParcelHub.attach()
+    inside async_setup_entry. Tests across this suite construct
+    GmailCoordinator/ImapCoordinator/Shop2ParcelCoordinator directly to unit
+    test the coordinator in isolation — without this fixture, _hub stays None
+    and every dedup call site raises AssertionError.
+
+    Implementation: monkeypatches Shop2ParcelCoordinator.__init__ (the base
+    class every subclass's __init__ calls via super().__init__()) to set
+    self._hub directly to a single per-hass-instance test hub (cached under
+    hass.data[DOMAIN]["_test_hub"] — a key distinct from the production
+    "__shared__" key, so it can never collide with or be mistaken for a real
+    hub). Setting _hub directly (not via hub.attach()) means this fixture
+    never touches hub._refcount.
+
+    Tests that go through the REAL async_setup_entry (via
+    hass.config_entries.async_setup(...), e.g. setup_coordinator_with_data in
+    this file) are UNAFFECTED: production code's explicit
+    hub.attach(coordinator) call runs immediately after construction and
+    overwrites self._hub with the real hub, incrementing refcount exactly
+    once — the LIFE-01..05 hub lifecycle tests in test_hub.py never observe
+    this fixture's test hub.
+    """
+    from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
+
+    original_init = Shop2ParcelCoordinator.__init__
+
+    def patched_init(self, hass_arg, entry):
+        original_init(self, hass_arg, entry)
+        hass_arg.data.setdefault(DOMAIN, {})
+        test_hub = hass_arg.data[DOMAIN].get("_test_hub")
+        if test_hub is None:
+            test_hub = _make_test_hub(hass_arg)
+            hass_arg.data[DOMAIN]["_test_hub"] = test_hub
+        self._hub = test_hub
+
+    with patch.object(Shop2ParcelCoordinator, "__init__", patched_init):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def enable_custom_integrations(enable_custom_integrations):  # noqa: F811
     """Allow HA's component loader to find custom_components/ during tests."""
