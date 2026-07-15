@@ -90,8 +90,15 @@ class Shop2ParcelHub:
         self._worker_task.add_done_callback(self._log_hub_worker_crash)
 
     def attach(self, coordinator: Shop2ParcelCoordinator) -> None:
-        """Increment the reference count (called from async_setup_entry)."""
+        """Increment the reference count (called from async_setup_entry).
+
+        Phase 30-03 (DEDUP-01..03): sets ``coordinator._hub = self`` — the single
+        wiring point that lets every coordinator reach the shared dedup set.
+        Runs at __init__.py:181, before _async_load_store at :182, so ``_hub`` is
+        available for migration seeding and every subsequent poll.
+        """
         self._refcount += 1
+        coordinator._hub = self
         _LOGGER.debug("Hub attach: refcount=%d", self._refcount)
 
     def detach(self, coordinator: Shop2ParcelCoordinator) -> None:
