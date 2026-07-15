@@ -76,6 +76,10 @@ class Shop2ParcelHub:
             await self._store.async_save({"version": SHARED_STORAGE_VERSION})
         # else: valid existing version — leave unchanged (R5 idempotency).
 
+        # DEDUP-02: rehydrate the shared dedup set after the version handling
+        # above (the store is already assigned by this point).
+        await self.async_load()
+
         # Hub-scoped (NOT entry-scoped): this task must survive any single
         # account being removed, so it is spawned via hass.async_create_background_task
         # rather than the per-entry background-task API (see coordinator.py:1222).
@@ -164,6 +168,44 @@ class Shop2ParcelHub:
                 self._submitted_tracking_numbers.setdefault(tn, None)
         self._trim_submitted_tns()
 
+    async def async_save(self) -> None:
+        """Serialize the shared dedup set (plus version) to the shared store.
+
+        DEDUP-02: additive store key — 'submitted_tracking_numbers' lives
+        alongside the existing 'version' key with no SHARED_STORAGE_VERSION
+        bump. No-op if the store hasn't been created yet (async_setup not
+        called, or already torn down).
+        """
+        if self._store is not None:
+            await self._store.async_save(
+                {
+                    "version": SHARED_STORAGE_VERSION,
+                    "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
+                }
+            )
+
+    async def async_load(self) -> None:
+        """Rehydrate the shared dedup set from the shared store.
+
+        T-30-04: defensive against a corrupt/hand-edited store payload — a
+        non-list 'submitted_tracking_numbers' value logs a WARNING and loads
+        as empty rather than crashing hub setup (mirrors coordinator.py's
+        equivalent guard). Non-str items are dropped by seed_from_list
+        (T-30-02). No-op if the store hasn't been created yet.
+        """
+        if self._store is None:
+            return
+        data = await self._store.async_load() or {}
+        stored_list = data.get("submitted_tracking_numbers", [])
+        if not isinstance(stored_list, list):
+            _LOGGER.warning(
+                "shop2parcel.__shared__ store's 'submitted_tracking_numbers' "
+                "value is not a list (type=%s); treating as empty.",
+                type(stored_list).__name__,
+            )
+            stored_list = []
+        self.seed_from_list([tn for tn in stored_list if isinstance(tn, str)])
+
     async def async_shutdown(self) -> None:
         """Cancel the worker task and flush the store. Does NOT touch hass.data.
 
@@ -176,8 +218,10 @@ class Shop2ParcelHub:
                 await asyncio.wait_for(asyncio.shield(self._worker_task), timeout=5.0)
             except (asyncio.CancelledError, TimeoutError):  # fmt: skip
                 pass
-        if self._store is not None:
-            await self._store.async_save({"version": SHARED_STORAGE_VERSION})
+        # DEDUP-02: flush the dedup set (not just the version) on teardown —
+        # the Phase 29 shutdown wrote {"version": SHARED_STORAGE_VERSION}
+        # only, which would silently erase the dedup set on every unload.
+        await self.async_save()
 
     async def _stub_worker(self) -> None:
         """Worker stub — raises NotImplementedError on any job dequeue.
