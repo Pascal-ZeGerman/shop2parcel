@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 
 from homeassistant.core import HomeAssistant, callback
 
+from .const import MAX_SUBMITTED_TRACKING_NUMBERS
 from .coordinator import Shop2ParcelCoordinator, Shop2ParcelStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,6 +48,10 @@ class Shop2ParcelHub:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: asyncio.Task | None = None
         self._store: Shop2ParcelStore | None = None
+        # Phase 30 (DEDUP-01/DEDUP-03): single shared dedup set, FIFO-capped
+        # at MAX_SUBMITTED_TRACKING_NUMBERS. Pure in-memory core in this plan
+        # (30-01) — persistence (async_save/async_load) lands in 30-02.
+        self._submitted_tracking_numbers: OrderedDict[str, None] = OrderedDict()
 
     async def async_setup(self) -> None:
         """Load/seed the shared store and spawn the hass-scoped worker stub."""
@@ -96,6 +102,67 @@ class Shop2ParcelHub:
         else:
             _LOGGER.warning("Hub detach called with refcount already 0 — ignoring")
         _LOGGER.debug("Hub detach: refcount=%d", self._refcount)
+
+    def _trim_submitted_tns(self) -> None:
+        """FIFO-trim _submitted_tracking_numbers to MAX_SUBMITTED_TRACKING_NUMBERS.
+
+        Mirrors coordinator.py's ``_trim_submitted_tns`` (IN-01): ``while``
+        (not ``if``) so an oversized set — e.g. a migration seed of 1200
+        items — converges to the cap in one call rather than shrinking by one
+        entry per insert. Shared by both write paths (check_and_mark,
+        seed_from_list) so the cap policy cannot drift between them.
+        """
+        while len(self._submitted_tracking_numbers) > MAX_SUBMITTED_TRACKING_NUMBERS:
+            self._submitted_tracking_numbers.popitem(last=False)
+
+    def check_and_mark(self, tn: str) -> bool:
+        """Atomically check-and-mark a tracking number in the shared set.
+
+        DEDUP-01: synchronous by design (no ``await`` between check and
+        insert) — lock-free; the single-threaded HA event loop serializes
+        callers. Returns ``True`` if ``tn`` was already present (caller must
+        skip the POST — already submitted by this or another account).
+        Returns ``False`` and records ``tn`` if it is new (caller proceeds
+        with the POST). Does NOT re-normalize ``tn`` — callers must pass the
+        ``validate_carrier_format()``-clean canonical form (D-03).
+        """
+        if tn in self._submitted_tracking_numbers:
+            return True
+        self._submitted_tracking_numbers[tn] = None
+        self._trim_submitted_tns()
+        return False
+
+    def is_submitted(self, tn: str) -> bool:
+        """Read-only membership check — never mutates the shared set.
+
+        Used as a skip-gate ahead of a queue-decoupled POST (the terminal
+        POST-success write happens via ``check_and_mark`` instead; see
+        30-SPEC.md AC-68). Does NOT re-normalize ``tn``.
+        """
+        return tn in self._submitted_tracking_numbers
+
+    @property
+    def submitted_count(self) -> int:
+        """Number of tracking numbers currently in the shared dedup set."""
+        return len(self._submitted_tracking_numbers)
+
+    def seed_from_list(self, tn_list: list[str]) -> None:
+        """Union-merge a per-account tracking-number list into the shared set.
+
+        DEDUP-03 migration seeding: each ``tn`` uses ``setdefault`` so an
+        already-present key keeps its original (first-write) position — no
+        re-ordering, no duplicate. Non-str items are dropped defensively
+        (T-30-02), mirroring the coordinator's ``isinstance(tn, str)`` guard.
+        The FIFO cap is enforced once AFTER the full list is merged (not only
+        inside check_and_mark) so a migration seed larger than the cap still
+        converges to MAX_SUBMITTED_TRACKING_NUMBERS. An empty list is a
+        natural no-op — the loop runs zero times and the trim is applied to
+        a set already at/under cap.
+        """
+        for tn in tn_list:
+            if isinstance(tn, str):
+                self._submitted_tracking_numbers.setdefault(tn, None)
+        self._trim_submitted_tns()
 
     async def async_shutdown(self) -> None:
         """Cancel the worker task and flush the store. Does NOT touch hass.data.
