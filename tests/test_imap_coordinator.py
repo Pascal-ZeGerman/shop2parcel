@@ -472,3 +472,93 @@ async def test_imap_storage_key_falls_back_to_bare_uid(hass, mock_imap_no_stage2
         data = await coord._async_update_data()
 
     assert "42" in data
+
+
+# ---------------------------------------------------------------------------
+# Phase 31-05 (QUOTA-02): IMAP inline forward path <-> shared hub daily budget
+# ---------------------------------------------------------------------------
+
+
+async def test_imap_inline_transient_error_refunds_reserved_slot(hass, mock_imap_no_stage2_entry):
+    """D-01: a transient inline POST failure refunds the daily-budget slot it reserved —
+    the shared hub's used_today returns to its pre-poll value (reserve then refund nets
+    to zero movement), and the message is left re-parseable (not dedup-marked).
+    """
+    from custom_components.shop2parcel.api.exceptions import ParcelAppTransientError
+
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    raw_msg = _make_imap_message(uid=7, tracking_number=tn)
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(tn)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppTransientError("parcelapp.net 502")
+        )
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+        assert coord._hub.used_today == 0  # pre-poll baseline (conftest's shared test hub)
+
+        await coord._async_update_data()
+
+    # Reserved (try_consume) then refunded on the transient error — nets back to 0.
+    assert coord._hub.used_today == 0, (
+        f"Expected used_today back to 0 after refund, got {coord._hub.used_today}"
+    )
+    # Not dedup-marked — the message stays re-fetchable for retry.
+    assert not coord._hub.is_submitted(tn)
+
+
+async def test_imap_inline_429_blocks_shared_hub(hass, mock_imap_no_stage2_entry):
+    """D-01/D-06: an inline 429 routes to hub.record_quota_exhausted (no refund) — the
+    shared hub's quota_is_exhausted flips True, blocking ALL accounts, not just this one.
+    """
+    from custom_components.shop2parcel.api.exceptions import ParcelAppQuotaError
+
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    raw_msg = _make_imap_message(uid=8, tracking_number=tn)
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(tn)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppQuotaError("quota exhausted", reset_at=9999999999)
+        )
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+        assert coord._hub.quota_is_exhausted is False
+
+        await coord._async_update_data()
+
+    assert coord._hub.quota_is_exhausted is True
+    assert coord._hub.quota_exhausted_until == 9999999999
+    # No refund on 429 (D-01) — the reserved slot stays consumed.
+    assert coord._hub.used_today == 1

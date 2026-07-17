@@ -56,7 +56,6 @@ from .coordinator import (
     Shop2ParcelCoordinator,
     Stage2Job,  # noqa: F401 — type import; subclass calls _enqueue_stage2 which constructs Stage2Job
     _extract_imap_email_meta,
-    _next_midnight_utc,
     _sanitise_parser_error,
 )
 
@@ -149,12 +148,15 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         # A poll that raises stays "first" until one clean pass completes, so the bootstrap
         # window guard remains active across any transient first-poll failures.
         self._first_refresh_done = True
-        # D-01: persist the shared hub's dedup set at the end of every successful poll —
-        # unconditional (no dirty flag) so a crash/restart never loses a mark made this
-        # poll. This is the FINAL await of a successful poll (after all coordinator.py
-        # dedup writes for this poll have already happened via check_and_mark).
+        # D-01: persist the shared hub's dedup + quota state at the end of every
+        # successful poll — unconditional (no dirty flag) so a crash/restart never
+        # loses a mark made this poll. This is the FINAL await of a successful poll
+        # (after all coordinator.py dedup writes for this poll have already happened
+        # via check_and_mark). D-07: gated on debug mode — a dry-run poll must write
+        # zero times to the shared store (P1).
         assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
-        await self._hub.async_save()
+        if not self._debug_mode_active():
+            await self._hub.async_save()
         return result
 
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
@@ -253,10 +255,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         current_data: dict[str, ShipmentData] = (
             dict(self.data) if self.data is not None else dict(self._restored_shipments)
         )
-        now = int(time.time())
-        quota_blocked = (
-            self._quota_exhausted_until is not None and now < self._quota_exhausted_until
-        )
+        # Phase 31 (D-08): read the shared hub's daily-budget gate directly — no
+        # per-account quota timestamp remains on this subclass.
+        quota_blocked = self._hub.quota_is_exhausted
 
         for msg_info in raw_messages:
             uid_str = str(msg_info["uid"])
@@ -536,6 +537,21 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 # Rebind shipment to the gate-clean canonical form (D-03).
                 shipment = dc_replace(shipment, tracking_number=im_clean)  # type: ignore[arg-type]
 
+                # Phase 31 (D-01/D-03): reserve a slot from the shared daily budget
+                # immediately before the POST — this inline path has no per-poll cap,
+                # only the daily budget. On exhaustion, treat exactly like the
+                # quota-blocked skip above (re-parseable, not terminal).
+                if not self._hub.try_consume():
+                    self._emit_scan_event(
+                        message_id=f"imap:{uid_str}",
+                        meta=imap_meta,
+                        outcome="skipped_quota",
+                        strategy=result.strategy_used or "unknown",
+                        tracking_number=shipment.tracking_number,
+                    )
+                    msg_pending_retry = True
+                    continue
+
                 carrier_code = normalize_carrier(shipment.carrier_name)
                 try:
                     await parcel_client.async_add_delivery(
@@ -548,15 +564,14 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 except ParcelAppAuthError as err:
                     raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
                 except ParcelAppQuotaError as err:
-                    self._quota_exhausted_until = (
-                        err.reset_at if err.reset_at is not None else _next_midnight_utc()
-                    )
-                    self._arm_quota_expiry_timer()  # finding 3: refresh entities at expiry
+                    # D-06: prefer reset_at, else next midnight UTC (hub max-precedence merge).
+                    # No refund (D-01) — the reserved slot stays consumed.
+                    self._hub.record_quota_exhausted(err.reset_at)
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     _LOGGER.warning(
                         "parcelapp.net daily quota exhausted; forwarding paused until %s",
-                        self._quota_exhausted_until,
+                        self._hub.quota_exhausted_until,
                     )
                     # C2/P11-CR-01: emit event for the email that triggered quota exhaustion.
                     self._emit_scan_event(
@@ -622,6 +637,8 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                             "error_msg": str(err)[:100],
                         },
                     )
+                    # D-01: return the reserved-but-unspent daily-budget slot.
+                    self._hub.refund_consume()
                     # WR-06: transient POST failure — keep the message re-parseable
                     # so it is retried next poll instead of being filtered forever.
                     msg_pending_retry = True
@@ -679,17 +696,9 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 notification_id=debug_mode_notification_id(entry.entry_id),
             )
 
-        # Clear stale quota block from Store once the window has expired.
-        # W17/P14-WR-02: skip in debug mode — zero store writes is the DBG-03 contract.
-        if (
-            not debug_mode
-            and not quota_blocked
-            and self._quota_exhausted_until is not None
-            and int(time.time()) >= self._quota_exhausted_until
-        ):
-            self._quota_exhausted_until = None
-            self._arm_quota_expiry_timer()  # finding 3: cancel the now-obsolete expiry timer
-            await self._async_save_store()
+        # Phase 31 (D-08): the per-account stale-quota-clear block is removed — the
+        # hub's own always-armed quota-expiry timer (31-03) owns clearing the shared
+        # block, and hub.quota_is_exhausted already reads False once the window passes.
 
         # CR-01: re-merge onto the LIVE self.data before trim/save/return. The Stage-2
         # worker (and the pending-posts drain) publish merged shipments via

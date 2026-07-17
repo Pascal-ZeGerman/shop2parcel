@@ -1404,3 +1404,107 @@ async def test_inline_fallback_grounding_gate_keeps_grounded_order_fields(hass, 
     assert shipment_kwarg.order_name == "Target"
     assert shipment_kwarg.order_summary == "Target - Coffee maker"
     assert coord._diagnostics.grounding_rejected_total == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 31-05 (QUOTA-02): Gmail inline forward path <-> shared hub daily budget
+# ---------------------------------------------------------------------------
+
+
+async def test_gmail_inline_transient_error_refunds_reserved_slot(hass, mock_no_stage2_entry):
+    """D-01: a transient inline POST failure refunds the daily-budget slot it reserved —
+    the shared hub's used_today returns to its pre-poll value (reserve then refund nets
+    to zero movement), and the message is left pending-retry (not dedup-marked).
+    """
+    from custom_components.shop2parcel.api.exceptions import ParcelAppTransientError
+
+    mock_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    msg_id = "msg_transient_refund"
+    mock_gmail = _make_stage1_hit_poll(msg_id, tn)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit(tn)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppTransientError("parcelapp.net 502")
+        )
+
+        coord = GmailCoordinator(hass, mock_no_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        assert coord._hub.used_today == 0  # pre-poll baseline (conftest's shared test hub)
+
+        await coord._async_update_data()
+
+    # Reserved (try_consume) then refunded on the transient error — nets back to 0.
+    assert coord._hub.used_today == 0, (
+        f"Expected used_today back to 0 after refund, got {coord._hub.used_today}"
+    )
+    # Not dedup-marked — the message stays re-fetchable for retry.
+    assert not coord._hub.is_submitted(tn)
+
+
+async def test_gmail_inline_429_blocks_shared_hub(hass, mock_no_stage2_entry):
+    """D-01/D-06: an inline 429 routes to hub.record_quota_exhausted (no refund) — the
+    shared hub's quota_is_exhausted flips True, blocking ALL accounts, not just this one.
+    """
+    from custom_components.shop2parcel.api.exceptions import ParcelAppQuotaError
+
+    mock_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    msg_id = "msg_429_blocks_all"
+    mock_gmail = _make_stage1_hit_poll(msg_id, tn)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit(tn)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppQuotaError("quota exhausted", reset_at=9999999999)
+        )
+
+        coord = GmailCoordinator(hass, mock_no_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        assert coord._hub.quota_is_exhausted is False
+
+        await coord._async_update_data()
+
+    assert coord._hub.quota_is_exhausted is True
+    assert coord._hub.quota_exhausted_until == 9999999999
+    # No refund on 429 (D-01) — the reserved slot stays consumed.
+    assert coord._hub.used_today == 1
