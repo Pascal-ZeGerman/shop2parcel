@@ -984,17 +984,27 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         return self._hub.quota_is_exhausted
 
     # ------------------------------------------------------------------
-    # Phase 31 TEMPORARY cross-plan compatibility shim (D-08) — remove in 31-05.
+    # Phase 31 TEMPORARY cross-plan compatibility shim (D-08).
     # ------------------------------------------------------------------
-    # gmail_coordinator.py and imap_coordinator.py still read/write the private
-    # `self._quota_exhausted_until` attribute directly (their own inline Stage-1-direct
-    # forward POST path's pre-POST gate, 429 handler, and stale-block clear) and still
-    # call `self._arm_quota_expiry_timer()` after every mutation — 31-05 owns rewiring
-    # those two files to the hub's public mutators (hub.quota_is_exhausted /
-    # hub.record_quota_exhausted / hub's own always-armed expiry timer, 31-03) and
-    # removing these call sites entirely. Until 31-05 lands, this base-class property +
-    # no-op method keep every existing gmail/imap poll test (and real polls) from
-    # crashing with AttributeError, by transparently redirecting the old private-attribute
+    # WR-05 (31-REVIEW): this shim's original docstring said "remove in 31-05" —
+    # that was already false by the time 31-05 shipped. 31-05 DID finish rewiring
+    # gmail_coordinator.py/imap_coordinator.py onto the hub's public mutators
+    # (hub.quota_is_exhausted / hub.record_quota_exhausted / hub's own
+    # always-armed expiry timer, 31-03) — neither file references
+    # `_quota_exhausted_until` or `_arm_quota_expiry_timer` anymore. What 31-05
+    # did NOT do is migrate the ~40 test references across tests/test_coordinator.py,
+    # tests/test_store_migration.py, tests/test_stage2_worker.py, and
+    # tests/test_binary_sensor.py that still poke this private attribute/method
+    # directly instead of going through hub.quota_is_exhausted /
+    # hub.record_quota_exhausted() / direct hub timer-handle inspection. This
+    # shim is safe to keep — it is a pure passthrough onto the hub's real public
+    # state, private, and test-only — but it should be REMOVED once those four
+    # test files are migrated off it. That migration is real refactoring work,
+    # not yet scheduled to a phase.
+    #
+    # This base-class property + no-op method keep every existing test (and, if
+    # any production caller still existed, real polls) from crashing with
+    # AttributeError, by transparently redirecting the old private-attribute
     # read/write onto the shared hub's public `quota_exhausted_until` attribute. This is
     # NOT a scope-creep reimplementation of 31-05's D-01 gate order — it is a raw
     # passthrough with no max-precedence merge, matching the OLD per-account
@@ -1011,7 +1021,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def _arm_quota_expiry_timer(self) -> None:
         """No-op backward-compat shim (Phase 31 D-08) — the hub owns its own
         always-armed quota-expiry timer (31-03); no per-coordinator arming needed.
-        Removed in 31-05 once gmail_coordinator.py/imap_coordinator.py stop calling it.
+
+        WR-05: remove once test_coordinator.py, test_store_migration.py,
+        test_stage2_worker.py, and test_binary_sensor.py are migrated to use
+        hub.quota_is_exhausted / hub.record_quota_exhausted() / direct hub
+        timer-handle inspection instead of this private passthrough — not tied
+        to any specific phase number.
         """
         return
 
