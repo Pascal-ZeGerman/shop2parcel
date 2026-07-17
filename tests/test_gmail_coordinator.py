@@ -1182,3 +1182,223 @@ async def test_stale_token_retry_also_fails_degrades_to_transient(hass, mock_gma
 
     # Explicit guard: the failure must NOT be a reauth trigger.
     assert not isinstance(UpdateFailed, ConfigEntryAuthFailed)  # sanity: distinct exception types
+
+
+# ---------------------------------------------------------------------------
+# Phase 35 Plan 04 (MRG-05, SC-1 Pitfall 2): inline Stage-1-miss fallback
+# grounding gate. The fb_shipment built directly from the Ollama fallback
+# result (no merge_llm_authoritative call — Stage-1 is None here, Pattern 3)
+# must gate order_name/order_summary through validate_grounding() using
+# body-only prose (preprocess_html(html)) BEFORE construction, mirroring the
+# production worker's grounding gate from Plan 35-03.
+# ---------------------------------------------------------------------------
+
+# Body-only prose containing no merchant-identity content tokens (no "target",
+# "coffee", "customer", "care", etc.) — a claimed order_name/order_summary
+# whose tokens are absent here must be dropped by the gate.
+_INLINE_FALLBACK_NO_MERCHANT_HTML = (
+    "<html><body><p>Hi there, your order has shipped via UPS. Tracking number: "
+    "1Z999AA10123456784</p></body></html>"
+)
+# Body-only prose that DOES contain the "Target"/"Coffee"/"maker" content
+# tokens — a claimed order_name/order_summary using those tokens must be kept.
+_INLINE_FALLBACK_TARGET_HTML = (
+    "<html><body><p>Your order from Target has shipped: Coffee maker included. "
+    "Tracking number: 1Z999AA10123456784</p></body></html>"
+)
+
+
+async def test_inline_fallback_discards_ungrounded_order_summary(hass, mock_stage2_entry):
+    """SC-1 Pitfall 2: the fallback result fabricates order_summary='Target - Coffee
+    maker' but the body prose (preprocess_html(html)) contains none of its content
+    tokens — the inline fallback must discard it (fb_shipment.order_summary is None)
+    before fb_shipment is built, and record the rejection on the dedicated counter."""
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_inline_ungrounded_summary")
+    mock_extractor = AsyncMock()
+
+    fb_result = Stage2Result(
+        locked={
+            "tracking_number": "1Z999AA10123456784",
+            "carrier_name": "UPS",
+            "order_name": "",
+            "order_summary": "Target - Coffee maker",
+        },
+        custom={},
+        passes_used=1,
+        latency_ms=9.0,
+    )
+    mock_extractor.async_extract = AsyncMock(return_value=fb_result)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value=_INLINE_FALLBACK_NO_MERCHANT_HTML,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        coord._first_refresh_done = True
+
+        await coord._async_update_data()
+
+    assert mock_enqueue.called, "Expected _enqueue_stage2 to be called (tracking number is valid)"
+    shipment_kwarg = mock_enqueue.call_args[1].get("shipment")
+    assert shipment_kwarg is not None
+    assert shipment_kwarg.order_summary is None, (
+        f"order_summary must be dropped to None (got {shipment_kwarg.order_summary!r})"
+    )
+    assert coord._diagnostics.grounding_rejected_total == 1, (
+        f"grounding_rejected_total must be 1 (was {coord._diagnostics.grounding_rejected_total})"
+    )
+    assert coord._diagnostics.last_grounding_rejected_value == "Target - Coffee maker"
+    assert coord._diagnostics.last_grounding_rejected_reason == "ungrounded"
+    # The dedicated grounding counter must never conflate with carrier-format rejections.
+    assert coord._diagnostics.carrier_format_rejected_total == 0
+
+
+async def test_inline_fallback_sender_label_not_grounded(hass, mock_stage2_entry):
+    """Spike 012 seed: the fallback result parrots a generic sender/subject-style
+    label ('Customer Care') as order_name/order_summary. Since source_text is
+    ALWAYS body-only prose (never sender/subject header context), 'customer'/'care'
+    tokens are structurally absent from the gate's evidence — both fields must be
+    dropped every time (order_name -> '', order_summary -> None)."""
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_inline_sender_label")
+    mock_extractor = AsyncMock()
+
+    fb_result = Stage2Result(
+        locked={
+            "tracking_number": "1Z999AA10123456784",
+            "carrier_name": "UPS",
+            "order_name": "Customer Care",
+            "order_summary": "Customer Care - Your order #1234",
+        },
+        custom={},
+        passes_used=1,
+        latency_ms=7.0,
+    )
+    mock_extractor.async_extract = AsyncMock(return_value=fb_result)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value=_INLINE_FALLBACK_NO_MERCHANT_HTML,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        coord._first_refresh_done = True
+
+        await coord._async_update_data()
+
+    assert mock_enqueue.called, "Expected _enqueue_stage2 to be called (tracking number is valid)"
+    shipment_kwarg = mock_enqueue.call_args[1].get("shipment")
+    assert shipment_kwarg is not None
+    assert shipment_kwarg.order_name == "", (
+        f"order_name must be dropped to '' (got {shipment_kwarg.order_name!r})"
+    )
+    assert shipment_kwarg.order_summary is None, (
+        f"order_summary must be dropped to None (got {shipment_kwarg.order_summary!r})"
+    )
+    assert coord._diagnostics.grounding_rejected_total >= 1, (
+        "grounding_rejected_total must increment for the sender-label fabrication "
+        f"(was {coord._diagnostics.grounding_rejected_total})"
+    )
+
+
+async def test_inline_fallback_keeps_grounded_order_fields(hass, mock_stage2_entry):
+    """order_name/order_summary whose content tokens DO appear in the body prose
+    must be kept intact, and grounding_rejected_total must stay 0."""
+    mock_stage2_entry.add_to_hass(hass)
+    mock_gmail = _make_stage1_miss_poll("msg_inline_grounded")
+    mock_extractor = AsyncMock()
+
+    fb_result = Stage2Result(
+        locked={
+            "tracking_number": "1Z999AA10123456784",
+            "carrier_name": "UPS",
+            "order_name": "Target",
+            "order_summary": "Target - Coffee maker",
+        },
+        custom={},
+        passes_used=1,
+        latency_ms=6.0,
+    )
+    mock_extractor.async_extract = AsyncMock(return_value=fb_result)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value=_INLINE_FALLBACK_TARGET_HTML,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        coord._first_refresh_done = True
+
+        await coord._async_update_data()
+
+    assert mock_enqueue.called, "Expected _enqueue_stage2 to be called (tracking number is valid)"
+    shipment_kwarg = mock_enqueue.call_args[1].get("shipment")
+    assert shipment_kwarg is not None
+    assert shipment_kwarg.order_name == "Target"
+    assert shipment_kwarg.order_summary == "Target - Coffee maker"
+    assert coord._diagnostics.grounding_rejected_total == 0
