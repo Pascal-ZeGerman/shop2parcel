@@ -311,6 +311,12 @@ class Shop2ParcelHub:
         conservatively at 0 rather than summing/copying stale per-account
         counters (R5). Synchronous, idempotent: re-seeding with None is a
         no-op; re-seeding the same timestamp twice yields the same value.
+
+        Re-arms the shared expiry timer after mutating quota_exhausted_until
+        (WR-03), mirroring record_quota_exhausted() — otherwise a migrated
+        cooldown that outlives whatever was armed at async_setup() time (or
+        no timer at all, if async_setup() saw quota_exhausted_until as None)
+        never gets proactively cleared.
         """
         if quota_exhausted_until is None:
             return
@@ -318,6 +324,7 @@ class Shop2ParcelHub:
             self.quota_exhausted_until = quota_exhausted_until
         else:
             self.quota_exhausted_until = max(self.quota_exhausted_until, quota_exhausted_until)
+        self._arm_quota_expiry_timer()
 
     def poll_cap_reached(self) -> bool:
         """True once the shared per-poll Stage-2 POST cap has been reached.

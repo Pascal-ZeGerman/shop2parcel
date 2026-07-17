@@ -1038,22 +1038,31 @@ async def test_async_load_corrupt_quota_values_load_defaults(hass, caplog):
 def test_migration_quota_max_across_accounts(hass):
     """QUOTA-05/R5: seed_quota_from_account(None) then (T1) then (T2) yields
     quota_exhausted_until == max(T1, T2); used_today stays 0 (migration day
-    starts conservatively — boundary R5)."""
+    starts conservatively — boundary R5). Also asserts (WR-03) that each
+    non-None seed call re-arms the shared expiry timer, mirroring
+    record_quota_exhausted()'s always-arm behavior — a None seed is a no-op
+    and must not touch the timer."""
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     hub = Shop2ParcelHub(hass)
     t1 = 1_000_000
     t2 = 2_000_000
 
-    hub.seed_quota_from_account(None)
-    assert hub.quota_exhausted_until is None
+    with patch.object(
+        hub, "_arm_quota_expiry_timer", wraps=hub._arm_quota_expiry_timer
+    ) as mock_arm:
+        hub.seed_quota_from_account(None)
+        assert hub.quota_exhausted_until is None
+        mock_arm.assert_not_called()
 
-    hub.seed_quota_from_account(t1)
-    assert hub.quota_exhausted_until == t1
+        hub.seed_quota_from_account(t1)
+        assert hub.quota_exhausted_until == t1
+        mock_arm.assert_called_once()
 
-    hub.seed_quota_from_account(t2)
-    assert hub.quota_exhausted_until == t2
-    assert hub.used_today == 0
+        hub.seed_quota_from_account(t2)
+        assert hub.quota_exhausted_until == t2
+        assert hub.used_today == 0
+        assert mock_arm.call_count == 2
 
 
 def test_migration_quota_all_none_stays_none(hass):
