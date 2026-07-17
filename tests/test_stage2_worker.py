@@ -1377,8 +1377,11 @@ def test_stage2_cap_notification_id_helper():
 
 
 async def test_coordinator_has_stage2_poll_counter_attrs(hass, mock_stage2_config_entry):
-    """MRG-05 D-11: Coordinator __init__ must set _stage2_posts_this_poll and
-    _stage2_cap_notified_this_poll to 0 / False respectively."""
+    """MRG-05 D-11: Coordinator __init__ must set _stage2_cap_notified_this_poll to
+    False. Phase 31 (D-08): the POST-count-toward-cap counter itself moved to the
+    shared hub (self._hub._stage2_posts_this_poll, initialized 0 in Shop2ParcelHub.__init__
+    per 31-01) — the per-hass test hub is auto-attached before this coordinator's own
+    __init__ body runs (conftest _auto_attach_test_hub)."""
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -1394,12 +1397,14 @@ async def test_coordinator_has_stage2_poll_counter_attrs(hass, mock_stage2_confi
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
     ):
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        assert coord._stage2_posts_this_poll == 0
+        assert coord._hub._stage2_posts_this_poll == 0
         assert coord._stage2_cap_notified_this_poll is False
 
 
 async def test_coordinator_has_reset_stage2_poll_counters_method(hass, mock_stage2_config_entry):
-    """MRG-05 D-11: _reset_stage2_poll_counters must exist and reset both attrs."""
+    """MRG-05 D-11: _reset_stage2_poll_counters must exist and reset the notification
+    latch. Phase 31 (D-08): the shared poll counter is NOT touched by this method
+    anymore — it resets only on the hub's own 30-minute poll-window timer (31-03)."""
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -1416,10 +1421,12 @@ async def test_coordinator_has_reset_stage2_poll_counters_method(hass, mock_stag
     ):
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         # Manually set to non-defaults to verify reset works.
-        coord._stage2_posts_this_poll = 3
+        coord._hub._stage2_posts_this_poll = 3
         coord._stage2_cap_notified_this_poll = True
         coord._reset_stage2_poll_counters()
-        assert coord._stage2_posts_this_poll == 0
+        assert coord._hub._stage2_posts_this_poll == 3, (
+            "the shared poll counter must NOT be touched by _reset_stage2_poll_counters"
+        )
         assert coord._stage2_cap_notified_this_poll is False
 
 
@@ -1454,6 +1461,10 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.MAX_STAGE2_POSTS_PER_POLL", 2),
+        # Phase 31 (D-08): the cap ENFORCEMENT now lives in hub.poll_cap_reached(),
+        # which reads hub.py's own imported constant — patch both so the coordinator's
+        # display string and the hub's actual gate agree.
+        patch("custom_components.shop2parcel.hub.MAX_STAGE2_POSTS_PER_POLL", 2),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -1514,6 +1525,8 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch("custom_components.shop2parcel.coordinator.MAX_STAGE2_POSTS_PER_POLL", 1),
+        # Phase 31 (D-08): the cap ENFORCEMENT now lives in hub.poll_cap_reached().
+        patch("custom_components.shop2parcel.hub.MAX_STAGE2_POSTS_PER_POLL", 1),
         patch("custom_components.shop2parcel.coordinator.persistent_notification") as mock_pn,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
@@ -1550,7 +1563,10 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
 
 
 async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entry):
-    """MRG-05: After driving 2 successful POSTs, reset clears both counters to defaults."""
+    """MRG-05: After driving 2 successful POSTs, reset clears the per-poll notification
+    latch. Phase 31 (D-08): the POST-count-toward-cap counter itself moved to the shared
+    hub and is no longer touched by _reset_stage2_poll_counters() — it resets on the
+    hub's own 30-minute poll-window timer (31-03), not this coordinator method."""
     from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
@@ -1593,11 +1609,15 @@ async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entr
             )
             await coord._async_process_stage2_job(job)
 
-        # Counter should be 2 after 2 successful POSTs.
-        assert coord._stage2_posts_this_poll == 2
-        # Now reset (simulates start of next poll).
+        # Counter should be 2 after 2 successful POSTs (shared hub counter).
+        assert coord._hub._stage2_posts_this_poll == 2
+        # Now reset (simulates start of next poll). The shared poll counter is
+        # NOT reset here (Phase 31 D-08) — only the per-poll notification latch is.
         coord._reset_stage2_poll_counters()
-        assert coord._stage2_posts_this_poll == 0
+        assert coord._hub._stage2_posts_this_poll == 2, (
+            "the shared poll counter must survive _reset_stage2_poll_counters — it "
+            "resets only on the hub's own 30-minute poll-window timer"
+        )
         assert coord._stage2_cap_notified_this_poll is False
 
 
@@ -2391,7 +2411,8 @@ async def test_fail_05_cap_skip_is_not_a_success(hass, mock_stage2_config_entry)
             await coord._async_process_stage2_job(job)
 
         # Exhaust the cap so the next job hits the cap-skip path (no extractor call).
-        coord._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
+        # Phase 31 (D-08): the cap counter lives on the shared hub now.
+        coord._hub._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
         cap_job = _make_job(normalized_tn="TNCAP")
         await coord._async_process_stage2_job(cap_job)
 
@@ -3967,13 +3988,13 @@ async def test_worker_never_touches_seen_message_ids(hass, mock_stage2_config_en
         await coord._async_process_stage2_job(_make_job("1Z111"))
         assert coord._seen_message_ids == {"seed": None}
 
-        # 2. Cap-skip defer.
-        coord._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
+        # 2. Cap-skip defer. Phase 31 (D-08): the cap counter lives on the shared hub.
+        coord._hub._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
         await coord._async_process_stage2_job(_make_job("1Z222"))
         assert coord._seen_message_ids == {"seed": None}
 
         # 3. Transient POST error.
-        coord._stage2_posts_this_poll = 0
+        coord._hub._stage2_posts_this_poll = 0
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
             side_effect=ParcelAppTransientError("503")
         )
@@ -4088,8 +4109,8 @@ async def test_cap_skip_caches_prefetched_result_for_gatekeeper(hass, mock_stage
             prefetched_result=prefetched,
             raw_msg_id="msg_capped",
         )
-        # Force the cap-skip branch.
-        coord._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
+        # Force the cap-skip branch. Phase 31 (D-08): the cap counter lives on the hub.
+        coord._hub._stage2_posts_this_poll = MAX_STAGE2_POSTS_PER_POLL
         await coord._async_process_stage2_job(job)
 
         # No POST, no extraction — and the prefetched result is preserved for the
@@ -4602,7 +4623,7 @@ async def test_worker_already_added_publishes_and_consumes_no_cap_slot(
             "AlreadyAdded path must publish via async_set_updated_data like the success path"
         )
         # WR-08/D-12: no cap slot consumed for a non-POST outcome.
-        assert coord._stage2_posts_this_poll == 0, (
+        assert coord._hub._stage2_posts_this_poll == 0, (
             "AlreadyAdded must not consume a MAX_STAGE2_POSTS_PER_POLL slot"
         )
         # Existing semantics preserved: dedup written, key discarded.

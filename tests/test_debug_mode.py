@@ -897,33 +897,13 @@ async def _make_debug_coordinator(hass, mock_config_entry, mock_store_cls):
     return coord
 
 
-async def test_dbg03_used_today_rollover_no_store_write_in_debug(hass, mock_config_entry):
-    """CR-02/DBG-03: the used_today rollover persist is skipped in debug mode;
-    the in-memory reset still happens."""
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        delay_save = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save
-        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
-        coord._used_today = 5
-        coord._used_today_date = "2000-01-01"
-        coord._maybe_reset_used_today()
-    assert coord._used_today == 0, "in-memory rollover reset must still happen in debug mode"
-    assert delay_save.call_count == 0, "DBG-03: no store write on rollover in debug mode"
-
-
-async def test_dbg03_quota_expiry_no_store_write_in_debug(hass, mock_config_entry):
-    """CR-02/DBG-03: the quota-expiry timer persist is skipped in debug mode;
-    the in-memory clear still happens."""
-    from datetime import UTC, datetime
-
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        delay_save = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save
-        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
-        coord._quota_exhausted_until = int(time.time()) - 10
-        coord._on_quota_expiry(datetime.now(UTC))
-    assert coord._quota_exhausted_until is None, "in-memory quota clear must still happen"
-    assert delay_save.call_count == 0, "DBG-03: no store write on quota expiry in debug mode"
+# Phase 31 (D-08): test_dbg03_used_today_rollover_no_store_write_in_debug and
+# test_dbg03_quota_expiry_no_store_write_in_debug are removed. Both drove the now-removed
+# coordinator methods _maybe_reset_used_today/_on_quota_expiry (moved to the hub in
+# 31-01/31-03). The hub's own D-07 debug-mode gate around its end-of-poll async_save()
+# is 31-05's scope (it wraps gmail_coordinator.py's/imap_coordinator.py's own end-of-poll
+# save call, not a coordinator-level timer persist) — this coordinator no longer has any
+# timer-driven persist path for quota state to guard here.
 
 
 async def test_dbg03_stop_stage2_no_store_write_in_debug(hass, mock_config_entry):
