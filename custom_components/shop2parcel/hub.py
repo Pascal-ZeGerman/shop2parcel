@@ -19,16 +19,47 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
 
 from homeassistant.core import HomeAssistant, callback
 
-from .const import MAX_SUBMITTED_TRACKING_NUMBERS
+from .const import MAX_STAGE2_POSTS_PER_POLL, MAX_SUBMITTED_TRACKING_NUMBERS, PARCELAPP_DAILY_LIMIT
 from .coordinator import Shop2ParcelCoordinator, Shop2ParcelStore
 
 _LOGGER = logging.getLogger(__name__)
 
 SHARED_STORAGE_VERSION = 1
+
+
+def _next_midnight_utc() -> int:
+    """Compute epoch seconds for the next 00:00 UTC.
+
+    Hoisted verbatim from coordinator.py (D-05) — per CONTEXT.md D-06, when a
+    quota-exhaustion reset_at is None, fall back to the next UTC midnight so
+    the backoff aligns with parcelapp's daily reset. The coordinator.py copy
+    stays in place until 31-04 removes it, so Waves 1-3 stay green.
+    """
+    today_utc = datetime.now(UTC).date()
+    return int(
+        datetime.combine(
+            today_utc + timedelta(days=1),
+            dt_time.min,
+            tzinfo=UTC,
+        ).timestamp()
+    )
+
+
+def _today_utc_str() -> str:
+    """Return today's UTC date as 'YYYY-MM-DD' string.
+
+    Hoisted verbatim from coordinator.py (D-05) — used for the UTC
+    date-rollover check in _maybe_reset_used_today. UTC has no DST so the
+    rollover is always at exactly 00:00 UTC.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 class Shop2ParcelHub:
@@ -52,6 +83,18 @@ class Shop2ParcelHub:
         # at MAX_SUBMITTED_TRACKING_NUMBERS. Pure in-memory core in this plan
         # (30-01) — persistence (async_save/async_load) lands in 30-02.
         self._submitted_tracking_numbers: OrderedDict[str, None] = OrderedDict()
+        # Phase 31 (QUOTA-01/02/04): shared daily-budget + per-poll-cap state.
+        # _used_today is PRIVATE backing — always read via the used_today
+        # property so a read triggers the UTC rollover (mirrors the old
+        # per-coordinator property). Pure in-memory in this plan (31-01);
+        # persistence lands in 31-02, timer callbacks in 31-03.
+        self._used_today: int = 0
+        self.used_today_date: str = ""
+        self.quota_exhausted_until: int | None = None
+        self._stage2_posts_this_poll: int = 0
+        self._midnight_unsub = None
+        self._quota_expiry_unsub = None
+        self._poll_window_unsub = None
 
     async def async_setup(self) -> None:
         """Load/seed the shared store and spawn the hass-scoped worker stub."""
@@ -174,6 +217,100 @@ class Shop2ParcelHub:
             if isinstance(tn, str):
                 self._submitted_tracking_numbers.setdefault(tn, None)
         self._trim_submitted_tns()
+
+    # ------------------------------------------------------------------
+    # Phase 31 (QUOTA-01/02/04): shared daily-budget + per-poll-cap mutators.
+    #
+    # All mutators below are SYNCHRONOUS (plain `def`, zero `await` in the
+    # body). The single-threaded HA event loop serializes callers — this is
+    # the same lock-free discipline as check_and_mark above. Pure in-memory
+    # in this plan (31-01); persistence lands in 31-02, timer callbacks that
+    # reset these counters land in 31-03.
+    # ------------------------------------------------------------------
+
+    def _maybe_reset_used_today(self) -> None:
+        """Reset used_today to 0 on UTC date rollover (in-memory only).
+
+        Mirrors coordinator.py's _maybe_reset_used_today minus the persist
+        call — the D-07-gated end-of-poll save lands in 31-04/31-05.
+        """
+        today = _today_utc_str()
+        if self.used_today_date != today:
+            self._used_today = 0
+            self.used_today_date = today
+
+    def try_consume(self) -> bool:
+        """Reserve one shared daily-quota slot, first-come-first-served.
+
+        QUOTA-01: synchronous check-and-increment with no await between the
+        two — a race between concurrent callers cannot both succeed past the
+        limit. Returns True (and reserves the slot) while used_today is under
+        PARCELAPP_DAILY_LIMIT; returns False (no mutation) once exhausted.
+        """
+        self._maybe_reset_used_today()
+        if self._used_today >= PARCELAPP_DAILY_LIMIT:
+            return False
+        self._used_today += 1
+        return True
+
+    def refund_consume(self) -> None:
+        """Return one previously-reserved slot (e.g. on a transient/5xx failure).
+
+        QUOTA-02: clamps at 0 — mirrors _trim_submitted_tns's clamp
+        discipline. A stray or double refund can never drive used_today
+        negative.
+        """
+        self._used_today = max(0, self._used_today - 1)
+
+    def record_quota_exhausted(self, reset_at: int | None) -> None:
+        """Record a parcelapp quota-exhaustion cooldown window.
+
+        QUOTA-02 (D-06): max-precedence — an active block is never
+        shortened by a subsequent call with an earlier timestamp. When
+        ``reset_at`` is None, falls back to the next UTC midnight
+        (parcelapp's daily reset boundary). Does not arm any timer here —
+        31-03 adds the _arm_quota_expiry_timer() call.
+        """
+        new_until = reset_at if reset_at is not None else _next_midnight_utc()
+        if self.quota_exhausted_until is None:
+            self.quota_exhausted_until = new_until
+        else:
+            self.quota_exhausted_until = max(self.quota_exhausted_until, new_until)
+
+    def poll_cap_reached(self) -> bool:
+        """True once the shared per-poll Stage-2 POST cap has been reached.
+
+        QUOTA-04: the counter is shared across every attached account in the
+        current poll window (30-minute cadence armed in 31-03).
+        """
+        return self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL
+
+    def record_poll_post(self) -> None:
+        """Bump the shared per-poll Stage-2 POST counter (consume-on-success).
+
+        QUOTA-04 (D-01/D-02): ephemeral — never persisted; resets on the
+        30-minute poll-window tick (31-03) and naturally on HA restart.
+        """
+        self._stage2_posts_this_poll += 1
+
+    @property
+    def used_today(self) -> int:
+        """Estimated shared ParcelApp POSTs made today (UTC day).
+
+        Calls _maybe_reset_used_today() on each read so the ParcelApp Quota
+        sensor never shows a stale prior-day count even if no forwarding has
+        happened today yet (faithful port of the old per-coordinator
+        property).
+        """
+        self._maybe_reset_used_today()
+        return self._used_today
+
+    @property
+    def quota_is_exhausted(self) -> bool:
+        """True while a recorded quota-exhaustion cooldown is still active."""
+        return (
+            self.quota_exhausted_until is not None and int(time.time()) < self.quota_exhausted_until
+        )
 
     async def async_save(self) -> None:
         """Serialize the shared dedup set (plus version) to the shared store.

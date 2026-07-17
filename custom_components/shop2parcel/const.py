@@ -1,6 +1,7 @@
 """Constants for the Shop2Parcel integration."""
 
 import re
+from datetime import timedelta
 
 DOMAIN = "shop2parcel"
 
@@ -98,6 +99,10 @@ def debug_mode_notification_id(entry_id: str) -> str:
 # quota. See WR-01 in phase 20 REVIEW.md for full analysis.
 # stage2_cap_notification_id mirrors debug_mode_notification_id pattern.
 MAX_STAGE2_POSTS_PER_POLL: int = 5
+# Phase 31 (D-02): shared per-poll Stage-2 POST window used by the hub's
+# _poll_window_unsub timer (31-03) to reset the shared _stage2_posts_this_poll
+# counter. Matches DEFAULT_POLL_INTERVAL's 30-minute wall-clock cadence.
+HUB_STAGE2_POLL_WINDOW = timedelta(minutes=30)
 # Phase 27 volume guards (Constants summary, Design §1):
 # SEEN_MESSAGE_IDS_MAXLEN: FIFO bound for the seen-message-ID cache introduced
 #   in Plan 02 (coordinator.py). Oldest ID evicted when the cache reaches this
