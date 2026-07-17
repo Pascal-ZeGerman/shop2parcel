@@ -1157,4 +1157,153 @@ async def test_second_restart_after_quota_key_drop_reseeds_nothing(hass):
         assert hub_b.quota_exhausted_until == t_migrated
         assert hub_b.used_today == 0
 
+
+# ---------------------------------------------------------------------------
+# Phase 31 Plan 03: hub-owned timers (QUOTA-03, QUOTA-04)
+# ---------------------------------------------------------------------------
+
+
+async def test_single_midnight_timer_after_two_accounts(hass):
+    """QUOTA-03/R3: async_setup() arms exactly one midnight timer; attach()
+    never arms another — there is only one hub instance, so two attach()
+    calls leave hub._midnight_unsub as the same single handle (no
+    per-account timer storm)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        assert hub._midnight_unsub is not None
+        first_handle = hub._midnight_unsub
+
+        coordinator_a = MagicMock()
+        coordinator_b = MagicMock()
+        hub.attach(coordinator_a)
+        hub.attach(coordinator_b)
+
+        assert hub._midnight_unsub is first_handle, "attach() must not arm a second midnight timer"
+
+        await hub.async_shutdown()
+
+
+async def test_midnight_tick_resets_used_today(hass):
+    """QUOTA-03/R3: firing time past the next UTC midnight resets used_today
+    to 0 and reschedules the midnight timer for the following day."""
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub, _next_midnight_utc  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        hub.try_consume()
+        hub.try_consume()
+        assert hub.used_today == 2
+
+        next_midnight = datetime.fromtimestamp(_next_midnight_utc(), tz=UTC)
+        async_fire_time_changed(hass, next_midnight + timedelta(seconds=1))
+        await hass.async_block_till_done()
+
+        assert hub.used_today == 0, "midnight tick must reset used_today"
+        assert hub._midnight_unsub is not None, "midnight timer must reschedule itself"
+
+        await hub.async_shutdown()
+
+
+async def test_quota_expiry_timer_clears_block(hass):
+    """QUOTA-03/R3 (D-04): record_quota_exhausted() re-arms the single hub
+    expiry timer; when it fires, quota_exhausted_until is cleared and
+    quota_is_exhausted reads False."""
+    import time as time_module  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
+
+    import homeassistant.util.dt as dt_util  # noqa: PLC0415
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        hub.record_quota_exhausted(int(time_module.time()) + 30)
+        assert hub.quota_is_exhausted is True
+        assert hub._quota_expiry_unsub is not None
+
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+        await hass.async_block_till_done()
+
+        assert hub.quota_exhausted_until is None, "expiry timer must clear the stale block"
+        assert hub.quota_is_exhausted is False
+
+        await hub.async_shutdown()
+
+
+async def test_poll_window_tick_resets_counter(hass):
+    """QUOTA-04/R4: firing time forward by HUB_STAGE2_POLL_WINDOW resets the
+    shared per-poll Stage-2 POST counter to 0."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    import homeassistant.util.dt as dt_util  # noqa: PLC0415
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import HUB_STAGE2_POLL_WINDOW  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        hub.record_poll_post()
+        assert hub._stage2_posts_this_poll == 1
+
+        async_fire_time_changed(hass, dt_util.utcnow() + HUB_STAGE2_POLL_WINDOW + timedelta(seconds=1))
+        await hass.async_block_till_done()
+
+        assert hub._stage2_posts_this_poll == 0, "poll-window tick must reset the shared counter"
+
+        await hub.async_shutdown()
+
+
+async def test_shutdown_cancels_all_three_timers(hass):
+    """QUOTA-03/R3: async_shutdown() cancels all three hub-owned timers
+    (refcount 0) — no lingering-timer warning, all handles cleared to None."""
+    import time as time_module  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+        hub.record_quota_exhausted(int(time_module.time()) + 3600)
+
+        assert hub._midnight_unsub is not None
+        assert hub._quota_expiry_unsub is not None
+        assert hub._poll_window_unsub is not None
+
+        await hub.async_shutdown()
+
+        assert hub._midnight_unsub is None
+        assert hub._quota_expiry_unsub is None
+        assert hub._poll_window_unsub is None
+
         await hub_b.async_shutdown()
