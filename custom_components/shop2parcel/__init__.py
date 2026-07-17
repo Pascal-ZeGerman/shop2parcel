@@ -208,13 +208,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.async_on_unload(coordinator.async_stop_stage2)
     await coordinator.async_config_entry_first_refresh()
 
-    # Finding 3: enable the time-boundary refresh timers (quota-expiry + UTC-midnight
-    # used_today) now that the first poll has run and any quota window is established.
-    # These keep the should_poll=False Problem/Quota entities from going stale between
-    # polls when quota_is_exhausted / used_today flip purely by the passage of time.
-    # Register cleanup via async_on_unload so HA cancels them on every teardown path.
-    coordinator.enable_operational_timers()
-    entry.async_on_unload(coordinator._cancel_operational_timers)
+    # Phase 31 (D-08): the per-account time-boundary refresh timers (quota-expiry +
+    # UTC-midnight used_today) are gone — the shared hub now owns exactly 3 timers,
+    # armed once in hub.async_setup() and cancelled once in hub.async_shutdown()
+    # (refcount 0), so no per-entry enable/cancel wiring is needed here anymore.
 
     # Phase 5 D-08: schedule once-daily delivered-shipment cleanup.
     # The cancel callback MUST be stored so async_unload_entry can stop the

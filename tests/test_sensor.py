@@ -109,8 +109,11 @@ async def test_parcelapp_quota_sensor_estimate(hass, mock_config_entry):
     assert state.attributes.get("used_today") == 0
     assert "exhausted" in state.attributes
 
-    # Simulate used_today=3
-    coordinator._used_today = 3
+    # Simulate used_today=3 — Phase 31 (D-08): used_today now lives on the shared
+    # hub, not the coordinator; drive the per-hass test hub (conftest
+    # _auto_attach_test_hub) so the delegating coordinator.used_today property
+    # returns the shared value.
+    coordinator._hub._used_today = 3
     coordinator.async_set_updated_data(coordinator.data or {})
     await hass.async_block_till_done()
     state = hass.states.get(entry.entity_id)
@@ -118,7 +121,7 @@ async def test_parcelapp_quota_sensor_estimate(hass, mock_config_entry):
     assert state.attributes.get("used_today") == 3
 
     # Simulate over-limit: used_today=25 -> native_value clamped to 0
-    coordinator._used_today = 25
+    coordinator._hub._used_today = 25
     coordinator.async_set_updated_data(coordinator.data or {})
     await hass.async_block_till_done()
     state = hass.states.get(entry.entity_id)

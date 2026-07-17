@@ -30,10 +30,9 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -523,7 +522,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # prefetched_result was simply discarded — doubling inference per capped
         # job). FIFO-bounded at _FALLBACK_PREFETCH_CACHE_MAXLEN; in-memory only.
         self._fallback_prefetch_cache: OrderedDict[str, Any] = OrderedDict()
-        self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
         # Phase 13.1: shipment persistence across HA restarts.
@@ -541,11 +539,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 26: operational-health persisted counters.
         # Persisted across HA restarts via additive store keys (no STORAGE_VERSION bump).
         # Incremented only on genuine 2xx POST-success via _record_forward().
-        # _used_today_date holds the UTC date string when _used_today was last reset.
+        # Phase 31 (D-08): used_today/used_today_date moved to the shared hub —
+        # coordinator.used_today is now a thin delegating property (see below).
         self._total_forwarded: int = 0
         self._last_forwarded_ts: int | None = None
-        self._used_today: int = 0
-        self._used_today_date: str = ""
         self._store_loaded: bool = False
         # Phase 18 CR-01: sentinel so async_stop_stage2 is safe to call before
         # async_start_stage2 (e.g. Phase 19 worker or a reload race).
@@ -554,12 +551,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 19: worker task and extractor sentinels — None until async_start_stage2.
         self._stage2_worker_task: asyncio.Task | None = None
         self._extractor: OllamaExtractor | None = None
-        # Phase 20 MRG-05 / D-11: per-poll Stage-2 POST counters.
-        # Both are reset at the top of each poll cycle via _reset_stage2_poll_counters().
-        # _stage2_posts_this_poll: count of successful Stage-2 POSTs in the current poll.
+        # Phase 20 MRG-05 / D-11: per-poll Stage-2 POST counter.
+        # Reset at the top of each poll cycle via _reset_stage2_poll_counters().
+        # Phase 31 (D-08): the POST-count-toward-cap counter (_stage2_posts_this_poll)
+        # moved to the shared hub (hub.poll_cap_reached()/record_poll_post()).
         # _stage2_cap_notified_this_poll: True once the cap notification has been fired
         #   this poll — ensures at most one HA notification per poll (D-10 / T-20-03-02).
-        self._stage2_posts_this_poll: int = 0
         self._stage2_cap_notified_this_poll: bool = False
         # Phase 23 AC-8: throttles the quota-skip WARNING to at most one per poll
         # (mirrors _stage2_cap_notified_this_poll). Reset in _reset_stage2_poll_counters.
@@ -591,15 +588,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
         self._stage2_consecutive_failures: int = 0
         self._stage2_last_notify_ts: float | None = None
-        # Finding 3: time-boundary refresh timers for the should_poll=False operational
-        # entities. quota_is_exhausted / used_today flip by the passage of time (no event),
-        # so without these the Problem + Quota sensors stay stale until the next poll.
-        # Gated by _operational_timers_enabled (set True only from async_setup_entry via
-        # enable_operational_timers) so bare-coordinator unit tests that assign
-        # _quota_exhausted_until directly never schedule real (lingering) timers.
-        self._operational_timers_enabled: bool = False
-        self._quota_expiry_unsub: CALLBACK_TYPE | None = None
-        self._midnight_unsub: CALLBACK_TYPE | None = None
+        # Phase 31 (D-08): the per-account time-boundary refresh timers (quota-expiry +
+        # UTC-midnight used_today) are removed — the hub now owns exactly 3 shared timers
+        # (armed once in hub.async_setup(), cancelled once in hub.async_shutdown()),
+        # replacing the old 2N-per-account timer pattern.
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
@@ -613,7 +605,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Defined here on the base class (DRY) so both subclasses share a single
         implementation without duplicating the attribute reset logic.
         """
-        self._stage2_posts_this_poll = 0
+        # Phase 31 (D-08): the shared poll counter now resets on the hub's own
+        # HUB_STAGE2_POLL_WINDOW timer, not here.
         self._stage2_cap_notified_this_poll = False
         self._stage2_quota_warned_this_poll = False
         # Phase 27 Plan 03: reset fallback extraction counter (mirrors _stage2_posts_this_poll).
@@ -761,55 +754,34 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """True when this entry is in debug/dry-run mode.
 
         CR-02: single helper for the DBG-03 "zero store writes in debug mode"
-        contract, so timer-driven persist paths (_maybe_reset_used_today,
-        _on_quota_expiry, async_stop_stage2) apply the same gate the poll paths
-        already honour. Safe on bare-coordinator tests: returns False when no
-        config_entry is attached.
+        contract, so timer-driven persist paths (async_stop_stage2) apply the
+        same gate the poll paths already honour. Safe on bare-coordinator
+        tests: returns False when no config_entry is attached.
         """
         return self.config_entry is not None and bool(
             self.config_entry.options.get(CONF_DEBUG_MODE, False)
         )
 
-    def _maybe_reset_used_today(self) -> None:
-        """Reset used_today to 0 on UTC date rollover.
-
-        Called at the start of _record_forward and from the used_today property read
-        path so the ParcelApp Quota sensor always reflects the current day's count.
-        UTC has no DST — rollover is deterministic at 00:00 UTC.
-        (Phase 26 RESEARCH Pattern 5 / Pitfall 3.)
-        """
-        today = _today_utc_str()
-        if self._used_today_date != today:
-            self._used_today = 0
-            self._used_today_date = today
-            # Finding 5: persist the rollover so a restart before the next forward does
-            # not restore yesterday's count. Fires only on an actual rollover (at most
-            # once per UTC day); _persist_state is await-free so it is safe here even
-            # when reached via the synchronous used_today property read path.
-            # CR-02: skipped in debug mode (DBG-03 zero-store-writes) — previously this
-            # timer-driven persist snapshotted the empty debug-mode _pending_shipments
-            # and wiped persisted_shipments from disk at the first UTC midnight.
-            if not self._debug_mode_active():
-                self._persist_state()
-
     def _record_forward(self) -> None:
         """Record one genuine 2xx POST success to ParcelApp.
 
-        Increments total_forwarded, used_today (with UTC date-rollover reset),
-        and updates last_forwarded_ts to the current epoch second.
+        Increments total_forwarded and updates last_forwarded_ts to the current
+        epoch second.
 
         MUST be called ONLY on the genuine 2xx success path — never on
         ParcelAppAlreadyAddedError or ParcelAppInvalidTrackingError, which do NOT
         consume ParcelApp quota and do NOT represent forwarding a new shipment.
         (Phase 26 RESEARCH Pitfall 1 / Pitfall 6 / STRIDE T-26-02.)
 
+        Phase 31 (D-08): the daily-budget increment (used_today) now happens at
+        the hub.try_consume() reserve, BEFORE the POST — never here. This method
+        only tracks the per-account operational total_forwarded/last_forwarded_ts.
+
         Does NOT call _async_save_store; the existing save at each call site handles
         persistence so we avoid an extra debounce scheduling.
         """
-        self._maybe_reset_used_today()
         self._total_forwarded += 1
         self._last_forwarded_ts = int(_time.time())
-        self._used_today += 1
 
     def _record_stage2_failure(self, job: Stage2Job, err: Exception) -> None:
         """Centralize loud-surface side effects for a Stage-2 Ollama or worker-outer failure.
@@ -996,12 +968,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def used_today(self) -> int:
         """Estimated ParcelApp POSTs made today (UTC day); auto-resets on UTC date rollover.
 
-        Calls _maybe_reset_used_today() on each read so the ParcelApp Quota sensor
-        never shows a stale prior-day count even if no forwarding has happened today
-        yet. (Phase 26 RESEARCH Pattern 5.)
+        Phase 31 (D-08): thin delegating property — the daily-budget counter now
+        lives on the shared hub, not per-account. The hub's own used_today
+        property already performs the rollover-on-read (mirrors this property's
+        prior in-place behavior). Safe to call from any code path: attach()
+        always runs before any sensor/coordinator read (see the assert at the
+        dedup call sites above).
         """
-        self._maybe_reset_used_today()
-        return self._used_today
+        assert self._hub is not None  # attach() runs before any sensor read (__init__.py:181)
+        return self._hub.used_today
 
     @property
     def currently_tracked_count(self) -> int:
@@ -1017,109 +992,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def quota_is_exhausted(self) -> bool:
         """True when ParcelApp quota is exhausted and the cooldown window has not yet elapsed.
 
-        Public accessor so entities never read the private _quota_exhausted_until attribute.
-        (Phase 26 RESEARCH Pitfall 4 / STRIDE T-26-02.)
+        Phase 31 (D-08): thin delegating property — the shared cooldown window now
+        lives on the hub. Public accessor so entities never read hub internals directly
+        (Phase 26 RESEARCH Pitfall 4 / STRIDE T-26-02, still honoured through the hub).
         """
-        return (
-            self._quota_exhausted_until is not None
-            and int(_time.time()) < self._quota_exhausted_until
-        )
-
-    # ------------------------------------------------------------------
-    # Finding 3: time-boundary refresh timers
-    # ------------------------------------------------------------------
-
-    def enable_operational_timers(self) -> None:
-        """Enable the time-boundary refresh timers (finding 3).
-
-        Called once from async_setup_entry after the first refresh. Gated behind a flag
-        so unit tests that construct the coordinator bare (and poke _quota_exhausted_until
-        directly) never schedule real timers — only a fully set-up entry arms them. Arms
-        the quota-expiry timer (in case store hydration loaded a still-future window) and
-        the daily UTC-midnight used_today refresh. Pair with _cancel_operational_timers
-        registered via entry.async_on_unload.
-        """
-        self._operational_timers_enabled = True
-        self._arm_quota_expiry_timer()
-        self._schedule_midnight_refresh()
-
-    def _cancel_operational_timers(self) -> None:
-        """Cancel both refresh timers (registered via entry.async_on_unload).
-
-        Idempotent — safe on every teardown path (clean unload, exception, HA shutdown).
-        """
-        if self._quota_expiry_unsub is not None:
-            self._quota_expiry_unsub()
-            self._quota_expiry_unsub = None
-        if self._midnight_unsub is not None:
-            self._midnight_unsub()
-            self._midnight_unsub = None
-
-    def _arm_quota_expiry_timer(self) -> None:
-        """(Re)schedule the one-shot timer that refreshes entities when the ParcelApp
-        quota window expires (finding 3).
-
-        Called after every _quota_exhausted_until mutation in the poll/drain paths.
-        No-op unless operational timers are enabled, so direct attribute assignment in
-        tests never leaks a timer. Always cancels any prior quota timer first; schedules
-        a new one only when _quota_exhausted_until is still in the future (a past value
-        is already reported as not-exhausted, and the poll-time clear persists it).
-        """
-        if self._quota_expiry_unsub is not None:
-            self._quota_expiry_unsub()
-            self._quota_expiry_unsub = None
-        if not self._operational_timers_enabled:
-            return
-        until = self._quota_exhausted_until
-        if until is None or until <= int(_time.time()):
-            return
-        self._quota_expiry_unsub = async_track_point_in_time(
-            self.hass, self._on_quota_expiry, datetime.fromtimestamp(until, tz=UTC)
-        )
-
-    @callback
-    def _on_quota_expiry(self, _now: datetime) -> None:
-        """Quota window elapsed: clear the stale block, persist, and refresh entities.
-
-        The timer is re-armed on every _quota_exhausted_until change (set or clear), so
-        when it fires it always corresponds to the current window — clear unconditionally.
-        Clearing in memory makes quota_is_exhausted read False immediately; persisting it
-        means the cleared state survives a restart (mirrors the poll-time stale-quota clear).
-        """
-        self._quota_expiry_unsub = None
-        if self._quota_exhausted_until is not None:
-            self._quota_exhausted_until = None
-            # CR-02: honour DBG-03 (zero store writes in debug mode) — the in-memory
-            # clear still happens so quota_is_exhausted reads False immediately.
-            if not self._debug_mode_active():
-                self._persist_state()
-        self.async_update_listeners()
-
-    def _schedule_midnight_refresh(self) -> None:
-        """(Re)schedule the one-shot timer at the next 00:00 UTC that refreshes used_today
-        (finding 3).
-
-        used_today auto-resets on UTC date rollover but only when the property is read;
-        with should_poll=False nothing reads it at midnight, so the Quota sensor can show
-        the prior day's count until the next poll. No-op unless operational timers are
-        enabled. Reschedules itself each midnight.
-        """
-        if self._midnight_unsub is not None:
-            self._midnight_unsub()
-            self._midnight_unsub = None
-        if not self._operational_timers_enabled:
-            return
-        self._midnight_unsub = async_track_point_in_time(
-            self.hass, self._on_midnight, datetime.fromtimestamp(_next_midnight_utc(), tz=UTC)
-        )
-
-    @callback
-    def _on_midnight(self, _now: datetime) -> None:
-        """UTC midnight: force the used_today rollover reset, refresh entities, reschedule."""
-        self._midnight_unsub = None
-        self._maybe_reset_used_today()
-        self.async_update_listeners()
-        self._schedule_midnight_refresh()
+        assert self._hub is not None  # attach() runs before any sensor read (__init__.py:181)
+        return self._hub.quota_is_exhausted
 
     def _emit_scan_event(
         self,
