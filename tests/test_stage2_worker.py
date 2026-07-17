@@ -572,6 +572,8 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
 
 async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry):
     """D-05: _async_save_store is awaited after each successful parcelapp POST."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -592,7 +594,9 @@ async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry)
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
@@ -618,6 +622,8 @@ async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry)
 
 async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry):
     """D-06: async_set_updated_data is called with a NEW dict (not in-place mutation)."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -637,7 +643,9 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
@@ -676,6 +684,8 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
 
 async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry):
     """Pitfall 5 (success): _stage2_enqueued_keys loses the key AND dedup write happens."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -694,7 +704,9 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
@@ -1424,6 +1436,7 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
     (cap-skipped items are NOT deduplicated — retryable next poll).
     """
     from custom_components.shop2parcel.const import stage2_cap_notification_id
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -1445,7 +1458,7 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_extractor_cls.return_value.async_extract = AsyncMock(
-            return_value=MagicMock(latency_ms=100.0, passes_used=1)
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=100.0)
         )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
@@ -1483,6 +1496,7 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
       - job 3: cap hit — notification does NOT fire again (call_count still 1)
     """
     from custom_components.shop2parcel.const import stage2_cap_notification_id
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -1504,7 +1518,9 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor_cls.return_value.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
         mock_pn.async_create = MagicMock()
 
@@ -1535,6 +1551,8 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
 
 async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entry):
     """MRG-05: After driving 2 successful POSTs, reset clears both counters to defaults."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -1554,7 +1572,7 @@ async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entr
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_extractor_cls.return_value.async_extract = AsyncMock(
-            return_value=MagicMock(latency_ms=100.0, passes_used=1)
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=100.0)
         )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
@@ -2089,6 +2107,7 @@ async def test_fail_04_parcelapp_transient_error_does_not_count_toward_threshold
     from homeassistant.components import persistent_notification
 
     from custom_components.shop2parcel.api.exceptions import ParcelAppTransientError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -2116,7 +2135,7 @@ async def test_fail_04_parcelapp_transient_error_does_not_count_toward_threshold
         # Wire extractor directly — do NOT start the background worker to avoid races.
         mock_extractor = MagicMock()
         mock_extractor.async_extract = AsyncMock(
-            return_value=MagicMock(latency_ms=100.0, passes_used=1)
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=100.0)
         )
         coord._extractor = mock_extractor
 
@@ -2135,6 +2154,7 @@ async def test_fail_04_parcelapp_already_added_does_not_count_toward_threshold(
     from homeassistant.components import persistent_notification
 
     from custom_components.shop2parcel.api.exceptions import ParcelAppAlreadyAddedError
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -2162,7 +2182,7 @@ async def test_fail_04_parcelapp_already_added_does_not_count_toward_threshold(
         # Wire extractor directly — do NOT start the background worker to avoid races.
         mock_extractor = MagicMock()
         mock_extractor.async_extract = AsyncMock(
-            return_value=MagicMock(latency_ms=100.0, passes_used=1)
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=100.0)
         )
         coord._extractor = mock_extractor
 
@@ -2192,6 +2212,7 @@ async def test_fail_05_first_success_after_streak_dismisses_notification(
         STAGE2_NOTIFY_THRESHOLD,
         stage2_failing_notification_id,
     )
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -2240,7 +2261,9 @@ async def test_fail_05_first_success_after_streak_dismisses_notification(
 
         # Switch extractor to success mode + run success job.
         success_extractor = MagicMock()
-        success_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        success_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         coord._extractor = success_extractor
 
         success_job = _make_job(normalized_tn="TNSUCCESS")
@@ -2265,6 +2288,7 @@ async def test_fail_05_already_added_is_not_a_success(hass, mock_stage2_config_e
         ParcelAppAlreadyAddedError,
     )
     from custom_components.shop2parcel.const import STAGE2_NOTIFY_THRESHOLD
+    from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -2306,7 +2330,9 @@ async def test_fail_05_already_added_is_not_a_success(hass, mock_stage2_config_e
 
         # Switch extractor to success mode; parcel raises AlreadyAdded — NOT a success.
         ok_extractor = MagicMock()
-        ok_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        ok_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         coord._extractor = ok_extractor
 
         already_added_job = _make_job(normalized_tn="TNALREADY")
@@ -2516,6 +2542,8 @@ async def test_fail_05_dismiss_unconditional_even_when_no_prior_notification(
     """
     from homeassistant.components import persistent_notification
 
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -2543,7 +2571,9 @@ async def test_fail_05_dismiss_unconditional_even_when_no_prior_notification(
         await coord._async_load_store()
         # Wire extractor directly — do NOT start background worker.
         ok_extractor = MagicMock()
-        ok_extractor.async_extract = AsyncMock(return_value=MagicMock())
+        ok_extractor.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         coord._extractor = ok_extractor
 
         # No prior failure streak — counter is 0.
@@ -3044,6 +3074,134 @@ async def test_diag_02_stage2_conflict_total_zero_when_no_conflict(hass, mock_st
         await coord._async_process_stage2_job(job)
 
         assert coord.diagnostics.stage2_conflict_total == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 35 Plan 03 (MRG-05, SC-1): production Stage-2 worker grounding gate.
+# Prose is recomputed from job.html_body via preprocess_html at the merge call
+# site and passed to merge_llm_authoritative_with_grounding — never job.html_body
+# raw, never an enriched (Subject/From) string.
+# ---------------------------------------------------------------------------
+
+_GROUNDING_TRIGGER_HTML = (
+    "<html><body><p>Hi there, your order #1234 has been shipped and is on its way "
+    "to you. Your package was shipped via UPS. Tracking number: "
+    "1Z999AA10123456784</p></body></html>"
+)
+_GROUNDING_TARGET_HTML = (
+    "<html><body><p>Your order from Target has shipped: Coffee maker included.</p></body></html>"
+)
+
+
+async def test_worker_discards_ungrounded_order_summary(hass, mock_stage2_config_entry):
+    """MRG-05/SC-1: Stage-2 fabricates order_summary='Target - Coffee maker' but the
+    body prose (recomputed from job.html_body) contains none of its content tokens —
+    the worker discards the value back to the Stage-1 sentinel (None) before the
+    shipment reaches the POST/dedup path, and increments the DEDICATED grounding
+    counter, NOT carrier_format_rejected_total."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value=_GROUNDING_TRIGGER_HTML,
+        ),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+
+        stage2_result = Stage2Result(
+            locked={"order_summary": "Target - Coffee maker"},
+            custom={},
+            passes_used=1,
+            latency_ms=5.0,
+        )
+        ungrounded_extractor = MagicMock()
+        ungrounded_extractor.async_extract = AsyncMock(return_value=stage2_result)
+        coord._extractor = ungrounded_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        job = Stage2Job(
+            storage_key="msg_grounding_reject::1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(message_id="msg_grounding_reject"),
+            html_body=_GROUNDING_TRIGGER_HTML,
+            message_id="gmail:msg_grounding_reject",
+            meta={"subject": "Order Shipped", "from": "noreply@shopify.com"},
+        )
+        await coord._async_process_stage2_job(job)
+
+        # (a) fabricated order_summary never reached the POST path — the merged
+        # shipment persisted/published to coord.data has it discarded to None.
+        mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+        posted_shipment = coord.data[job.storage_key]
+        assert posted_shipment.order_summary is None
+
+        # (b) dedicated grounding counter incremented; carrier-format counter untouched.
+        assert coord.diagnostics.grounding_rejected_total == 1
+        assert coord.diagnostics.last_grounding_rejected_value == "Target - Coffee maker"
+        assert coord.diagnostics.last_grounding_rejected_reason == "ungrounded"
+        assert coord.diagnostics.carrier_format_rejected_total == 0
+
+
+async def test_worker_keeps_grounded_order_summary(hass, mock_stage2_config_entry):
+    """MRG-05/SC-1: the same claimed order_summary, but the body prose (recomputed
+    from job.html_body) DOES contain its content tokens ('target', 'coffee', 'maker')
+    — the worker keeps the Stage-2 value and grounding_rejected_total stays 0."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value=_GROUNDING_TARGET_HTML,
+        ),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+
+        stage2_result = Stage2Result(
+            locked={"order_summary": "Target - Coffee maker"},
+            custom={},
+            passes_used=1,
+            latency_ms=5.0,
+        )
+        grounded_extractor = MagicMock()
+        grounded_extractor.async_extract = AsyncMock(return_value=stage2_result)
+        coord._extractor = grounded_extractor
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        job = Stage2Job(
+            storage_key="msg_grounding_keep::1Z999AA10123456784",
+            normalized_tn="1Z999AA10123456784",
+            shipment=_make_shipment(message_id="msg_grounding_keep"),
+            html_body=_GROUNDING_TARGET_HTML,
+            message_id="gmail:msg_grounding_keep",
+            meta={"subject": "Order Shipped", "from": "noreply@shopify.com"},
+        )
+        await coord._async_process_stage2_job(job)
+
+        mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+        posted_shipment = coord.data[job.storage_key]
+        assert posted_shipment.order_summary == "Target - Coffee maker"
+        assert coord.diagnostics.grounding_rejected_total == 0
 
 
 # ---------------------------------------------------------------------------
@@ -3555,7 +3713,9 @@ async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_st
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
-        patch("custom_components.shop2parcel.coordinator.merge_llm_authoritative") as mock_merge,
+        patch(
+            "custom_components.shop2parcel.coordinator.merge_llm_authoritative_with_grounding"
+        ) as mock_merge,
     ):
         from custom_components.shop2parcel.extractors.types import Stage2Result
 
@@ -3566,7 +3726,7 @@ async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_st
 
         # Merge returns a shipment with tracking_number=None — this is the skip-POST scenario.
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [], [])
+        mock_merge.return_value = (none_shipment, [], [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -3602,7 +3762,9 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
-        patch("custom_components.shop2parcel.coordinator.merge_llm_authoritative") as mock_merge,
+        patch(
+            "custom_components.shop2parcel.coordinator.merge_llm_authoritative_with_grounding"
+        ) as mock_merge,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -3610,7 +3772,7 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [], [])
+        mock_merge.return_value = (none_shipment, [], [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -3651,7 +3813,9 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
         patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
         patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
-        patch("custom_components.shop2parcel.coordinator.merge_llm_authoritative") as mock_merge,
+        patch(
+            "custom_components.shop2parcel.coordinator.merge_llm_authoritative_with_grounding"
+        ) as mock_merge,
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
@@ -3659,7 +3823,7 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         none_shipment = _make_none_tracking_shipment()
-        mock_merge.return_value = (none_shipment, [], [])
+        mock_merge.return_value = (none_shipment, [], [], [])
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
@@ -4239,11 +4403,17 @@ async def test_description_uses_order_summary_when_present(hass, mock_stage2_con
             message_id="msg1",
             email_date=1700000000,
         )
+        # MRG-05: order_summary is a Stage-1-blank promotion, so it must be grounded in
+        # body prose (recomputed from html_body) — include its content tokens here so the
+        # gate passes; this test targets description precedence, not the gate itself.
         job = Stage2Job(
             storage_key="1Z999AA10123456784",
             normalized_tn="1Z999AA10123456784",
             shipment=shipment,
-            html_body="<html/>",
+            html_body=(
+                "<html><body><p>Your order from Target has shipped: "
+                "Coffee maker included.</p></body></html>"
+            ),
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
         )

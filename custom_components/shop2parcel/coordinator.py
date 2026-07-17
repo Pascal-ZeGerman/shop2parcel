@@ -74,8 +74,8 @@ from .const import (
     stage2_cap_notification_id,
     stage2_failing_notification_id,
 )
-from .extractors.ollama_extractor import OllamaExtractor
-from .merge import merge_llm_authoritative
+from .extractors.ollama_extractor import OllamaExtractor, preprocess_html
+from .merge import merge_llm_authoritative_with_grounding
 
 if TYPE_CHECKING:
     # Phase 30-03: hub.py imports coordinator.py, so a module-level runtime import
@@ -1753,9 +1753,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 fence_retry=stage2_result.passes_used == 2,
             )
 
-            # MRG-02: merge Stage-2 result into Stage-1 shipment.
-            merged_shipment, conflicts, gate_rejections = merge_llm_authoritative(
-                job.shipment, stage2_result
+            # Phase 35 Plan 03 (MRG-05 Pitfall 1): recompute body-only prose from the raw
+            # HTML for the grounding gate's source_text. Never job.html_body raw and never
+            # any enriched (Subject/From) string — body-only prose is the ONLY grounding
+            # evidence (SC-2).
+            prose, _links = preprocess_html(job.html_body)
+
+            # MRG-02/MRG-05: merge Stage-2 result into Stage-1 shipment, gating
+            # order_name/order_summary through the MRG-05 grounding check.
+            merged_shipment, conflicts, gate_rejections, grounding_rejections = (
+                merge_llm_authoritative_with_grounding(job.shipment, stage2_result, prose)
             )
 
             # Phase 28 Plan 03 (R3/D-06/D-07): record carrier-format rejections that
@@ -1765,6 +1772,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._diagnostics.record_carrier_format_rejection(rej["clean"], rej["reason"])
                 _LOGGER.debug(
                     "Stage-2 worker: carrier-format gate rejected promotion of '%s' (reason=%s)",
+                    rej["clean"],
+                    rej["reason"],
+                )
+
+            # Phase 35 Plan 03 (MRG-05, SC-1): record grounding rejections on a
+            # DEDICATED counter, separate from carrier-format (RESEARCH.md Pitfall 3).
+            # DEBUG-only logging — no value leakage at INFO/WARNING (Phase 28 D-07 convention).
+            for rej in grounding_rejections:
+                self._diagnostics.record_grounding_rejection(rej["clean"], rej["reason"])
+                _LOGGER.debug(
+                    "Stage-2 worker: grounding gate rejected promotion of field '%s' "
+                    "value '%s' (reason=%s)",
+                    rej["field"],
                     rej["clean"],
                     rej["reason"],
                 )
