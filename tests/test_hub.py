@@ -960,3 +960,201 @@ def test_poll_cap_shared_across_accounts(hass):
     fresh_hub = Shop2ParcelHub(hass)
     assert fresh_hub.poll_cap_reached() is False
     assert fresh_hub._stage2_posts_this_poll == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 31 Plan 02: quota persistence + migration (QUOTA-03, QUOTA-05)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_load_quota_round_trip_after_restart(hass):
+    """QUOTA-03/R3: hub A reserves 7 slots and records a quota-exhaustion
+    window, then async_saves; a fresh hub B whose store returns hub A's
+    payload loads used_today==7 and quota_exhausted_until==T — the day's
+    usage is NOT reset to 0 on restart (boundary R3)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    t_exhausted = 1_800_000_000
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub_a = Shop2ParcelHub(hass)
+        await hub_a.async_setup()
+        for _ in range(7):
+            hub_a.try_consume()
+        hub_a.record_quota_exhausted(t_exhausted)
+        assert hub_a.used_today == 7
+
+        await hub_a.async_save()
+        saved_payload = mock_store_cls.return_value.async_save.call_args.args[0]
+        await hub_a.async_shutdown()
+
+        # Simulated restart: a fresh hub's store returns hub A's saved payload.
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=saved_payload)
+        mock_store_cls.return_value.async_save.reset_mock()
+
+        hub_b = Shop2ParcelHub(hass)
+        await hub_b.async_setup()
+
+        assert hub_b.used_today == 7
+        assert hub_b.quota_exhausted_until == t_exhausted
+
+        await hub_b.async_shutdown()
+
+
+async def test_async_load_corrupt_quota_values_load_defaults(hass, caplog):
+    """T-31-04: a store payload with non-int used_today and non-int
+    quota_exhausted_until loads as used_today==0 / quota_exhausted_until==None
+    with a WARNING — no crash. used_today_date is set to today so a
+    legitimate UTC-rollover reset cannot be mistaken for the corrupt-value
+    guard firing."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub, _today_utc_str  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "version": 1,
+                "used_today": "seven",
+                "used_today_date": _today_utc_str(),
+                "quota_exhausted_until": "not-an-int",
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        with caplog.at_level(logging.WARNING):
+            await hub.async_setup()
+
+        assert hub._used_today == 0
+        assert hub.quota_exhausted_until is None
+        assert "used_today" in caplog.text
+        assert "quota_exhausted_until" in caplog.text
+
+        await hub.async_shutdown()
+
+
+def test_migration_quota_max_across_accounts(hass):
+    """QUOTA-05/R5: seed_quota_from_account(None) then (T1) then (T2) yields
+    quota_exhausted_until == max(T1, T2); used_today stays 0 (migration day
+    starts conservatively — boundary R5)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    t1 = 1_000_000
+    t2 = 2_000_000
+
+    hub.seed_quota_from_account(None)
+    assert hub.quota_exhausted_until is None
+
+    hub.seed_quota_from_account(t1)
+    assert hub.quota_exhausted_until == t1
+
+    hub.seed_quota_from_account(t2)
+    assert hub.quota_exhausted_until == t2
+    assert hub.used_today == 0
+
+
+def test_migration_quota_all_none_stays_none(hass):
+    """QUOTA-05/R5 (empty): no per-account quota keys present -> repeated
+    seed_quota_from_account(None) leaves quota_exhausted_until == None and
+    used_today == 0."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.seed_quota_from_account(None)
+    hub.seed_quota_from_account(None)
+
+    assert hub.quota_exhausted_until is None
+    assert hub.used_today == 0
+
+
+def test_migration_quota_order_independent(hass):
+    """QUOTA-05/R5 (ordering): seeding accounts A-then-B equals B-then-A for
+    quota_exhausted_until — max() is commutative."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    t_a = 1_500_000
+    t_b = 2_500_000
+
+    hub_ab = Shop2ParcelHub(hass)
+    hub_ab.seed_quota_from_account(t_a)
+    hub_ab.seed_quota_from_account(t_b)
+
+    hub_ba = Shop2ParcelHub(hass)
+    hub_ba.seed_quota_from_account(t_b)
+    hub_ba.seed_quota_from_account(t_a)
+
+    assert hub_ab.quota_exhausted_until == hub_ba.quota_exhausted_until == max(t_a, t_b)
+
+
+async def test_poll_counter_not_persisted(hass):
+    """QUOTA-04 (constraint): _stage2_posts_this_poll is ephemeral by design
+    — record_poll_post() bumps it, but async_save()/async_load() never
+    round-trips it; a fresh hub over the saved payload always starts at 0."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub_a = Shop2ParcelHub(hass)
+        await hub_a.async_setup()
+        hub_a.record_poll_post()
+        assert hub_a._stage2_posts_this_poll == 1
+
+        await hub_a.async_save()
+        saved_payload = mock_store_cls.return_value.async_save.call_args.args[0]
+        assert "_stage2_posts_this_poll" not in saved_payload
+        assert "stage2_posts_this_poll" not in saved_payload
+        await hub_a.async_shutdown()
+
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=saved_payload)
+        mock_store_cls.return_value.async_save.reset_mock()
+
+        hub_b = Shop2ParcelHub(hass)
+        await hub_b.async_setup()
+
+        assert hub_b._stage2_posts_this_poll == 0
+
+        await hub_b.async_shutdown()
+
+
+async def test_second_restart_after_quota_key_drop_reseeds_nothing(hass):
+    """QUOTA-05: after a first migration (seed_quota_from_account + save), a
+    second restart whose per-entry payload no longer carries per-account
+    quota keys (the 31-04 coordinator-side migration will not re-call
+    seed_quota_from_account once its own snapshot is quota-key-free) does not
+    change the shared used_today/quota_exhausted_until — idempotent, no
+    re-inflation."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    t_migrated = 1_700_000_000
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub_a = Shop2ParcelHub(hass)
+        await hub_a.async_setup()
+        # First migration: one per-account store seeds its quota_exhausted_until.
+        hub_a.seed_quota_from_account(t_migrated)
+        await hub_a.async_save()
+        first_restart_payload = mock_store_cls.return_value.async_save.call_args.args[0]
+        await hub_a.async_shutdown()
+
+    # Second restart: a fresh hub loads the persisted (post-first-migration)
+    # payload. No further seed_quota_from_account calls happen (mirrors a
+    # per-entry store whose quota keys have already been dropped).
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls2:
+        mock_store_cls2.return_value.async_load = AsyncMock(return_value=first_restart_payload)
+        mock_store_cls2.return_value.async_save = AsyncMock()
+
+        hub_b = Shop2ParcelHub(hass)
+        await hub_b.async_setup()
+
+        assert hub_b.quota_exhausted_until == t_migrated
+        assert hub_b.used_today == 0
+
+        await hub_b.async_shutdown()
