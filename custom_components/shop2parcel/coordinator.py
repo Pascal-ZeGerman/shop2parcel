@@ -176,6 +176,16 @@ def _next_midnight_utc() -> int:
 
     Per CONTEXT.md D-06: when ParcelAppQuotaError.reset_at is None, fall back
     to the next UTC midnight so the backoff aligns with parcelapp's daily reset.
+
+    Phase 31 (D-05): hub.py hoisted its own copy of this helper (31-01) and
+    hub.record_quota_exhausted() now owns the None-fallback internally, so
+    coordinator.py's own two call sites (drain loop, Stage-2 worker) no longer
+    call this function directly. It stays defined here — NOT removed — solely
+    because gmail_coordinator.py and imap_coordinator.py still import it for
+    their own inline-forward 429 branches (31-05 scope, not yet rewired);
+    removing it now would break those imports for every coordinator test in
+    this suite. 31-05 removes both the import and this definition once its own
+    two call sites are rewired to hub.record_quota_exhausted().
     """
     today_utc = datetime.now(UTC).date()
     return int(
@@ -185,16 +195,6 @@ def _next_midnight_utc() -> int:
             tzinfo=UTC,
         ).timestamp()
     )
-
-
-def _today_utc_str() -> str:
-    """Return today's UTC date as 'YYYY-MM-DD' string.
-
-    Used for UTC date-rollover check in _maybe_reset_used_today.
-    UTC has no DST so the rollover is always at exactly 00:00 UTC.
-    (Phase 26 RESEARCH Pitfall 3 — always use UTC, not local time.)
-    """
-    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def _valid_nonneg_int(value: object) -> bool:
@@ -999,6 +999,38 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         assert self._hub is not None  # attach() runs before any sensor read (__init__.py:181)
         return self._hub.quota_is_exhausted
 
+    # ------------------------------------------------------------------
+    # Phase 31 TEMPORARY cross-plan compatibility shim (D-08) — remove in 31-05.
+    # ------------------------------------------------------------------
+    # gmail_coordinator.py and imap_coordinator.py still read/write the private
+    # `self._quota_exhausted_until` attribute directly (their own inline Stage-1-direct
+    # forward POST path's pre-POST gate, 429 handler, and stale-block clear) and still
+    # call `self._arm_quota_expiry_timer()` after every mutation — 31-05 owns rewiring
+    # those two files to the hub's public mutators (hub.quota_is_exhausted /
+    # hub.record_quota_exhausted / hub's own always-armed expiry timer, 31-03) and
+    # removing these call sites entirely. Until 31-05 lands, this base-class property +
+    # no-op method keep every existing gmail/imap poll test (and real polls) from
+    # crashing with AttributeError, by transparently redirecting the old private-attribute
+    # read/write onto the shared hub's public `quota_exhausted_until` attribute. This is
+    # NOT a scope-creep reimplementation of 31-05's D-01 gate order — it is a raw
+    # passthrough with no max-precedence merge, matching the OLD per-account
+    # raw-overwrite semantics exactly, just now writing into the shared value.
+    @property
+    def _quota_exhausted_until(self) -> int | None:
+        return self._hub.quota_exhausted_until if self._hub is not None else None
+
+    @_quota_exhausted_until.setter
+    def _quota_exhausted_until(self, value: int | None) -> None:
+        if self._hub is not None:
+            self._hub.quota_exhausted_until = value
+
+    def _arm_quota_expiry_timer(self) -> None:
+        """No-op backward-compat shim (Phase 31 D-08) — the hub owns its own
+        always-armed quota-expiry timer (31-03); no per-coordinator arming needed.
+        Removed in 31-05 once gmail_coordinator.py/imap_coordinator.py stop calling it.
+        """
+        return
+
     def _emit_scan_event(
         self,
         *,
@@ -1368,8 +1400,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         (WR-04 — both subclasses call it from _async_update_data_inner, so the
         "drained on next quota-free poll" contract holds even when no new shipment
         email ever arrives) to opportunistically flush the backlog when quota/cap
-        conditions allow. Respects MAX_STAGE2_POSTS_PER_POLL cap and
-        _quota_exhausted_until timestamp.
+        conditions allow. Respects the shared per-poll cap (hub.poll_cap_reached())
+        and the shared cooldown window (hub.quota_is_exhausted).
 
         Guard order:
           1. Empty _pending_posts → no-op.
@@ -1381,11 +1413,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         inherits _async_stage2_worker and therefore this drain automatically — no
         imap_coordinator.py changes needed.
 
+        Phase 31 (D-01): each POST reserves a shared daily-budget slot via
+        hub.try_consume() BEFORE the POST call, so the gate order is
+        poll_cap_reached() -> try_consume() -> POST -> outcome-routed
+        refund/record_quota_exhausted/record_poll_post.
+
         Error handling mirrors _async_process_stage2_job:
           - ParcelAppAuthError  → raise ConfigEntryAuthFailed
-          - ParcelAppQuotaError → set _quota_exhausted_until and BREAK (items remain)
+          - ParcelAppQuotaError → hub.record_quota_exhausted(reset_at) and BREAK (items remain)
           - AlreadyAdded / InvalidTracking → treat as success (dedup write + remove)
-          - ParcelAppTransientError → continue (item stays for next poll — Pitfall 2)
+          - ParcelAppTransientError → hub.refund_consume() + continue (item stays for retry)
         """
         if not self._pending_posts:
             return
@@ -1394,8 +1431,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
         if debug_mode:
             return  # debug mode never accumulates _pending_posts; early exit is safe (Pitfall 1)
-        now = int(_time.time())
-        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+        if self._hub.quota_is_exhausted:
             return  # quota still exhausted; drain blocked until the window resets
 
         parcel_client = ParcelAppClient(
@@ -1406,7 +1442,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Iterate a COPY so dict mutation during iteration is safe (RESEARCH constraint).
         for storage_key, merged_shipment in list(self._pending_posts.items()):
             # AC-4 / Pitfall 4: shared counter covers drain + new-extraction POSTs this poll.
-            if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
+            if self._hub.poll_cap_reached():
                 break  # cap reached; remaining items wait for next poll
 
             # Phase 28 Plan 03 (D-04): defensive carrier-format re-gate before each drain POST.
@@ -1443,6 +1479,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 merged_shipment.carrier_name,
             )
 
+            # D-01: reserve one shared daily-budget slot BEFORE the POST. If the shared
+            # budget is exhausted this window, stop draining — remaining items stay in
+            # _pending_posts for the next window (mirrors the poll-cap break semantics).
+            if not self._hub.try_consume():
+                break
+
             # Phase 26 RESEARCH Pitfall 6: posted_2xx flag distinguishes genuine 2xx from
             # AlreadyAdded/InvalidTracking fall-through. _record_forward ONLY fires on 2xx.
             posted_2xx = False
@@ -1460,10 +1502,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             except ParcelAppQuotaError as err:
                 # Quota re-exhausted mid-drain; set the block and stop draining.
                 # Remaining items stay in _pending_posts for the next quota window.
-                self._quota_exhausted_until = (
-                    err.reset_at if err.reset_at is not None else _next_midnight_utc()
-                )
-                self._arm_quota_expiry_timer()  # finding 3: refresh entities when it expires
+                # D-01: no refund on 429 — record_quota_exhausted blocks all accounts,
+                # so a stray +1 reserve is moot until reset.
+                self._hub.record_quota_exhausted(err.reset_at)
                 _LOGGER.warning(
                     "Stage-2 drain: parcelapp quota hit mid-drain — deferring remaining "
                     "pending items until quota resets"
@@ -1473,6 +1514,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # Treat as success for dedup purposes — fall through to bookkeeping below.
                 # posted_2xx stays False: AlreadyAdded/InvalidTracking do NOT consume quota
                 # and do NOT represent forwarding a new shipment (RESEARCH Pitfall 6 / T-26-02).
+                # D-01: no refund — the reserve stays consumed (the item genuinely occupied
+                # a daily-budget slot from parcelapp's point of view).
                 _LOGGER.debug(
                     "Stage-2 drain: tn=%s already known to parcelapp (AlreadyAdded/InvalidTracking)",
                     normalized_tn,
@@ -1480,6 +1523,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
             except ParcelAppTransientError as err:
                 # Leave item in _pending_posts for retry next poll (Pitfall 2).
+                # D-01: refund the reserved-but-unspent slot back to the shared budget.
+                self._hub.refund_consume()
                 _LOGGER.debug(
                     "Stage-2 drain: transient error for tn=%s — item stays for retry: %s",
                     normalized_tn,
@@ -1490,9 +1535,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # Success or AlreadyAdded/InvalidTracking: bookkeeping (Pitfall 3: call
             # _record_stage2_success on drain POSTs too — they are real POSTs).
             if posted_2xx:
-                # WR-08/D-12: only a genuine 2xx POST consumes a cap slot — AlreadyAdded/
-                # InvalidTracking consumed no parcelapp quota (Pitfall 4: shared counter).
-                self._stage2_posts_this_poll += 1
+                # WR-08/D-12: only a genuine 2xx POST bumps the shared per-poll counter —
+                # AlreadyAdded/InvalidTracking consumed no parcelapp quota (Pitfall 4).
+                self._hub.record_poll_post()
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
             self._record_stage2_success()
             # Write dedup so next poll does not retry this TN (DEDUP-01: shared hub).
@@ -1520,11 +1565,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         MRG-05 (per-poll POST cap gate + once-per-poll notification + D-12 counter),
         FAIL-03 (OllamaTransientError / OllamaSchemaError → no POST, no dedup write).
 
+        Phase 31 (D-01): reserves a shared daily-budget slot via hub.try_consume()
+        immediately before the POST; refunds it on a transient error, routes 429 to
+        hub.record_quota_exhausted(reset_at) with no refund.
+
         Error hierarchy mirrors inline POST in gmail_coordinator.py lines 434-511:
           - ParcelAppAuthError  -> raise ConfigEntryAuthFailed (caught by worker BLE001)
-          - ParcelAppQuotaError -> update _quota_exhausted_until + log warning
+          - ParcelAppQuotaError -> hub.record_quota_exhausted(reset_at) + log warning
           - ParcelAppAlreadyAddedError / ParcelAppInvalidTrackingError -> dedup-write + continue
-          - ParcelAppTransientError -> log warning, discard key, allow retry
+          - ParcelAppTransientError -> hub.refund_consume() + log warning, discard key, allow retry
 
         Note (T-19-08): ConfigEntryAuthFailed raised here is caught by _async_stage2_worker's
         except Exception (BLE001) — HA's reauth flow is NOT triggered from worker context.
@@ -1557,7 +1606,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         # MRG-05: per-poll POST cap gate (D-09). Checked BEFORE the extractor call so
         # cap-skipped jobs never reach Ollama (avoids wasted inference cost during cap-hit polls).
-        if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
+        if self._hub.poll_cap_reached():
             if not self._stage2_cap_notified_this_poll:
                 # D-10: fire exactly one notification per poll (first cap-hit only).
                 self._stage2_cap_notified_this_poll = True
@@ -1573,8 +1622,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
             self._diagnostics.stage2_cap_skip_total += 1
             _LOGGER.debug(
-                "Stage-2 worker: cap hit (%d/%d) — skipping POST for %s; will retry next poll",
-                self._stage2_posts_this_poll,
+                "Stage-2 worker: shared per-poll cap hit (max %d) — skipping POST for %s; "
+                "will retry next poll",
                 MAX_STAGE2_POSTS_PER_POLL,
                 normalized_tn,
             )
@@ -1754,8 +1803,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # runs for every dequeued job. When quota is exhausted, persist the already-merged
         # shipment to _pending_posts so the drain (plan 04) can POST it later without
         # re-invoking Ollama (no wasted GPU on re-runs).
-        now = int(_time.time())
-        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+        if self._hub.quota_is_exhausted:
             self._pending_posts[job.storage_key] = merged_shipment
             await self._async_save_store()
             self._diagnostics.stage2_quota_skipped_total += 1  # DIAG-02: "extracted, POST deferred"
@@ -1781,6 +1829,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             api_key=self.config_entry.data[CONF_API_KEY],
         )
 
+        # D-01: reserve one shared daily-budget slot BEFORE the POST. Budget exhausted
+        # this window (raced with another account between the check above and here) —
+        # defer identically to the quota-exhausted branch above.
+        if not self._hub.try_consume():
+            self._pending_posts[job.storage_key] = merged_shipment
+            await self._async_save_store()
+            self._stage2_enqueued_keys.discard(normalized_tn)
+            return
+
         _LOGGER.debug(
             "Stage-2: POSTing tn=%s carrier=%s to parcelapp",
             normalized_tn,
@@ -1798,10 +1855,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         except ParcelAppAuthError as err:
             raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
         except ParcelAppQuotaError as err:
-            self._quota_exhausted_until = (
-                err.reset_at if err.reset_at is not None else _next_midnight_utc()
-            )
-            self._arm_quota_expiry_timer()  # finding 3: refresh entities when it expires
+            # D-01: no refund on 429 — record_quota_exhausted blocks all accounts,
+            # so a stray +1 reserve is moot until reset.
+            self._hub.record_quota_exhausted(err.reset_at)
             _LOGGER.warning(
                 "parcelapp.net daily quota exhausted (Stage-2 worker); forwarding paused: %s",
                 str(err)[:100],
@@ -1818,10 +1874,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._diagnostics.stage2_already_added_total += 1
-            # WR-08: do NOT increment _stage2_posts_this_poll here — no POST succeeded
+            # WR-08: do NOT bump the shared poll counter here — no POST succeeded
             # and no parcelapp quota was consumed, so counting these ate
             # MAX_STAGE2_POSTS_PER_POLL cap slots for non-POST outcomes (the D-12
-            # contract is "increment only on successful POST").
+            # contract is "increment only on successful POST"). D-01: no refund either
+            # — the reserve stays consumed (it genuinely occupied a daily-budget slot).
             # Write dedup so next poll does not retry; discard in-flight key (DEDUP-01: shared hub).
             self._hub.check_and_mark(normalized_tn)
             self._stage2_enqueued_keys.discard(normalized_tn)
@@ -1840,12 +1897,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 str(err)[:100],
             )
             self._diagnostics.stage2_transient_error_total += 1
+            # D-01: refund the reserved-but-unspent slot back to the shared budget.
+            self._hub.refund_consume()
             self._stage2_enqueued_keys.discard(normalized_tn)
             self._release_inflight(job)  # re-fetch next poll (transient, not lost)
             return
 
         # Success path (mirrors gmail_coordinator.py lines 513-526).
-        self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
+        self._hub.record_poll_post()  # MRG-05 D-12: bump the shared counter only on successful POST
         self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
         self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
         self._hub.check_and_mark(normalized_tn)  # DEDUP-01: shared dedup-write
@@ -1914,8 +1973,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # self._store_loaded = True below for why.
         migrated_tns = [normalize_tracking_number(tn) for tn in stored_list if isinstance(tn, str)]
         self._hub.seed_from_list(migrated_tns)
+        # Phase 31 (R5/QUOTA-05): one-time migration of the per-entry quota_exhausted_until
+        # into the shared hub via max-precedence merge. Conservative: used_today is
+        # deliberately NOT carried over — the migration day starts the shared budget at 0
+        # (seed_quota_from_account never touches used_today).
         qe = stored.get("quota_exhausted_until")
-        self._quota_exhausted_until = qe if isinstance(qe, int) else None
+        self._hub.seed_quota_from_account(qe if isinstance(qe, int) else None)
+        # Phase 31 (D-08): a per-entry quota key present at all (even a bare-None
+        # quota_exhausted_until, or a used_today/used_today_date left over from a
+        # pre-31-04 store) means this account needs its one-time durable drop persist
+        # below, independent of whether it also carried any dedup TNs to migrate.
+        had_quota_keys = qe is not None or "used_today" in stored or "used_today_date" in stored
         _LOGGER.debug(
             "Migrated %d submitted tracking numbers from per-entry store into the shared hub",
             len(migrated_tns),
@@ -1970,8 +2038,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._restored_shipments = restored
         # CR-02: seed _pending_shipments from the restored shipments so any store save
         # that fires before the first successful non-debug poll (async_stop_stage2 on a
-        # failed first refresh, _maybe_reset_used_today rollover, _on_quota_expiry) never
-        # snapshots an empty dict and wipes persisted_shipments from disk.
+        # failed first refresh) never snapshots an empty dict and wipes persisted_shipments
+        # from disk.
         self._pending_shipments = dict(restored)
         # Phase 23 D-03 / LD-05: hydrate pending_posts — post-deferred merged shipments
         # that survived an HA restart while ParcelApp quota was exhausted.
@@ -2035,16 +2103,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 type(raw_lf).__name__,
             )
             self._last_forwarded_ts = None
-        raw_ut = stored.get("used_today", 0)
-        if _valid_nonneg_int(raw_ut):
-            self._used_today = raw_ut
-        else:
-            _LOGGER.warning(
-                "used_today in store is not a non-negative int (type=%s); resetting to 0",
-                type(raw_ut).__name__,
-            )
-            self._used_today = 0
-        self._used_today_date = str(stored.get("used_today_date", ""))
+        # Phase 31 (D-08): used_today/used_today_date are NOT hydrated into any coordinator
+        # attribute — they no longer exist post-D-08. The migration above (seed_quota_from_
+        # account) deliberately does not carry used_today into the hub either (conservative:
+        # the shared budget starts the migration day at 0, R5).
         self._store_loaded = True
         _LOGGER.debug(
             "Restored %d persisted shipments and %d pending posts from store",
@@ -2062,8 +2124,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # 'submitted_tracking_numbers' key unconditionally — see _store_snapshot). A
         # crash between the two awaits leaves the per-entry key intact; seed_from_list's
         # setdefault makes re-seeding on the next restart idempotent (no duplicate, no
-        # loss).
-        if migrated_tns:
+        # loss). Phase 31: broadened to `migrated_tns or had_quota_keys` so a quota-only
+        # account (dedup list empty/absent, but a quota key present) also durably drops
+        # its per-entry quota_exhausted_until/used_today/used_today_date keys.
+        if migrated_tns or had_quota_keys:
             await self._hub.async_save()
             await self._async_save_store(immediate=True)
 
@@ -2096,9 +2160,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         (Shop2ParcelHub.async_save). Every per-entry save after this plan omits the
         key unconditionally, which is what makes the one-time migration delete
         permanent (see _async_load_store).
+
+        Phase 31 (D-08/R5): 'quota_exhausted_until', 'used_today', and 'used_today_date'
+        are likewise deliberately ABSENT — that quota state now lives only in the shared
+        hub's shop2parcel.__shared__ store (Shop2ParcelHub.async_save, 31-02). The
+        one-time migration in _async_load_store (seed_quota_from_account) makes the drop
+        of these three per-entry keys permanent, mirroring the dedup migrate-then-drop
+        choreography above. No tracking-number or other PII value is referenced by this
+        comment (P2).
         """
         return {
-            "quota_exhausted_until": self._quota_exhausted_until,
             "persisted_shipments": {
                 msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
             },
@@ -2109,8 +2180,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # Phase 26: operational-health counters (additive keys — no STORAGE_VERSION bump).
             "total_forwarded": self._total_forwarded,
             "last_forwarded_ts": self._last_forwarded_ts,
-            "used_today": self._used_today,
-            "used_today_date": self._used_today_date,
             # Phase 27 Plan 02: seen-message-ID cache (additive key — no STORAGE_VERSION bump).
             # Stored as an ordered list of IDs (insertion order preserved by list(keys())).
             "seen_message_ids": list(self._seen_message_ids.keys()),
