@@ -743,8 +743,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
         MUST be called ONLY on the genuine 2xx success path — never on
         ParcelAppAlreadyAddedError or ParcelAppInvalidTrackingError, which do NOT
-        consume ParcelApp quota and do NOT represent forwarding a new shipment.
+        represent forwarding a new shipment (total_forwarded is a lifetime count
+        of distinct shipments actually forwarded, not of POST attempts).
         (Phase 26 RESEARCH Pitfall 1 / Pitfall 6 / STRIDE T-26-02.)
+
+        WR-01 (31-REVIEW): "do NOT consume ParcelApp quota" above refers only to
+        this method's own total_forwarded counter, NOT to the shared daily
+        API-budget reserve. That reserve is a different concept, owned by
+        hub.try_consume()/hub.refund_consume() (Phase 31, D-08) — reserved
+        BEFORE every POST and, by deliberate policy, deliberately NOT refunded
+        on AlreadyAdded/InvalidTracking at any of the four POST call sites
+        (Gmail inline, IMAP inline, drain loop, Stage-2 worker): from
+        ParcelApp's point of view those outcomes still occupied a real
+        daily-budget slot, even though they don't bump total_forwarded here.
 
         Phase 31 (D-08): the daily-budget increment (used_today) now happens at
         the hub.try_consume() reserve, BEFORE the POST — never here. This method
