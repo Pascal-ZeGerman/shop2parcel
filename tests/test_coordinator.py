@@ -6071,6 +6071,53 @@ async def test_stage2_worker_already_added_keeps_reserve(hass, mock_config_entry
     mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
 
 
+async def test_drain_already_added_keeps_reserve(hass, mock_config_entry):
+    """WR-01 (31-REVIEW.md / 31-VERIFICATION.md): the drain loop's own AlreadyAdded/
+    InvalidTracking except block (coordinator.py:1512-1521) must NOT refund the
+    reserve it took via hub.try_consume() immediately before the POST — the slot
+    stays consumed (D-01: it genuinely occupied a daily-budget slot from
+    parcelapp's point of view). Mirrors test_stage2_worker_already_added_keeps_reserve,
+    which only covers the Stage-2 worker path; this covers the drain path.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        for _ in range(5):
+            assert coord._hub.try_consume() is True
+        used_today_before_drain = coord._hub.used_today
+        assert used_today_before_drain == 5
+
+        drain_shipment = ShipmentData(
+            tracking_number="1Z999AA10123456784",  # real UPS format — passes validate_carrier_format
+            carrier_name="UPS",
+            order_name="#9001",
+            message_id="msg-drain-already-added",
+            email_date=1700000003,
+        )
+        coord._pending_posts = {"drain_key_already_added": drain_shipment}
+
+        await coord._async_drain_pending_posts()
+
+    # The drain's own try_consume() reserve (5 -> 6) is NOT refunded on AlreadyAdded —
+    # used_today stays at 6.
+    assert coord._hub.used_today == used_today_before_drain + 1, (
+        "drain AlreadyAdded must leave the reserve consumed — no refund"
+    )
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+
+
 async def test_drain_defensive_regate_drops_gate_failing_item(hass, mock_stage2_entry, caplog):
     """R1/R3/D-04: The drain defensively re-gates each pending post before POSTing.
 

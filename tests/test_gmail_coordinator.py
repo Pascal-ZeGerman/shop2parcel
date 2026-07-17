@@ -1508,3 +1508,57 @@ async def test_gmail_inline_429_blocks_shared_hub(hass, mock_no_stage2_entry):
     assert coord._hub.quota_exhausted_until == 9999999999
     # No refund on 429 (D-01) — the reserved slot stays consumed.
     assert coord._hub.used_today == 1
+
+
+async def test_gmail_inline_already_added_keeps_reserve(hass, mock_no_stage2_entry):
+    """WR-01 (31-REVIEW.md / 31-VERIFICATION.md): the Gmail inline forward path's
+    AlreadyAdded/InvalidTracking except block must NOT refund the reserve it took
+    via hub.try_consume() immediately before the POST — the slot stays consumed
+    (D-01: it genuinely occupied a daily-budget slot from parcelapp's point of
+    view), mirroring the already-tested 429 (no-refund) and transient (refund)
+    branches above.
+    """
+    from custom_components.shop2parcel.api.exceptions import ParcelAppAlreadyAddedError
+
+    mock_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    msg_id = "msg_already_added_keeps_reserve"
+    mock_gmail = _make_stage1_hit_poll(msg_id, tn)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit(tn)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = GmailCoordinator(hass, mock_no_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        assert coord._hub.used_today == 0  # pre-poll baseline (conftest's shared test hub)
+
+        await coord._async_update_data()
+
+    # Reserved (try_consume) then NOT refunded on AlreadyAdded (D-01) — used_today
+    # stays at 1, not back at 0.
+    assert coord._hub.used_today == 1, (
+        f"Expected used_today to stay at 1 (no refund on AlreadyAdded), got {coord._hub.used_today}"
+    )
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
