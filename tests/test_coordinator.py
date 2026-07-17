@@ -40,9 +40,9 @@ from custom_components.shop2parcel.coordinator import (
     Shop2ParcelCoordinator,
     _extract_email_meta,
     _extract_imap_email_meta,
-    _next_midnight_utc,
 )
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
+from custom_components.shop2parcel.hub import _next_midnight_utc
 from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
 
 
@@ -440,7 +440,15 @@ async def test_quota_exhaustion(hass, mock_config_entry):
 
 
 async def test_quota_exhausted_until_midnight(hass, mock_config_entry):
-    """FWRD-04 / D-06: quota_exhausted_until = next midnight UTC when reset_at is None."""
+    """FWRD-04 / D-06: quota_exhausted_until = next midnight UTC when reset_at is None.
+
+    WR-04: coordinator.py's own copy of _next_midnight_utc() was removed as
+    dead code (31-05 finished rewiring both its call sites onto
+    hub.record_quota_exhausted(), which owns the None-fallback internally via
+    hub's own hoisted copy). This test now imports hub._next_midnight_utc
+    directly to compute the expected value, since it is exercising the real
+    hub-owned midnight-rollover fallback that record_quota_exhausted() uses.
+    """
     mock_config_entry.add_to_hass(hass)
     expected = _next_midnight_utc()  # call before any monkeypatching
     with (

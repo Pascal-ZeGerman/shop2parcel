@@ -25,7 +25,6 @@ from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta
-from datetime import time as dt_time
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components import persistent_notification
@@ -169,32 +168,6 @@ def _extract_imap_email_meta(raw_bytes: bytes) -> dict:
     except Exception as err:  # noqa: BLE001
         _LOGGER.warning("Failed to extract email meta: %s", err)
         return {"subject": "", "from": "", "date": "", "snippet": ""}
-
-
-def _next_midnight_utc() -> int:
-    """Compute epoch seconds for the next 00:00 UTC.
-
-    Per CONTEXT.md D-06: when ParcelAppQuotaError.reset_at is None, fall back
-    to the next UTC midnight so the backoff aligns with parcelapp's daily reset.
-
-    Phase 31 (D-05): hub.py hoisted its own copy of this helper (31-01) and
-    hub.record_quota_exhausted() now owns the None-fallback internally, so
-    coordinator.py's own two call sites (drain loop, Stage-2 worker) no longer
-    call this function directly. It stays defined here — NOT removed — solely
-    because gmail_coordinator.py and imap_coordinator.py still import it for
-    their own inline-forward 429 branches (31-05 scope, not yet rewired);
-    removing it now would break those imports for every coordinator test in
-    this suite. 31-05 removes both the import and this definition once its own
-    two call sites are rewired to hub.record_quota_exhausted().
-    """
-    today_utc = datetime.now(UTC).date()
-    return int(
-        datetime.combine(
-            today_utc + timedelta(days=1),
-            dt_time.min,
-            tzinfo=UTC,
-        ).timestamp()
-    )
 
 
 def _valid_nonneg_int(value: object) -> bool:
