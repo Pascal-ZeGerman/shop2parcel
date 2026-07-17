@@ -2600,6 +2600,30 @@ def test_pollstats_asdict_contains_all_stage2_counter_keys():
     assert expected_keys <= set(d.keys()), f"missing keys: {expected_keys - set(d.keys())}"
 
 
+# ---------------------------------------------------------------------------
+# Phase 35 Plan 03 (MRG-05): PollStats.grounding_rejected_total isolated counter
+# ---------------------------------------------------------------------------
+
+
+def test_record_grounding_rejection_isolated_counter():
+    """MRG-05: record_grounding_rejection increments grounding_rejected_total and stores the
+    last value/reason, WITHOUT touching carrier_format_rejected_total (metric isolation,
+    RESEARCH.md Pitfall 3)."""
+    from custom_components.shop2parcel.coordinator import PollStats
+
+    stats = PollStats()
+    assert stats.grounding_rejected_total == 0
+    assert stats.last_grounding_rejected_value is None
+    assert stats.last_grounding_rejected_reason is None
+
+    stats.record_grounding_rejection("Target - Coffee maker", "ungrounded")
+
+    assert stats.grounding_rejected_total == 1
+    assert stats.last_grounding_rejected_value == "Target - Coffee maker"
+    assert stats.last_grounding_rejected_reason == "ungrounded"
+    assert stats.carrier_format_rejected_total == 0
+
+
 async def test_stage2_queue_depth_returns_zero_when_queue_is_none(hass, mock_stage2_config_entry):
     """DIAG-02: stage2_queue_depth returns 0 when _stage2_queue is None (stage2 not started)."""
     mock_stage2_config_entry.add_to_hass(hass)

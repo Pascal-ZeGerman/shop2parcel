@@ -329,6 +329,14 @@ class PollStats:
     carrier_format_rejected_total: int = 0
     last_carrier_format_rejected_value: str | None = None  # CLEANED canonical form (D-06)
     last_carrier_format_rejected_reason: str | None = None
+    # Phase 35 Plan 03 (MRG-05): grounding-gate rejection counter. In-memory,
+    # not persisted — resets to 0 on HA restart (same lifecycle as
+    # carrier_format_rejected_total). Deliberately SEPARATE from that counter
+    # (RESEARCH.md Pitfall 3) so CarrierFormatRejectionsSensor's existing
+    # semantics (tracking-number format rejections only) stay intact.
+    grounding_rejected_total: int = 0
+    last_grounding_rejected_value: str | None = None
+    last_grounding_rejected_reason: str | None = None
 
     def record_llm_call(self, latency_ms: float, *, fence_retry: bool) -> None:
         """Accumulate one successful LLM call into the latency and retry counters."""
@@ -351,6 +359,19 @@ class PollStats:
         self.carrier_format_rejected_total += 1
         self.last_carrier_format_rejected_value = clean_value
         self.last_carrier_format_rejected_reason = reason
+
+    def record_grounding_rejection(self, clean_value: str, reason: str) -> None:
+        """Increment the MRG-05 grounding-rejection counter and record the last value/reason.
+
+        Must only be called from HA-holding callers (coordinator.py) — not from merge.py (D-02).
+        In-memory only, no STORAGE_VERSION bump — mirrors record_carrier_format_rejection but
+        stays on its own counter (RESEARCH.md Pitfall 3): a grounding rejection (fabricated
+        order_name/order_summary) must never be conflated with a carrier-format (tracking-number)
+        rejection, which CarrierFormatRejectionsSensor's semantics specifically describe.
+        """
+        self.grounding_rejected_total += 1
+        self.last_grounding_rejected_value = clean_value
+        self.last_grounding_rejected_reason = reason
 
 
 class Shop2ParcelStore(Store):
