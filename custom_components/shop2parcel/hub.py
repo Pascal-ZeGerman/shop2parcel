@@ -27,7 +27,7 @@ from datetime import time as dt_time
 from homeassistant.core import HomeAssistant, callback
 
 from .const import MAX_STAGE2_POSTS_PER_POLL, MAX_SUBMITTED_TRACKING_NUMBERS, PARCELAPP_DAILY_LIMIT
-from .coordinator import Shop2ParcelCoordinator, Shop2ParcelStore
+from .coordinator import Shop2ParcelCoordinator, Shop2ParcelStore, _valid_nonneg_int
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -277,6 +277,24 @@ class Shop2ParcelHub:
         else:
             self.quota_exhausted_until = max(self.quota_exhausted_until, new_until)
 
+    def seed_quota_from_account(self, quota_exhausted_until: int | None) -> None:
+        """Merge one per-account store's quota_exhausted_until into the shared value.
+
+        QUOTA-05 (R5): one-time migration seeding — same max-precedence merge
+        as record_quota_exhausted, so a later per-account cooldown is never
+        shortened by an earlier one. Deliberately does NOT touch
+        self.used_today (or self._used_today) — the migration day starts
+        conservatively at 0 rather than summing/copying stale per-account
+        counters (R5). Synchronous, idempotent: re-seeding with None is a
+        no-op; re-seeding the same timestamp twice yields the same value.
+        """
+        if quota_exhausted_until is None:
+            return
+        if self.quota_exhausted_until is None:
+            self.quota_exhausted_until = quota_exhausted_until
+        else:
+            self.quota_exhausted_until = max(self.quota_exhausted_until, quota_exhausted_until)
+
     def poll_cap_reached(self) -> bool:
         """True once the shared per-poll Stage-2 POST cap has been reached.
 
@@ -313,29 +331,42 @@ class Shop2ParcelHub:
         )
 
     async def async_save(self) -> None:
-        """Serialize the shared dedup set (plus version) to the shared store.
+        """Serialize the shared dedup + quota state (plus version) to the shared store.
 
         DEDUP-02: additive store key — 'submitted_tracking_numbers' lives
         alongside the existing 'version' key with no SHARED_STORAGE_VERSION
-        bump. No-op if the store hasn't been created yet (async_setup not
-        called, or already torn down).
+        bump. QUOTA-03: three further additive keys — 'used_today' (the
+        private backing attribute, NOT the rollover property, so a save
+        never has a side effect), 'used_today_date', and
+        'quota_exhausted_until'. '_stage2_posts_this_poll' is deliberately
+        excluded — it is ephemeral per-poll state (QUOTA-04), never
+        persisted. No-op if the store hasn't been created yet (async_setup
+        not called, or already torn down).
         """
         if self._store is not None:
             await self._store.async_save(
                 {
                     "version": SHARED_STORAGE_VERSION,
                     "submitted_tracking_numbers": list(self._submitted_tracking_numbers.keys()),
+                    "used_today": self._used_today,
+                    "used_today_date": self.used_today_date,
+                    "quota_exhausted_until": self.quota_exhausted_until,
                 }
             )
 
     async def async_load(self) -> None:
-        """Rehydrate the shared dedup set from the shared store.
+        """Rehydrate the shared dedup + quota state from the shared store.
 
         T-30-04: defensive against a corrupt/hand-edited store payload — a
         non-list 'submitted_tracking_numbers' value logs a WARNING and loads
         as empty rather than crashing hub setup (mirrors coordinator.py's
         equivalent guard). Non-str items are dropped by seed_from_list
-        (T-30-02). No-op if the store hasn't been created yet.
+        (T-30-02). T-31-04: 'used_today' must be a genuine non-negative int
+        (via coordinator.py's _valid_nonneg_int — excludes bool) or it
+        resets to 0 with a WARNING; 'quota_exhausted_until' must be a
+        genuine int (excludes bool) or it resets to None with a WARNING —
+        a corrupt/hand-edited value must never inflate the shared budget on
+        load. No-op if the store hasn't been created yet.
         """
         if self._store is None:
             return
@@ -349,6 +380,33 @@ class Shop2ParcelHub:
             )
             stored_list = []
         self.seed_from_list([tn for tn in stored_list if isinstance(tn, str)])
+
+        raw_used_today = data.get("used_today", 0)
+        if _valid_nonneg_int(raw_used_today):
+            self._used_today = raw_used_today
+        else:
+            _LOGGER.warning(
+                "shop2parcel.__shared__ store's 'used_today' value is not a "
+                "non-negative int (type=%s); resetting to 0.",
+                type(raw_used_today).__name__,
+            )
+            self._used_today = 0
+        self.used_today_date = str(data.get("used_today_date", ""))
+
+        raw_quota_exhausted_until = data.get("quota_exhausted_until")
+        if raw_quota_exhausted_until is None:
+            self.quota_exhausted_until = None
+        elif isinstance(raw_quota_exhausted_until, int) and not isinstance(
+            raw_quota_exhausted_until, bool
+        ):
+            self.quota_exhausted_until = raw_quota_exhausted_until
+        else:
+            _LOGGER.warning(
+                "shop2parcel.__shared__ store's 'quota_exhausted_until' value "
+                "is not an int (type=%s); resetting to None.",
+                type(raw_quota_exhausted_until).__name__,
+            )
+            self.quota_exhausted_until = None
 
     async def async_shutdown(self) -> None:
         """Cancel the worker task and flush the store. Does NOT touch hass.data.
