@@ -11,6 +11,7 @@ import pytest
 
 from custom_components.shop2parcel.api.email_parser import (
     CARRIER_REGISTRY,
+    LABEL_TAGS,
     STRATEGY_BROAD_REGEX,
     STRATEGY_DHL,
     STRATEGY_FEDEX,
@@ -18,6 +19,7 @@ from custom_components.shop2parcel.api.email_parser import (
     STRATEGY_REGEX,
     STRATEGY_UPS,
     STRATEGY_USPS,
+    TRACKING_TAGS,
     EmailParser,
     ParseResult,
     ShipmentData,
@@ -81,21 +83,98 @@ def test_html_strategy_used_first(shopify_html: str) -> None:
     assert html_result.shipment.tracking_number == "1Z999AA10123456784"
 
 
-def test_dual_strategy_fallback_used() -> None:
-    """HTML strategy only scans <p> and <td> elements; div-only HTML forces regex fallback.
+def test_div_only_tracking_recovered_via_html_strategy() -> None:
+    """SC-3 / Pitfall-4 inversion: the broadened TRACKING_TAGS scan now recovers a
+    tracking number sitting in a <div>-only email directly via the HTML strategy —
+    _parse_html_template no longer fails outright on div-only input.
 
-    Verifies _parse_html_template returns shipment=None for div-only input,
-    and that parse() succeeds via _parse_regex_tier1.
+    order_name is intentionally NOT recovered here: the order_name/carrier_name
+    label regexes stay LABEL_TAGS-scoped ([p, td]) — this is the validated,
+    deliberate behavior that avoids the footer-boilerplate false positive (see
+    RESEARCH.md Pitfall 4). Before the fix, this div-only HTML made
+    _parse_html_template return None entirely, so parse() fell through to
+    _parse_regex_tier1, which DID recover order_name via its full-text regex.
+    After the fix, the HTML strategy succeeds first (parse() short-circuits on
+    its first non-None result), so Tier 1 is never reached and order_name is lost.
     """
     html = "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>"
     parser = EmailParser()
-    # HTML strategy only scans <p> — so <div>-only HTML should return None from HTML strategy
     html_result = parser._parse_html_template(html, "msg456", 0)
-    assert html_result.shipment is None, "HTML strategy should fail on div-only HTML"
-    # Regex fallback should succeed
+    assert html_result.shipment is not None, (
+        "HTML strategy should now recover tracking from div-only HTML"
+    )
+    assert html_result.shipment.tracking_number == "1Z999AA10123456784"
+    assert html_result.shipment.order_name == "", (
+        "order_name must be empty — label regex scope (LABEL_TAGS) is unchanged, "
+        "so it never scans the <div> (Pitfall 4)"
+    )
+    assert html_result.strategy_used == STRATEGY_HTML
+    # parse() returns the HTML-strategy result directly (short-circuits before Tier 1).
     result = parser.parse(html, "msg456", 0)
     assert result.shipment is not None
     assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.strategy_used == STRATEGY_HTML
+
+
+def test_div_only_tracking_recovered() -> None:
+    """SC-3: a real custom-Shopify-theme email that puts all shipment data in <div>
+    elements (previously a total Stage-1 miss) now yields a shipment with the
+    tracking number recovered, per the custom_theme_div_only.html spike fixture.
+    """
+    html = (
+        "<html><body>"
+        '<div class="content">'
+        "<div>Your order is on the way.</div>"
+        "<div>1x Ethiopia Yirgacheffe — 12oz bag, whole bean</div>"
+        "<div>Carrier: USPS</div>"
+        "<div>Tracking: 9405511899560000000000</div>"
+        "</div>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "msg_div_theme", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "9405511899560000000000"
+    assert result.shipment.order_name == ""
+    assert result.strategy_used == STRATEGY_HTML
+
+
+def test_span_tracking_recovered() -> None:
+    """SC-3: a tracking number inside an unlabeled <span> is recovered by the
+    broadened TRACKING_TAGS scan."""
+    html = "<html><body><span>1Z999AA10123456784</span></body></html>"
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "msg_span", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.strategy_used == STRATEGY_HTML
+
+
+def test_label_tags_and_tracking_tags_constants() -> None:
+    """SC-3: LABEL_TAGS/TRACKING_TAGS are exported module-level constants with the
+    exact validated scope split — label regexes stay [p, td]; tracking shape-sniff
+    is broadened to [p, td, div, span]."""
+    assert LABEL_TAGS == ["p", "td"]
+    assert TRACKING_TAGS == ["p", "td", "div", "span"]
+
+
+def test_footer_boilerplate_order_not_picked_up_from_div() -> None:
+    """SC-3: a valid tracking number sits in a <p>, but a footer <div> contains
+    boilerplate 'Reference Order #99999' support text. Since the order_name label
+    regex stays LABEL_TAGS-scoped ([p, td]), the footer div is never scanned for
+    order_name — the footer boilerplate must NOT be picked up as order_name."""
+    html = (
+        "<html><body>"
+        "<p>Tracking number: 1Z999AA10123456784</p>"
+        "<div>Reference Order #99999 when you contact support</div>"
+        "</body></html>"
+    )
+    parser = EmailParser()
+    result = parser._parse_html_template(html, "msg_footer", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "1Z999AA10123456784"
+    assert result.shipment.order_name != "#99999"
+    assert result.shipment.order_name == ""
 
 
 def test_returns_none_when_no_tracking_no_order() -> None:
@@ -185,8 +264,17 @@ def test_html_strategy_success_strategy_used(shopify_html: str) -> None:
 
 def test_regex_fallback_success_strategy_used() -> None:
     """DIAG-03: Regex fallback success -> strategy_used='regex_fallback', skip_reason=None,
-    tracking_regex and order_regex hits are True."""
-    html = "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>"
+    tracking_regex and order_regex hits are True.
+
+    SC-3 deviation note: this fixture was originally wrapped in a <div>, but the
+    Stage-1 TRACKING_TAGS broadening now recovers tracking numbers directly from
+    <div> elements via the HTML-template strategy (parse() short-circuits before
+    reaching the regex fallback this test exists to exercise). Switched to <h2> —
+    outside both LABEL_TAGS and TRACKING_TAGS — to keep this test's actual intent
+    (exercising the Tier-1 regex fallback path) intact, mirroring the existing
+    Tier-2 tests in this file that already use <h2> for the same reason.
+    """
+    html = "<html><body><h2>Tracking number: 1Z999AA10123456784 Order #5678</h2></body></html>"
     parser = EmailParser()
     result = parser.parse(html, "msg2", 0)
     assert result.shipment is not None
@@ -208,9 +296,10 @@ def test_keyword_hits_always_has_all_three_keys() -> None:
     assert empty.strategy_used is None
     assert set(empty.keyword_hits.keys()) == expected_keys
     assert all(isinstance(v, bool) for v in empty.keyword_hits.values())
-    # Regex fallback path
+    # Regex fallback path (SC-3: <h2> keeps this outside the broadened TRACKING_TAGS
+    # scope so the HTML-template strategy still fails and Tier-1 regex fallback runs)
     regex = parser.parse(
-        "<html><body><div>Tracking number: 1Z999AA10123456784 Order #5678</div></body></html>",
+        "<html><body><h2>Tracking number: 1Z999AA10123456784 Order #5678</h2></body></html>",
         "y",
         0,
     )
