@@ -1157,6 +1157,8 @@ async def test_second_restart_after_quota_key_drop_reseeds_nothing(hass):
         assert hub_b.quota_exhausted_until == t_migrated
         assert hub_b.used_today == 0
 
+        await hub_b.async_shutdown()
+
 
 # ---------------------------------------------------------------------------
 # Phase 31 Plan 03: hub-owned timers (QUOTA-03, QUOTA-04)
@@ -1191,13 +1193,19 @@ async def test_single_midnight_timer_after_two_accounts(hass):
 
 
 async def test_midnight_tick_resets_used_today(hass):
-    """QUOTA-03/R3: firing time past the next UTC midnight resets used_today
-    to 0 and reschedules the midnight timer for the following day."""
-    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+    """QUOTA-03/R3: the UTC-midnight timer forces the used_today rollover
+    reset and reschedules itself for the next midnight.
 
-    from pytest_homeassistant_custom_component.common import async_fire_time_changed  # noqa: PLC0415
+    Drives _on_midnight directly (mirrors test_coordinator.py's
+    test_midnight_refresh_resets_used_today) rather than via
+    async_fire_time_changed: the hub's _maybe_reset_used_today reads the
+    real wall-clock UTC date, which a simulated HA time-fire does not
+    advance — so a stale used_today_date is set explicitly to force the
+    rollover check to trip.
+    """
+    import homeassistant.util.dt as dt_util  # noqa: PLC0415
 
-    from custom_components.shop2parcel.hub import Shop2ParcelHub, _next_midnight_utc  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
@@ -1205,16 +1213,21 @@ async def test_midnight_tick_resets_used_today(hass):
 
         hub = Shop2ParcelHub(hass)
         await hub.async_setup()
+        assert hub._midnight_unsub is not None, "async_setup must schedule the midnight timer"
+        # async_setup already scheduled a real next-midnight timer. Cancel it
+        # before driving _on_midnight directly below, so _on_midnight's own
+        # self-reschedule is the only handle left (no leaked prior timer).
+        hub._midnight_unsub()
+        hub._midnight_unsub = None
 
         hub.try_consume()
         hub.try_consume()
-        assert hub.used_today == 2
+        hub.used_today_date = "2000-01-01"  # stale prior day forces a reset
+        assert hub._used_today == 2
 
-        next_midnight = datetime.fromtimestamp(_next_midnight_utc(), tz=UTC)
-        async_fire_time_changed(hass, next_midnight + timedelta(seconds=1))
-        await hass.async_block_till_done()
+        hub._on_midnight(dt_util.utcnow())
 
-        assert hub.used_today == 0, "midnight tick must reset used_today"
+        assert hub._used_today == 0, "midnight tick must reset used_today"
         assert hub._midnight_unsub is not None, "midnight timer must reschedule itself"
 
         await hub.async_shutdown()
@@ -1228,7 +1241,9 @@ async def test_quota_expiry_timer_clears_block(hass):
     from datetime import timedelta  # noqa: PLC0415
 
     import homeassistant.util.dt as dt_util  # noqa: PLC0415
-    from pytest_homeassistant_custom_component.common import async_fire_time_changed  # noqa: PLC0415
+    from pytest_homeassistant_custom_component.common import (
+        async_fire_time_changed,  # noqa: PLC0415
+    )
 
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
@@ -1258,7 +1273,9 @@ async def test_poll_window_tick_resets_counter(hass):
     from datetime import timedelta  # noqa: PLC0415
 
     import homeassistant.util.dt as dt_util  # noqa: PLC0415
-    from pytest_homeassistant_custom_component.common import async_fire_time_changed  # noqa: PLC0415
+    from pytest_homeassistant_custom_component.common import (
+        async_fire_time_changed,  # noqa: PLC0415
+    )
 
     from custom_components.shop2parcel.const import HUB_STAGE2_POLL_WINDOW  # noqa: PLC0415
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
@@ -1273,7 +1290,9 @@ async def test_poll_window_tick_resets_counter(hass):
         hub.record_poll_post()
         assert hub._stage2_posts_this_poll == 1
 
-        async_fire_time_changed(hass, dt_util.utcnow() + HUB_STAGE2_POLL_WINDOW + timedelta(seconds=1))
+        async_fire_time_changed(
+            hass, dt_util.utcnow() + HUB_STAGE2_POLL_WINDOW + timedelta(seconds=1)
+        )
         await hass.async_block_till_done()
 
         assert hub._stage2_posts_this_poll == 0, "poll-window tick must reset the shared counter"
@@ -1305,5 +1324,3 @@ async def test_shutdown_cancels_all_three_timers(hass):
         assert hub._midnight_unsub is None
         assert hub._quota_expiry_unsub is None
         assert hub._poll_window_unsub is None
-
-        await hub_b.async_shutdown()

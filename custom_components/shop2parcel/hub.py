@@ -24,9 +24,15 @@ from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_point_in_time, async_track_time_interval
 
-from .const import MAX_STAGE2_POSTS_PER_POLL, MAX_SUBMITTED_TRACKING_NUMBERS, PARCELAPP_DAILY_LIMIT
+from .const import (
+    HUB_STAGE2_POLL_WINDOW,
+    MAX_STAGE2_POSTS_PER_POLL,
+    MAX_SUBMITTED_TRACKING_NUMBERS,
+    PARCELAPP_DAILY_LIMIT,
+)
 from .coordinator import Shop2ParcelCoordinator, Shop2ParcelStore, _valid_nonneg_int
 
 _LOGGER = logging.getLogger(__name__)
@@ -92,9 +98,9 @@ class Shop2ParcelHub:
         self.used_today_date: str = ""
         self.quota_exhausted_until: int | None = None
         self._stage2_posts_this_poll: int = 0
-        self._midnight_unsub = None
-        self._quota_expiry_unsub = None
-        self._poll_window_unsub = None
+        self._midnight_unsub: CALLBACK_TYPE | None = None
+        self._quota_expiry_unsub: CALLBACK_TYPE | None = None
+        self._poll_window_unsub: CALLBACK_TYPE | None = None
 
     async def async_setup(self) -> None:
         """Load/seed the shared store and spawn the hass-scoped worker stub."""
@@ -131,6 +137,21 @@ class Shop2ParcelHub:
             name="shop2parcel_hub_worker",
         )
         self._worker_task.add_done_callback(self._log_hub_worker_crash)
+
+        # Phase 31 (QUOTA-03/04): arm all three hub-owned timers exactly
+        # once here. Unlike coordinator.py's per-entry timers, the hub
+        # always goes through async_setup() (no bare-construction test
+        # path needs a gate) — so these arm unconditionally.
+        self._schedule_midnight_refresh()
+        # In case a still-future quota_exhausted_until was just loaded from
+        # the store above (async_load), re-arm the expiry timer for it.
+        self._arm_quota_expiry_timer()
+        self._poll_window_unsub = async_track_time_interval(
+            self._hass,
+            self._on_poll_window_tick,
+            HUB_STAGE2_POLL_WINDOW,
+            name="shop2parcel_hub_poll_window",
+        )
 
     def attach(self, coordinator: Shop2ParcelCoordinator) -> None:
         """Increment the reference count (called from async_setup_entry).
@@ -276,6 +297,9 @@ class Shop2ParcelHub:
             self.quota_exhausted_until = new_until
         else:
             self.quota_exhausted_until = max(self.quota_exhausted_until, new_until)
+        # QUOTA-03 (D-04): re-arm the single hub expiry timer after every
+        # mutation so it always corresponds to the current window.
+        self._arm_quota_expiry_timer()
 
     def seed_quota_from_account(self, quota_exhausted_until: int | None) -> None:
         """Merge one per-account store's quota_exhausted_until into the shared value.
@@ -329,6 +353,83 @@ class Shop2ParcelHub:
         return (
             self.quota_exhausted_until is not None and int(time.time()) < self.quota_exhausted_until
         )
+
+    # ------------------------------------------------------------------
+    # Phase 31 (QUOTA-03/04): the three hub-owned timers. Mirrors
+    # coordinator.py's _arm_quota_expiry_timer/_on_quota_expiry/
+    # _schedule_midnight_refresh/_on_midnight (the hoist source), but the
+    # hub arms them unconditionally — it always goes through async_setup(),
+    # so there is no bare-construction enable-flag gate to mirror. Armed
+    # once in async_setup(); cancelled only in async_shutdown() (refcount
+    # 0) — never per-account, so they survive single-account removal.
+    # ------------------------------------------------------------------
+
+    def _schedule_midnight_refresh(self) -> None:
+        """(Re)schedule the one-shot timer at the next 00:00 UTC that resets
+        used_today.
+
+        Cancels any existing handle first, then reschedules for the next
+        midnight. Self-rescheduling: _on_midnight calls this again after
+        firing so the daily reset repeats indefinitely.
+        """
+        if self._midnight_unsub is not None:
+            self._midnight_unsub()
+            self._midnight_unsub = None
+        self._midnight_unsub = async_track_point_in_time(
+            self._hass, self._on_midnight, datetime.fromtimestamp(_next_midnight_utc(), tz=UTC)
+        )
+
+    @callback
+    def _on_midnight(self, _now: datetime) -> None:
+        """UTC midnight: force the used_today rollover reset and reschedule."""
+        self._midnight_unsub = None
+        self._maybe_reset_used_today()
+        self._schedule_midnight_refresh()
+
+    def _arm_quota_expiry_timer(self) -> None:
+        """(Re)schedule the one-shot timer that clears quota_exhausted_until
+        when the cooldown window elapses (D-04).
+
+        Called after every quota_exhausted_until mutation (record_quota_
+        exhausted) and once from async_setup() in case a still-future
+        window was just loaded from the store. Always cancels any prior
+        expiry timer first; schedules a new one only when
+        quota_exhausted_until is still in the future — a past value is
+        already reported as not-exhausted by the quota_is_exhausted
+        property.
+        """
+        if self._quota_expiry_unsub is not None:
+            self._quota_expiry_unsub()
+            self._quota_expiry_unsub = None
+        until = self.quota_exhausted_until
+        if until is None or until <= int(time.time()):
+            return
+        self._quota_expiry_unsub = async_track_point_in_time(
+            self._hass, self._on_quota_expiry, datetime.fromtimestamp(until, tz=UTC)
+        )
+
+    @callback
+    def _on_quota_expiry(self, _now: datetime) -> None:
+        """Quota window elapsed: clear the stale block in memory.
+
+        The timer is re-armed on every quota_exhausted_until change, so
+        when it fires it always corresponds to the current window — clear
+        unconditionally. Clearing in memory makes quota_is_exhausted read
+        False immediately.
+        """
+        self._quota_expiry_unsub = None
+        if self.quota_exhausted_until is not None:
+            self.quota_exhausted_until = None
+
+    @callback
+    def _on_poll_window_tick(self, _now: datetime) -> None:
+        """Reset the shared per-poll Stage-2 POST counter on the fixed
+        HUB_STAGE2_POLL_WINDOW tick (QUOTA-04).
+
+        No re-arm needed here — async_track_time_interval self-repeats.
+        _stage2_posts_this_poll is never persisted (ephemeral by design).
+        """
+        self._stage2_posts_this_poll = 0
 
     async def async_save(self) -> None:
         """Serialize the shared dedup + quota state (plus version) to the shared store.
@@ -420,6 +521,20 @@ class Shop2ParcelHub:
                 await asyncio.wait_for(asyncio.shield(self._worker_task), timeout=5.0)
             except (asyncio.CancelledError, TimeoutError):  # fmt: skip
                 pass
+        # Phase 31 (QUOTA-03/04): cancel all three hub-owned timers before
+        # the final flush below — idempotent (each unsub call is guarded),
+        # safe on every teardown path. Timers are hub-owned and cancelled
+        # ONLY here (refcount 0), never via entry.async_on_unload — they
+        # survive single-account removal.
+        if self._midnight_unsub is not None:
+            self._midnight_unsub()
+            self._midnight_unsub = None
+        if self._quota_expiry_unsub is not None:
+            self._quota_expiry_unsub()
+            self._quota_expiry_unsub = None
+        if self._poll_window_unsub is not None:
+            self._poll_window_unsub()
+            self._poll_window_unsub = None
         # DEDUP-02: flush the dedup set (not just the version) on teardown —
         # the Phase 29 shutdown wrote {"version": SHARED_STORAGE_VERSION}
         # only, which would silently erase the dedup set on every unload.
