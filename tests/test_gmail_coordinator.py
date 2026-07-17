@@ -1208,7 +1208,9 @@ _INLINE_FALLBACK_TARGET_HTML = (
 )
 
 
-async def test_inline_fallback_discards_ungrounded_order_summary(hass, mock_stage2_entry):
+async def test_inline_fallback_grounding_gate_discards_ungrounded_order_summary(
+    hass, mock_stage2_entry
+):
     """SC-1 Pitfall 2: the fallback result fabricates order_summary='Target - Coffee
     maker' but the body prose (preprocess_html(html)) contains none of its content
     tokens — the inline fallback must discard it (fb_shipment.order_summary is None)
@@ -1276,7 +1278,7 @@ async def test_inline_fallback_discards_ungrounded_order_summary(hass, mock_stag
     assert coord._diagnostics.carrier_format_rejected_total == 0
 
 
-async def test_inline_fallback_sender_label_not_grounded(hass, mock_stage2_entry):
+async def test_inline_fallback_grounding_gate_sender_label_not_grounded(hass, mock_stage2_entry):
     """Spike 012 seed: the fallback result parrots a generic sender/subject-style
     label ('Customer Care') as order_name/order_summary. Since source_text is
     ALWAYS body-only prose (never sender/subject header context), 'customer'/'care'
@@ -1345,7 +1347,7 @@ async def test_inline_fallback_sender_label_not_grounded(hass, mock_stage2_entry
     )
 
 
-async def test_inline_fallback_keeps_grounded_order_fields(hass, mock_stage2_entry):
+async def test_inline_fallback_grounding_gate_keeps_grounded_order_fields(hass, mock_stage2_entry):
     """order_name/order_summary whose content tokens DO appear in the body prose
     must be kept intact, and grounding_rejected_total must stay 0."""
     mock_stage2_entry.add_to_hass(hass)

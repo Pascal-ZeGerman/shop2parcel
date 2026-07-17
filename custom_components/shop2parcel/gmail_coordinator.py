@@ -59,6 +59,8 @@ from .coordinator import (
     _next_midnight_utc,
     _sanitise_parser_error,
 )
+from .extractors.ollama_extractor import preprocess_html
+from .merge import validate_grounding
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -754,14 +756,50 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         # clean canonical form (D-03 — separator-free, uppercased). Do NOT
                         # route through merge_llm_authoritative (Stage-1 is None here; Pattern 3).
                         # Do NOT mark seen — convergence re-fetch + dedup marks it once POSTed.
+                        #
+                        # Phase 35 Plan 04 (MRG-05, SC-1 Pitfall 2): gate order_name/
+                        # order_summary through validate_grounding() directly — there is no
+                        # Stage-1 ShipmentData here, so merge_llm_authoritative_with_grounding's
+                        # wrapper does not apply (Pattern 3). Source text is always body-only
+                        # prose (preprocess_html(html)) per SC-2 — never the raw html and never
+                        # any sender/subject envelope string.
+                        prose, _fb_links = preprocess_html(html)
+                        raw_order_name = result_fb.locked.get("order_name") or ""
+                        raw_order_summary = result_fb.locked.get("order_summary")
+                        _on_val, on_ok, on_reason = validate_grounding(raw_order_name, prose)
+                        _os_val, os_ok, os_reason = validate_grounding(raw_order_summary, prose)
+                        gated_order_name = raw_order_name if on_ok else ""
+                        gated_order_summary = raw_order_summary if os_ok else None
+                        if not on_ok and raw_order_name:
+                            self._diagnostics.record_grounding_rejection(
+                                raw_order_name, on_reason or "ungrounded"
+                            )
+                            _LOGGER.debug(
+                                "Gmail message %s: inline fallback grounding gate rejected "
+                                "order_name '%s' (reason=%s)",
+                                msg_id,
+                                raw_order_name,
+                                on_reason,
+                            )
+                        if not os_ok and raw_order_summary:
+                            self._diagnostics.record_grounding_rejection(
+                                raw_order_summary, os_reason or "ungrounded"
+                            )
+                            _LOGGER.debug(
+                                "Gmail message %s: inline fallback grounding gate rejected "
+                                "order_summary '%s' (reason=%s)",
+                                msg_id,
+                                raw_order_summary,
+                                os_reason,
+                            )
                         fb_shipment = ShipmentData(
                             tracking_number=fb_clean,
                             carrier_name=result_fb.locked.get("carrier_name") or "",
-                            order_name=result_fb.locked.get("order_name") or "",
+                            order_name=gated_order_name,
                             message_id=msg_id,
                             email_date=email_date,
                             custom_attributes=result_fb.custom,
-                            order_summary=result_fb.locked.get("order_summary"),
+                            order_summary=gated_order_summary,
                         )
                         enqueued = self._enqueue_stage2(
                             fb_clean,
