@@ -834,3 +834,129 @@ async def test_second_restart_after_migration_reseeds_nothing(hass, mock_config_
     # The second restart's migration was a no-op — its per-entry mock's
     # async_save was never called (nothing to migrate: migrated_tns is empty).
     mock_store_cls2.return_value.async_save.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Phase 31 Plan 01: shared-budget mutators (QUOTA-01, QUOTA-02, QUOTA-04)
+# ---------------------------------------------------------------------------
+
+
+def test_try_consume_returns_false_after_20(hass):
+    """QUOTA-01/R1: 20 successful try_consume() calls all return True; the
+    21st returns False and used_today stays at PARCELAPP_DAILY_LIMIT.
+    """
+    from custom_components.shop2parcel.const import PARCELAPP_DAILY_LIMIT  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    for _ in range(PARCELAPP_DAILY_LIMIT):
+        assert hub.try_consume() is True
+
+    assert hub.try_consume() is False
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT
+
+
+def test_try_consume_two_callers_at_19_fcfs(hass):
+    """QUOTA-01/R1: with used_today==19, two back-to-back try_consume() calls
+    in one event-loop tick yield exactly one True and one False; used_today
+    ends at PARCELAPP_DAILY_LIMIT (never exceeds it) — proves the no-await
+    check-and-increment is race-free under a single-threaded loop.
+    """
+    from custom_components.shop2parcel.const import PARCELAPP_DAILY_LIMIT  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for _ in range(PARCELAPP_DAILY_LIMIT - 1):
+        hub.try_consume()
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT - 1
+
+    results = [hub.try_consume(), hub.try_consume()]
+
+    assert sorted(results) == [False, True]
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT
+
+
+def test_refund_consume_clamps_at_zero(hass):
+    """QUOTA-02/R2: refund_consume() on used_today==1 goes to 0; a second
+    refund on an already-zero counter stays at 0 (no negative).
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.try_consume()
+    assert hub.used_today == 1
+
+    hub.refund_consume()
+    assert hub.used_today == 0
+
+    hub.refund_consume()
+    assert hub.used_today == 0
+
+
+def test_refund_after_reserve_returns_slot(hass):
+    """QUOTA-02/R2: try_consume() to PARCELAPP_DAILY_LIMIT then
+    refund_consume() reclaims exactly one slot (used_today == LIMIT - 1).
+    """
+    from custom_components.shop2parcel.const import PARCELAPP_DAILY_LIMIT  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for _ in range(PARCELAPP_DAILY_LIMIT):
+        hub.try_consume()
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT
+
+    hub.refund_consume()
+
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT - 1
+
+
+def test_record_quota_exhausted_sets_and_maxes(hass):
+    """QUOTA-02/R3 (D-06): record_quota_exhausted() with a later timestamp
+    then an earlier one leaves quota_exhausted_until at the LATER value —
+    max-precedence, never shortening an active block. Calling with None
+    falls back to the next UTC midnight (hub._next_midnight_utc()).
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    t_early = 1_000_000
+    t_late = 2_000_000
+
+    hub.record_quota_exhausted(t_late)
+    assert hub.quota_exhausted_until == t_late
+
+    hub.record_quota_exhausted(t_early)
+    assert hub.quota_exhausted_until == t_late
+
+    hub2 = Shop2ParcelHub(hass)
+    hub2.record_quota_exhausted(None)
+
+    from custom_components.shop2parcel.hub import _next_midnight_utc  # noqa: PLC0415
+
+    assert hub2.quota_exhausted_until == _next_midnight_utc()
+
+
+def test_poll_cap_shared_across_accounts(hass):
+    """QUOTA-04/R4: poll_cap_reached() is False below MAX_STAGE2_POSTS_PER_POLL;
+    record_poll_post() bumps the shared per-poll counter until the cap is
+    reached. A fresh hub starts with poll_cap_reached() False and
+    _stage2_posts_this_poll at 0.
+    """
+    from custom_components.shop2parcel.const import MAX_STAGE2_POSTS_PER_POLL  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    assert hub.poll_cap_reached() is False
+    assert hub._stage2_posts_this_poll == 0
+
+    for _ in range(MAX_STAGE2_POSTS_PER_POLL):
+        assert hub.poll_cap_reached() is False
+        hub.record_poll_post()
+
+    assert hub.poll_cap_reached() is True
+
+    fresh_hub = Shop2ParcelHub(hass)
+    assert fresh_hub.poll_cap_reached() is False
+    assert fresh_hub._stage2_posts_this_poll == 0
