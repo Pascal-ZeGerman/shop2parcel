@@ -235,13 +235,25 @@ def validate_grounding(value: str | None, source_text: str) -> tuple[str | None,
     (it is not today). Sender/subject header tokens must never count as
     grounding evidence (SC-2) -- this is a structural guarantee enforced by
     what the caller passes as ``source_text``, not by this function's logic.
+
+    CR-01: matching is WORD-BOUNDARY-exact (regex-tokenized set intersection),
+    NOT substring containment. Plain ``token in source_text.lower()`` let a
+    short content token "ground" a claim merely by being a substring of an
+    unrelated, longer word in the prose (e.g. ``"rack"`` is a substring of
+    ``"tracking"``) -- since "tracking"/"shipped"/"package" etc. are this
+    integration's own domain vocabulary and appear in virtually every email,
+    that bypass defeated the anti-fabrication gate in the common case, not an
+    edge case. ``source_text`` is tokenized the same way ``_content_tokens()``
+    tokenizes ``value`` (alphabetic runs, len >= 3) so only whole-word matches
+    count.
     """
     if value is None or not value.strip():
         return value, True, None  # nothing to gate
     tokens = _content_tokens(value)
     if not tokens:
         return value, False, "no_content_tokens"
-    grounded = {t for t in tokens if t in source_text.lower()}
+    source_tokens = set(re.findall(r"[a-zA-Z]{3,}", source_text.lower()))
+    grounded = tokens & source_tokens
     if grounded:
         return value, True, None
     return value, False, "ungrounded"

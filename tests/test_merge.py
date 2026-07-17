@@ -460,6 +460,22 @@ def test_grounding_ungrounded_value_rejected() -> None:
     assert reason == "ungrounded"
 
 
+def test_grounding_rejects_coincidental_substring_match() -> None:
+    """CR-01 regression: a value token that is merely a SUBSTRING of an unrelated
+    word already present in the prose (e.g. 'rack' inside 'tracking') must NOT
+    ground the claim -- only a whole-word match counts. Prior to the CR-01 fix,
+    `validate_grounding` used plain substring containment
+    (`token in source_text.lower()`), so a fabricated 'Rack Room Shoes' merchant
+    name spuriously PASSED the gate purely because _TRIGGER_PROSE contains
+    'Tracking number: ...'. This must be rejected as ungrounded."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    value, ok, reason = validate_grounding("Rack Room Shoes", _TRIGGER_PROSE)
+    assert value == "Rack Room Shoes"
+    assert ok is False
+    assert reason == "ungrounded"
+
+
 def test_grounding_platform_conflation_rejected() -> None:
     """MRG-05 BAD case (spike 007 platform conflation): 'shopify' is in
     _BOILERPLATE_DENYLIST and 'your'/'order' are stopwords, so _content_tokens()
