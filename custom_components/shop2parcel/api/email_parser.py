@@ -104,6 +104,19 @@ STRATEGY_REGEX = "regex_fallback"
 STRATEGY_BROAD_REGEX = "broad_regex"
 
 
+# MRG-05/SC-3 split-scope constants — exported so tests can assert against them
+# directly (mirrors the STRATEGY_* export convention above). order_name/carrier_name
+# label regexes stay LABEL_TAGS-scoped (unchanged) to avoid picking up footer/support
+# boilerplate like "Reference Order #99999 when you contact support" as the real
+# order number. The tracking-number shape-sniffing pass is broadened to TRACKING_TAGS
+# to recover custom-Shopify-theme emails that put shipment data in <div>/<span>
+# instead of <p>/<td> — no new regex is introduced, the existing bounded
+# _looks_like_tracking() check just runs over more elements (ASVS V5, no ReDoS
+# risk change).
+LABEL_TAGS = ["p", "td"]
+TRACKING_TAGS = ["p", "td", "div", "span"]
+
+
 # Carrier-specific extraction regex — compiled at import, bounded quantifiers (ASVS V5).
 # Used by carrier template parse_fn before _looks_like_tracking() validation.
 # T-ReDoS mitigation: every quantifier is bounded; no `+` or `*` on character classes.
@@ -604,7 +617,12 @@ class EmailParser:
         soup = BeautifulSoup(html, "lxml")
         tracking_number = carrier_name = order_name = None
 
-        for elem in soup.find_all(["p", "td"]):
+        # SC-3: order_name/carrier_name label regexes stay LABEL_TAGS-scoped
+        # ([p, td]) — UNCHANGED scope. Broadening this pass to div/span would
+        # pick up footer/support boilerplate like "Reference Order #99999 when
+        # you contact support" as the real order number (confirmed false-positive
+        # risk — see module docstring above LABEL_TAGS/TRACKING_TAGS).
+        for elem in soup.find_all(LABEL_TAGS):
             text = elem.get_text(separator=" ", strip=True)
             if not order_name:
                 # IN-02: require an 'order' anchor + '#'/':' separator (mirrors the
@@ -626,11 +644,20 @@ class EmailParser:
                 )
                 if m:
                     carrier_name = m.group(1).strip()
-            if not tracking_number:
-                for candidate in re.findall(r"\b([A-Za-z0-9]{10,40})\b", text, re.IGNORECASE):
-                    if _looks_like_tracking(candidate.upper()):
-                        tracking_number = candidate.upper()
-                        break
+
+        # SC-3: tracking-number shape-sniffing pass is BROADENED to TRACKING_TAGS
+        # ([p, td, div, span]) — recovers custom-Shopify-theme emails that embed
+        # shipment data in <div>/<span> instead of <p>/<td>. No new regex is
+        # introduced; the already-bounded _looks_like_tracking() check just runs
+        # over more elements (ASVS V5 — no ReDoS risk change).
+        for elem in soup.find_all(TRACKING_TAGS):
+            if tracking_number:
+                break
+            text = elem.get_text(separator=" ", strip=True)
+            for candidate in re.findall(r"\b([A-Za-z0-9]{10,40})\b", text, re.IGNORECASE):
+                if _looks_like_tracking(candidate.upper()):
+                    tracking_number = candidate.upper()
+                    break
 
         if not tracking_number:
             tracking_number = _extract_tracking_from_hrefs(soup)

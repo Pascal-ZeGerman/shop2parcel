@@ -596,12 +596,21 @@ def test_ups_template_keyword_hits_all_false(ups_html: str) -> None:
 
 
 def test_regex_fallback_extracts_carrier_shipped_via() -> None:
-    """WR-02: Regex fallback must extract 'UPS' from 'shipped via UPS', not 'via'."""
+    """WR-02: Regex fallback must extract 'UPS' from 'shipped via UPS', not 'via'.
+
+    SC-3 deviation note: originally wrapped in a <div>, but the Stage-1
+    TRACKING_TAGS broadening now recovers the tracking number directly from the
+    <div> via the HTML-template strategy — carrier_name stays LABEL_TAGS-scoped
+    ([p, td]) and is lost on that path (same class of interaction as Pitfall 4),
+    so parse() never reaches the Tier-1 regex fallback this test exists to
+    exercise. Switched to <h2> — outside both LABEL_TAGS and TRACKING_TAGS — to
+    keep the test's actual intent (WR-02's Tier-1 carrier regex) intact.
+    """
     html = (
-        "<html><body><div>"
+        "<html><body><h2>"
         "Your order #1234 was shipped via UPS. "
         "Tracking number: 1Z999AA10123456784"
-        "</div></body></html>"
+        "</h2></body></html>"
     )
     parser = EmailParser()
     result = parser.parse(html, "msg_carrier", 0)
