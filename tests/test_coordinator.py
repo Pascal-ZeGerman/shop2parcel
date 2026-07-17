@@ -572,9 +572,16 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
 
 
 async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
-    """FWRD-04 / Phase 6 D-01 gap fill: when _quota_exhausted_until is in the past,
-    POST resumes on the next poll AND _quota_exhausted_until is cleared to None
-    (coordinator.py lines 242-248).
+    """FWRD-04 / Phase 6 D-01 gap fill: when quota_exhausted_until is in the past,
+    POST resumes on the next poll because hub.quota_is_exhausted reads False once the
+    window has passed.
+
+    Phase 31-05 (D-08): the per-account stale-quota-clear block that used to eagerly
+    null out quota_exhausted_until on the next poll was removed entirely — the raw
+    timestamp is no longer cleared inline (only the shared hub's own always-armed
+    quota-expiry timer, 31-03, clears it). POST resumption is what matters here, so
+    this test now asserts hub.quota_is_exhausted is False post-poll instead of the
+    raw timestamp being None.
 
     The existing test_gmail_polling_continues_during_quota exercises the BLOCKED state
     (quota_exhausted_until in the future). This test exercises the EXIT state.
@@ -626,8 +633,10 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         # New shipment is in returned data; tracking number is in submitted set.
         assert "msg_recover" in data
         assert coord._hub.is_submitted("1Z999AA10123456784")
-        # Quota window was cleared
-        assert coord._quota_exhausted_until is None
+        # Quota gate no longer blocks (window has passed) — the raw timestamp itself
+        # is not eagerly cleared inline anymore (only the hub's own expiry timer does
+        # that, 31-03/D-08), so we assert on the derived gate, not the raw value.
+        assert coord._hub.quota_is_exhausted is False
         # Debounced save was scheduled at least once after recovery
         assert save_mock.call_count >= 1
 
@@ -4167,10 +4176,12 @@ async def test_total_forwarded_increments_on_gmail_post(hass, mock_config_entry)
         )
         coord2 = GmailCoordinator(hass, mock_config_entry)
         await coord2._async_load_store()
-        # Copy counter state to new coordinator instance AFTER load (load resets to 0)
+        # Copy counter state to new coordinator instance AFTER load (load resets to 0).
+        # Phase 31 (D-08): used_today/used_today_date now live on the shared hub, not
+        # the coordinator — coord2._hub IS coord._hub (same per-hass test hub from
+        # conftest's _auto_attach_test_hub fixture), so used_today is already shared
+        # with no copy needed.
         coord2._total_forwarded = coord._total_forwarded
-        coord2._used_today = coord._used_today
-        coord2._used_today_date = coord._used_today_date
         coord2._last_forwarded_ts = coord._last_forwarded_ts
         await coord2._async_update_data()
 
@@ -4244,10 +4255,12 @@ async def test_total_forwarded_increments_on_imap_post(hass, mock_imap_config_en
 
         coord2 = ImapCoordinator(hass, mock_imap_config_entry)
         await coord2._async_load_store()
-        # Copy counter state to new coordinator AFTER load (load resets to 0)
+        # Copy counter state to new coordinator AFTER load (load resets to 0).
+        # Phase 31 (D-08): used_today/used_today_date now live on the shared hub, not
+        # the coordinator — coord2._hub IS coord._hub (same per-hass test hub from
+        # conftest's _auto_attach_test_hub fixture), so used_today is already shared
+        # with no copy needed.
         coord2._total_forwarded = coord._total_forwarded
-        coord2._used_today = coord._used_today
-        coord2._used_today_date = coord._used_today_date
         coord2._last_forwarded_ts = coord._last_forwarded_ts
         await coord2._async_update_data()
 
