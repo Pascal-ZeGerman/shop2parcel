@@ -1407,8 +1407,8 @@ def test_enqueue_per_account_cap_boundary(hass):
     ENQUEUED, the 9th is DROPPED_BACKPRESSURE, and a second entry_id with 0
     in-flight still ENQUEUES (R3 empty edge)."""
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
-        EnqueueOutcome,
         STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+        EnqueueOutcome,
     )
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
@@ -1436,9 +1436,9 @@ def test_enqueue_global_bound_fills_then_65th_dropped(hass):
     leaves the 65th job DROPPED_BACKPRESSURE via QueueFull, with nothing
     recorded for it."""
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
-        EnqueueOutcome,
         HUB_STAGE2_QUEUE_MAXLEN,
         STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+        EnqueueOutcome,
     )
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
@@ -1463,8 +1463,8 @@ def test_enqueue_gate_order_dup_before_cap(hass):
     tn at a FULL per-account cap still returns SKIPPED_DUP, not
     DROPPED_BACKPRESSURE."""
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
-        EnqueueOutcome,
         STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+        EnqueueOutcome,
     )
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 

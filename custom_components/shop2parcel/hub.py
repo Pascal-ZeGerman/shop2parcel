@@ -29,11 +29,14 @@ from homeassistant.helpers.event import async_track_point_in_time, async_track_t
 
 from .const import (
     HUB_STAGE2_POLL_WINDOW,
+    HUB_STAGE2_QUEUE_MAXLEN,
     MAX_STAGE2_POSTS_PER_POLL,
     MAX_SUBMITTED_TRACKING_NUMBERS,
     PARCELAPP_DAILY_LIMIT,
+    STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+    EnqueueOutcome,
 )
-from .coordinator import Shop2ParcelCoordinator, Shop2ParcelStore, _valid_nonneg_int
+from .coordinator import Shop2ParcelCoordinator, Shop2ParcelStore, Stage2Job, _valid_nonneg_int
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,9 +85,17 @@ class Shop2ParcelHub:
         """Construct the hub. No I/O happens here — see async_setup()."""
         self._hass = hass
         self._refcount: int = 0
-        self._queue: asyncio.Queue = asyncio.Queue()
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=HUB_STAGE2_QUEUE_MAXLEN)
         self._worker_task: asyncio.Task | None = None
         self._store: Shop2ParcelStore | None = None
+        # Phase 32 (WORK-01..04): entry_id -> currently-attached-coordinator
+        # registry (D-01, populated/identity-guard-popped in attach/detach);
+        # per-account in-flight tracking (cap + purge source, D-05); and the
+        # flat global in-flight dedup set (D-05). Populated by enqueue(),
+        # released by _release_inflight()/detach()'s purge.
+        self._coordinators: dict[str, Shop2ParcelCoordinator] = {}
+        self._inflight: dict[str, set[str]] = {}
+        self._stage2_enqueued_keys: set[str] = set()
         # Phase 30 (DEDUP-01/DEDUP-03): single shared dedup set, FIFO-capped
         # at MAX_SUBMITTED_TRACKING_NUMBERS. Pure in-memory core in this plan
         # (30-01) — persistence (async_save/async_load) lands in 30-02.
@@ -160,9 +171,19 @@ class Shop2ParcelHub:
         wiring point that lets every coordinator reach the shared dedup set.
         Runs at __init__.py:181, before _async_load_store at :182, so ``_hub`` is
         available for migration seeding and every subsequent poll.
+
+        Phase 32 (D-01, WORK-02): also registers ``_coordinators[entry_id] =
+        coordinator`` (last-writer-wins) so the shared worker can resolve a
+        Stage2Job's entry_id to the CURRENTLY-attached coordinator at dispatch
+        time. Guarded against ``coordinator.config_entry is None`` (bare
+        coordinators in some tests) — mirrors _debug_mode_active's None
+        tolerance (coordinator.py:739-750).
         """
         self._refcount += 1
         coordinator._hub = self
+        entry_id = getattr(coordinator.config_entry, "entry_id", None)
+        if entry_id is not None:
+            self._coordinators[entry_id] = coordinator
         _LOGGER.debug("Hub attach: refcount=%d", self._refcount)
 
     def detach(self, coordinator: Shop2ParcelCoordinator) -> None:
@@ -171,12 +192,27 @@ class Shop2ParcelHub:
         T-29-02: guarded against underflow — a detach with no matching attach
         (mismatch/double-detach) logs a WARNING instead of going negative,
         which would otherwise cause premature/spurious hub shutdown.
+
+        Phase 32 (D-01/D-05, WORK-02/WORK-04): removes this entry_id's
+        registry entry ONLY if it still points at THIS coordinator instance
+        (identity guard) — protects a fresh reload attach() from being
+        evicted by an out-of-order detach() of the departed instance. Also
+        purges this entry_id's in-flight tracking numbers from both
+        _inflight and the flat global _stage2_enqueued_keys so a removed
+        account's dedup keys never linger. Guarded against
+        ``coordinator.config_entry is None`` like attach().
         """
         if self._refcount > 0:
             self._refcount -= 1
         else:
             _LOGGER.warning("Hub detach called with refcount already 0 — ignoring")
         _LOGGER.debug("Hub detach: refcount=%d", self._refcount)
+        entry_id = getattr(coordinator.config_entry, "entry_id", None)
+        if entry_id is not None:
+            if self._coordinators.get(entry_id) is coordinator:
+                del self._coordinators[entry_id]
+            for tn in self._inflight.pop(entry_id, set()):
+                self._stage2_enqueued_keys.discard(tn)
 
     def _trim_submitted_tns(self) -> None:
         """FIFO-trim _submitted_tracking_numbers to MAX_SUBMITTED_TRACKING_NUMBERS.
@@ -238,6 +274,67 @@ class Shop2ParcelHub:
             if isinstance(tn, str):
                 self._submitted_tracking_numbers.setdefault(tn, None)
         self._trim_submitted_tns()
+
+    # ------------------------------------------------------------------
+    # Phase 32 (WORK-01..04): shared Stage-2 queue enqueue path.
+    #
+    # enqueue()/_release_inflight() are SYNCHRONOUS (plain `def`, zero
+    # `await` in the body) — mirrors check_and_mark's lock-free mutator
+    # shape above (Pattern 1, RESEARCH.md). The single-threaded HA event
+    # loop serializes callers, so no lock is needed as long as no `await`
+    # sits between a check and its mutation.
+    # ------------------------------------------------------------------
+
+    def enqueue(self, job: Stage2Job) -> EnqueueOutcome:
+        """Synchronously gate and enqueue a Stage2Job onto the shared queue.
+
+        D-02/D-05/D-06: gates apply in this exact order — dedup (global
+        in-flight set) -> per-account in-flight cap
+        (STAGE2_PER_ACCOUNT_INFLIGHT_CAP) -> global bound
+        (HUB_STAGE2_QUEUE_MAXLEN via put_nowait/QueueFull, drop-newest). A
+        job is recorded into _inflight/_stage2_enqueued_keys ONLY after a
+        successful put_nowait — DROPPED_BACKPRESSURE/SKIPPED_DUP mutate
+        neither structure (no phantom in-flight slot on a dropped/dup job).
+        normalized_tn is matched/stored verbatim — no re-normalization,
+        consistent with the global submitted-TN set (check_and_mark above).
+        """
+        if job.normalized_tn in self._stage2_enqueued_keys:
+            return EnqueueOutcome.SKIPPED_DUP
+        if len(self._inflight.get(job.entry_id, ())) >= STAGE2_PER_ACCOUNT_INFLIGHT_CAP:
+            return EnqueueOutcome.DROPPED_BACKPRESSURE
+        try:
+            self._queue.put_nowait(job)
+        except asyncio.QueueFull:
+            return EnqueueOutcome.DROPPED_BACKPRESSURE
+        self._inflight.setdefault(job.entry_id, set()).add(job.normalized_tn)
+        self._stage2_enqueued_keys.add(job.normalized_tn)
+        return EnqueueOutcome.ENQUEUED
+
+    def _release_inflight(self, entry_id: str, normalized_tn: str) -> None:
+        """Release one in-flight tracking-number slot (D-07).
+
+        Called by the shared hub worker's ``finally`` block on every job
+        outcome (success/failure/skip). Removes ``normalized_tn`` from
+        ``_inflight[entry_id]`` — deleting the ``entry_id`` key once its set
+        empties, to bound memory — and discards it from the flat global
+        ``_stage2_enqueued_keys``. Idempotent: releasing an absent
+        entry_id/tn combination is a safe no-op.
+        """
+        keys = self._inflight.get(entry_id)
+        if keys is not None:
+            keys.discard(normalized_tn)
+            if not keys:
+                del self._inflight[entry_id]
+        self._stage2_enqueued_keys.discard(normalized_tn)
+
+    def inflight_count(self, entry_id: str) -> int:
+        """Public accessor: jobs enqueued-but-not-yet-completed for entry_id.
+
+        The single source of truth for the per-account cap check inside
+        enqueue(); also the accessor sensors read instead of the private
+        ``_inflight`` dict directly.
+        """
+        return len(self._inflight.get(entry_id, ()))
 
     # ------------------------------------------------------------------
     # Phase 31 (QUOTA-01/02/04): shared daily-budget + per-poll-cap mutators.
