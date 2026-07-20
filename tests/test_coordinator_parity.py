@@ -391,8 +391,7 @@ async def test_instance_isolation_no_state_bleed(hass, request):
     assert gmail_coord._inflight_message_ids is not imap_coord._inflight_message_ids
     assert gmail_coord._fallback_prefetch_cache is not imap_coord._fallback_prefetch_cache
     assert (
-        gmail_coord._stage2_inline_schema_failures
-        is not imap_coord._stage2_inline_schema_failures
+        gmail_coord._stage2_inline_schema_failures is not imap_coord._stage2_inline_schema_failures
     )
 
     # (b) Each coordinator's maps contain only its own entry for the shared key —
