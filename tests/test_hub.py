@@ -2739,3 +2739,134 @@ async def test_remove_to_zero_then_readd_recreates_hub(
         # Cleanup: unload the re-added account so the new hub's worker task
         # is cancelled before the mocked-Store context exits.
         await hass.config_entries.async_unload(mock_config_entry_c.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# 34-REVIEW-FIX (CR-01): _init_lock must be held across the ENTIRE
+# detach -> conditional-shutdown -> delete sequence in async_unload_entry,
+# symmetric with async_setup_entry's hub-creation AND hub.attach() lock
+# acquisitions. A true concurrency repro (rather than a mock/inspection-only
+# test) is used here: a patched Shop2ParcelHub.async_shutdown pauses on a
+# controlled asyncio.Event mid-teardown, and a second account's
+# async_setup_entry is started while that pause is in effect — proving (not
+# just asserting) that the second setup cannot observe or attach to the
+# dying hub while the first entry's teardown is still holding the lock.
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_setup_during_last_account_teardown_does_not_orphan_new_account(
+    hass, mock_config_entry, mock_config_entry_b
+):
+    """CR-01 (34-REVIEW.md): a second account's async_setup_entry running
+    concurrently with the LAST existing account's async_unload_entry must
+    not attach to a hub instance that is mid-teardown.
+
+    Forces the exact interleaving the review describes: async_unload_entry's
+    hub.async_shutdown() is made to pause (via a controlled asyncio.Event)
+    after refcount has already reached 0 but before the final ``del
+    hass.data[DOMAIN]["__shared__"]``. While paused, a second entry's
+    async_setup_entry is started — it must block on ``_init_lock`` (not skip
+    ahead to attach onto the still-present, dying hub reference), and only
+    after the teardown completes and releases the lock does the new entry
+    correctly observe an empty hass.data[DOMAIN] and create + attach to a
+    brand-new hub.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+
+    shutdown_started = asyncio.Event()
+    release_shutdown = asyncio.Event()
+    original_async_shutdown = Shop2ParcelHub.async_shutdown
+
+    async def _blocking_async_shutdown(self):
+        shutdown_started.set()
+        await release_shutdown.wait()
+        await original_async_shutdown(self)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        # Only A is set up first — a single-account fleet, so A's removal
+        # below is the last-account (refcount 0) teardown path.
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        old_hub = hass.data[DOMAIN]["__shared__"]
+        assert old_hub._refcount == 1
+
+        # B is added to hass only NOW — after the component is already set
+        # up — so its own async_setup() call below does not get folded into
+        # a bulk "set up all not-yet-loaded entries" pass together with A.
+        mock_config_entry_b.add_to_hass(hass)
+
+        with patch.object(Shop2ParcelHub, "async_shutdown", _blocking_async_shutdown):
+            unload_task = hass.async_create_task(
+                hass.config_entries.async_unload(mock_config_entry.entry_id)
+            )
+            # Let the unload coroutine run up to (and into) the patched
+            # async_shutdown — by this point it has already detached A
+            # (refcount 0) and is holding _init_lock while paused mid-teardown.
+            await shutdown_started.wait()
+
+            init_lock = hass.data[DOMAIN]["_init_lock"]
+            assert init_lock.locked(), (
+                "CR-01: _init_lock must still be held while async_shutdown is "
+                "in-flight (mid-teardown), not released before shutdown runs"
+            )
+            # The old (dying) hub is still referenced in hass.data at this
+            # point — this is exactly the unguarded window the pre-fix code
+            # left open for a concurrent setup to attach onto.
+            assert hass.data[DOMAIN]["__shared__"] is old_hub
+
+            setup_task = hass.async_create_task(
+                hass.config_entries.async_setup(mock_config_entry_b.entry_id)
+            )
+            # Give the setup task several chances to run — it must block on
+            # _init_lock (both at the hub-creation check and at hub.attach())
+            # and therefore make no progress while release_shutdown is unset.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not setup_task.done(), (
+                "CR-01: a concurrent async_setup_entry must block on "
+                "_init_lock while the last account's teardown is in flight"
+            )
+            assert hass.data[DOMAIN]["__shared__"] is old_hub, (
+                "the blocked setup must not have attached to (or replaced) "
+                "the still-present dying hub while unload holds the lock"
+            )
+
+            # Now let the teardown finish.
+            release_shutdown.set()
+            await unload_task
+            await setup_task
+
+        assert setup_task.result() is True
+
+        new_hub = hass.data[DOMAIN]["__shared__"]
+        assert new_hub is not old_hub, (
+            "CR-01: the new account must attach to a FRESH hub, never the torn-down instance"
+        )
+        assert new_hub._refcount == 1
+        assert mock_config_entry_b.entry_id in new_hub._coordinators
+        assert new_hub._worker_task is not None and not new_hub._worker_task.done(), (
+            "the new hub's worker must be alive — not inherited from the cancelled zombie worker"
+        )
+
+        # Cleanup: unload B so its hub's worker task is cancelled before the
+        # mocked-Store context exits.
+        await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
