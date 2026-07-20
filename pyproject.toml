@@ -35,10 +35,10 @@ markers = [
 source = ["custom_components"]
 
 [tool.coverage.report]
-# Enforced floor — CI fails if total coverage drops below this. Set a couple
-# points below the measured total (87.5% as of the test-coverage pass) so normal
-# fluctuation doesn't break CI; ratchet it up as coverage improves.
-fail_under = 85
+# Enforced floor — CI fails if total coverage drops below this. Set a few
+# points below the measured total (95.52% as of the Phase 33 D-02 ratchet pass)
+# so normal fluctuation doesn't break CI; ratchet it up as coverage improves.
+fail_under = 90
 show_missing = true
 
 [tool.ruff]
