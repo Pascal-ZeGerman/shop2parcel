@@ -2583,3 +2583,159 @@ async def test_global_sensor_ownership_not_persisted(hass):
         )
 
         await hub.async_shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Phase 34-06 (LIFE-01b, D-09): remove-to-zero -> re-add teardown/recreate
+# lifecycle capstone test.
+# ---------------------------------------------------------------------------
+
+
+async def test_remove_to_zero_then_readd_recreates_hub(
+    hass, mock_config_entry, mock_config_entry_b
+):
+    """LIFE-01b (D-09): removing the last of two accounts tears the hub down
+    cleanly — worker cancelled, notification dismissed, both global sensors
+    removed from the entity registry, hass.data[DOMAIN]["__shared__"]
+    deleted, no orphaned task — and re-adding a fresh account afterward
+    creates a BRAND NEW hub with exactly one instance of each global sensor
+    re-registered under it.
+    """
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+        HUB_STAGE2_NOTIFY_THRESHOLD,
+        PARCELAPP_DAILY_LIMIT,
+    )
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry_b.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    quota_unique_id = f"{DOMAIN}___shared___{GlobalQuotaSensor._unique_id_suffix}"
+    queue_unique_id = f"{DOMAIN}___shared___{GlobalQueueSensor._unique_id_suffix}"
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        # Two accounts set up together (domain not yet bootstrapped — a
+        # single async_setup() call sets up both pre-added entries).
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        hub = hass.data[DOMAIN]["__shared__"]
+        assert isinstance(hub, Shop2ParcelHub)
+        assert hub._refcount == 2
+
+        quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert quota_entity_id is not None
+        assert queue_entity_id is not None
+
+        worker_task = hub._worker_task
+        assert worker_task is not None and not worker_task.done(), (
+            "precondition: worker running after two-account setup"
+        )
+
+        # Seed an outstanding hub notification (drive record_stage2_worker_failure
+        # past HUB_STAGE2_NOTIFY_THRESHOLD, using the two real accounts plus
+        # synthetic entry_ids so the streak survives A's single-account
+        # removal below) so the teardown-dismiss path is genuinely exercised,
+        # not vacuously true.
+        with patch.object(persistent_notification, "async_create") as mock_create:
+            failing_ids = [mock_config_entry.entry_id, mock_config_entry_b.entry_id] + [
+                f"synthetic-{i}" for i in range(HUB_STAGE2_NOTIFY_THRESHOLD - 2)
+            ]
+            for entry_id in failing_ids:
+                hub.record_stage2_worker_failure(entry_id)
+            assert mock_create.call_count == 1, "the consolidated notification must fire once"
+
+        with patch.object(hub, "async_shutdown", wraps=hub.async_shutdown) as spy_shutdown:
+            # Removing A (not the last account) must not tear down the hub —
+            # the streak survives (B + synthetic ids still failing), so the
+            # notification must NOT be dismissed by this step either.
+            with patch.object(persistent_notification, "async_dismiss") as mock_dismiss_a:
+                await hass.config_entries.async_unload(mock_config_entry.entry_id)
+                await hass.async_block_till_done()
+            spy_shutdown.assert_not_called()
+            assert hass.data[DOMAIN]["__shared__"] is hub
+            assert hub._refcount == 1
+            assert not any(
+                call.kwargs.get("notification_id") == HUB_STAGE2_FAILING_NOTIFICATION_ID
+                for call in mock_dismiss_a.call_args_list
+            ), "the outstanding streak notification must not be dismissed by a non-last removal"
+
+            # Removing B — the LAST account — tears down the hub.
+            with patch.object(persistent_notification, "async_dismiss") as mock_dismiss_last:
+                await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
+                await hass.async_block_till_done()
+            spy_shutdown.assert_called_once()
+
+        # Teardown assertions: worker cancelled/done, notification dismissed,
+        # both global entities removed from the registry (no orphaned rows),
+        # hass.data[DOMAIN]["__shared__"] deleted.
+        assert worker_task.done(), "worker must be cancelled/done at last-account teardown"
+        mock_dismiss_last.assert_called_once_with(
+            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+        )
+        assert registry.async_get(quota_entity_id) is None, "quota sensor must be de-registered"
+        assert registry.async_get(queue_entity_id) is None, "queue sensor must be de-registered"
+        assert "__shared__" not in hass.data.get(DOMAIN, {})
+
+        # --- Re-add: a fresh account creates a BRAND NEW hub ------------------
+        mock_config_entry_c = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                "auth_implementation": DOMAIN,
+                "token": {
+                    "access_token": "fake-access-token-c",
+                    "refresh_token": "fake-refresh-token-c",
+                    "expires_at": 9999999999.0,
+                    "token_type": "Bearer",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                },
+                "api_key": "test-parcelapp-key-c",
+            },
+            unique_id="user3@gmail.com",
+        )
+        mock_config_entry_c.add_to_hass(hass)
+        await hass.config_entries.async_setup(mock_config_entry_c.entry_id)
+        await hass.async_block_till_done()
+
+        new_hub = hass.data[DOMAIN]["__shared__"]
+        assert isinstance(new_hub, Shop2ParcelHub)
+        assert new_hub is not hub, "re-add must create a FRESH hub object, not reuse the old one"
+        assert new_hub._refcount == 1
+
+        new_quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        new_queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert new_quota_entity_id is not None, "exactly one fresh quota sensor must be registered"
+        assert new_queue_entity_id is not None, "exactly one fresh queue sensor must be registered"
+        new_quota_state = hass.states.get(new_quota_entity_id)
+        assert new_quota_state is not None and new_quota_state.state != "unavailable"
+        assert int(new_quota_state.state) == PARCELAPP_DAILY_LIMIT, (
+            "fresh hub must start with a clean quota, not carry over old hub state"
+        )
+
+        # Cleanup: unload the re-added account so the new hub's worker task
+        # is cancelled before the mocked-Store context exits.
+        await hass.config_entries.async_unload(mock_config_entry_c.entry_id)
