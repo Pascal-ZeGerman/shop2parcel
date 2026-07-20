@@ -205,6 +205,16 @@ def stage2_failing_notification_id(entry_id: str) -> str:
 # stage2_failing_notification_id() above, HUB_STAGE2_FAILING_NOTIFICATION_ID
 # is a FIXED string, not a per-entry helper — there is exactly ONE hub-scoped
 # notification with no entry_id parameter (D-05/D-08).
+#
+# 34-REVIEW-FIX (CR-02): this value is a CAP on the effective threshold, not
+# a fixed floor. hub.record_stage2_worker_failure() scales the effective
+# threshold DOWN to the number of currently-attached accounts
+# (min(HUB_STAGE2_NOTIFY_THRESHOLD, max(1, len(self._coordinators)))) so the
+# project's stated primary use case — a "personal HA ecosystem" with one or
+# a handful of accounts (CLAUDE.md) — can still trip the notification once
+# every attached account is failing, instead of never reaching a fixed
+# 5-distinct-account bar. Larger fleets still keep this value as their
+# ceiling, so a single flaky account among ~10 never fires it alone.
 HUB_STAGE2_NOTIFY_THRESHOLD: int = 5
 HUB_STAGE2_FAILING_NOTIFICATION_ID: str = "shop2parcel_hub_stage2_failing"
 

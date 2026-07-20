@@ -2155,7 +2155,27 @@ def test_stage2_queue_depth_counts_dequeued_but_still_inflight_job(hass):
 # ---------------------------------------------------------------------------
 # Phase 34 Plan 02 Task 2: consolidated failure-streak + single hub
 # notification (DIAG-03 / D-05..D-08)
+#
+# 34-REVIEW-FIX (CR-02): record_stage2_worker_failure's effective threshold
+# is min(HUB_STAGE2_NOTIFY_THRESHOLD, max(1, len(hub._coordinators))) — tests
+# below that intend to exercise the FIXED (large-fleet) threshold attach a
+# same-sized set of mock coordinators via _attach_mock_coordinators() so
+# hub._coordinators reflects that fleet size, preserving the original
+# "5-account fleet, below/at/past threshold" semantics these tests describe.
 # ---------------------------------------------------------------------------
+
+
+def _attach_mock_coordinators(hub, entry_ids) -> None:
+    """Attach lightweight MagicMock coordinators for each entry_id.
+
+    Makes hub._coordinators (and therefore CR-02's fleet-size-scaled
+    effective threshold) reflect a fleet of len(entry_ids) attached
+    accounts, without any real Store I/O or coordinator construction.
+    """
+    for entry_id in entry_ids:
+        coord = MagicMock()
+        coord.config_entry.entry_id = entry_id
+        hub.attach(coord)
 
 
 def test_stage2_failing_entry_ids_init_empty(hass):
@@ -2168,12 +2188,22 @@ def test_stage2_failing_entry_ids_init_empty(hass):
 
 
 def test_record_stage2_worker_failure_below_threshold_no_notification(hass):
-    """4 distinct failing accounts (threshold 5) do NOT fire the notification."""
+    """In a 5-account fleet (threshold 5), 4 distinct failing accounts do NOT
+    fire the notification.
+
+    34-REVIEW-FIX (CR-02): 5 mock coordinators are attached so
+    hub._coordinators reflects a 5-account fleet — the effective threshold
+    stays at HUB_STAGE2_NOTIFY_THRESHOLD=5 (min(5, max(1, 5))), preserving
+    this test's original "below the large-fleet threshold" intent (a
+    smaller/unattached fleet is instead covered by
+    test_record_stage2_worker_failure_effective_threshold_scales_down_for_small_fleet).
+    """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b", "c", "d", "e"))
 
     with patch.object(persistent_notification, "async_create") as mock_create:
         for entry_id in ("a", "b", "c", "d"):
@@ -2184,8 +2214,10 @@ def test_record_stage2_worker_failure_below_threshold_no_notification(hass):
 
 
 def test_record_stage2_worker_failure_fifth_fires_notification_once(hass):
-    """The 5th distinct failing account fires async_create exactly once with
-    the fixed HUB_STAGE2_FAILING_NOTIFICATION_ID and expected title."""
+    """In a 5-account fleet, the 5th distinct failing account fires
+    async_create exactly once with the fixed HUB_STAGE2_FAILING_NOTIFICATION_ID
+    and expected title (CR-02: 5 mock coordinators attached — see
+    test_record_stage2_worker_failure_below_threshold_no_notification)."""
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
@@ -2194,6 +2226,7 @@ def test_record_stage2_worker_failure_fifth_fires_notification_once(hass):
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b", "c", "d", "e"))
 
     with patch.object(persistent_notification, "async_create") as mock_create:
         for entry_id in ("a", "b", "c", "d", "e"):
@@ -2206,17 +2239,62 @@ def test_record_stage2_worker_failure_fifth_fires_notification_once(hass):
 
 
 def test_record_stage2_worker_failure_sixth_does_not_refire(hass):
-    """A 6th distinct failing account does not fire a second notification
-    (no duplicate, D-06)."""
+    """In a 6-account fleet, a 6th distinct failing account does not fire a
+    second notification (no duplicate, D-06). CR-02: 6 mock coordinators
+    attached so the effective threshold is still capped at
+    HUB_STAGE2_NOTIFY_THRESHOLD=5 (min(5, max(1, 6)))."""
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b", "c", "d", "e", "f"))
 
     with patch.object(persistent_notification, "async_create") as mock_create:
         for entry_id in ("a", "b", "c", "d", "e", "f"):
             hub.record_stage2_worker_failure(entry_id)
+
+        assert mock_create.call_count == 1
+
+
+def test_record_stage2_worker_failure_effective_threshold_scales_down_for_small_fleet(hass):
+    """CR-02 (34-REVIEW.md): with only 2 accounts attached, the effective
+    threshold scales down to min(HUB_STAGE2_NOTIFY_THRESHOLD, max(1, 2)) == 2
+    — the 2nd distinct failing account fires the notification, instead of
+    the fixed threshold of 5 being unreachable for a small fleet."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b"))
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        hub.record_stage2_worker_failure("a")
+        mock_create.assert_not_called()
+
+        hub.record_stage2_worker_failure("b")
+        assert mock_create.call_count == 1
+        assert mock_create.call_args.kwargs["notification_id"] == HUB_STAGE2_FAILING_NOTIFICATION_ID
+
+
+def test_record_stage2_worker_failure_effective_threshold_never_below_one(hass):
+    """CR-02: with zero accounts attached (edge case — should not occur in
+    production, since attach() always precedes any poll/failure), the
+    effective threshold floors at 1 (max(1, 0)) rather than becoming 0 and
+    firing on an empty failing set."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    assert hub._coordinators == {}
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        hub.record_stage2_worker_failure("a")
 
         assert mock_create.call_count == 1
 
@@ -2353,7 +2431,13 @@ def test_hub_notification_body_is_pii_free(hass):
     """PROH-1: the consolidated notification message is composed only from
     aggregate counts + generic guidance — none of the forbidden per-job
     fields (email, tracking number, subject, order name, credential-looking
-    tokens) ever appear in it."""
+    tokens) ever appear in it.
+
+    CR-02: HUB_STAGE2_NOTIFY_THRESHOLD mock coordinators are attached so
+    hub._coordinators reflects a fleet exactly at the fixed threshold size,
+    preserving this test's "reaches HUB_STAGE2_NOTIFY_THRESHOLD distinct
+    failing accounts" intent.
+    """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
@@ -2362,6 +2446,7 @@ def test_hub_notification_body_is_pii_free(hass):
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, [f"entry-{i}" for i in range(HUB_STAGE2_NOTIFY_THRESHOLD)])
 
     with patch.object(persistent_notification, "async_create") as mock_create:
         for i in range(HUB_STAGE2_NOTIFY_THRESHOLD):

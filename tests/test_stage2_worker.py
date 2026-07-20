@@ -1584,16 +1584,28 @@ async def test_fail_02_error_msg_is_sanitized_and_truncated(coord_for_fail_tests
 
 
 async def test_per_account_stage2_failure_notification_removed(hass, coord_for_fail_tests):
-    """DIAG-03: the retired per-account Stage-2 failure notification never fires, even
-    well past the old STAGE2_NOTIFY_THRESHOLD — persistent_notification.async_create is
-    never called for the failure streak. (The hub owns the single consolidated
-    notification instead, gated on HUB_STAGE2_NOTIFY_THRESHOLD distinct failing
-    accounts — never reached here since every call below shares one entry_id.)
+    """DIAG-03: the retired per-account Stage-2 failure notification (keyed by
+    this entry's own per-account notification_id) never fires, even well past
+    the old STAGE2_NOTIFY_THRESHOLD — persistent_notification.async_create is
+    never called with a per-account notification_id for the failure streak.
+
+    34-REVIEW-FIX (CR-02): the hub's single CONSOLIDATED notification DOES
+    fire once here — HUB_STAGE2_NOTIFY_THRESHOLD now scales down to
+    min(threshold, max(1, fleet size)), so a 1-account fleet (every call
+    below shares one entry_id, and this fixture's test hub has zero
+    attach()-registered accounts, so the effective threshold is 1) correctly
+    gets notified instead of the notification being unreachable, as it was
+    before this fix (34-REVIEW.md CR-02). This directly proves CR-02 is
+    fixed: the same repeated-single-entry_id scenario that used to prove the
+    notification was UNREACHABLE now proves it fires.
     """
     from homeassistant.components import persistent_notification
 
     from custom_components.shop2parcel.api.exceptions import OllamaTransientError
-    from custom_components.shop2parcel.const import STAGE2_NOTIFY_THRESHOLD
+    from custom_components.shop2parcel.const import (
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+        STAGE2_NOTIFY_THRESHOLD,
+    )
 
     coord = coord_for_fail_tests
     job = _make_job()
@@ -1603,9 +1615,18 @@ async def test_per_account_stage2_failure_notification_removed(hass, coord_for_f
         for _ in range(STAGE2_NOTIFY_THRESHOLD * 3):
             coord._record_stage2_failure(job, err)
 
-        assert mock_create.call_count == 0, (
+        per_account_calls = [
+            call
+            for call in mock_create.call_args_list
+            if call.kwargs.get("notification_id") != HUB_STAGE2_FAILING_NOTIFICATION_ID
+        ]
+        assert per_account_calls == [], (
             "per-account Stage-2 failure notification must never fire (DIAG-03/D-05)"
         )
+        # CR-02: the consolidated hub notification fires exactly once for
+        # this single failing account (effective threshold scales to 1).
+        assert mock_create.call_count == 1
+        assert mock_create.call_args.kwargs["notification_id"] == HUB_STAGE2_FAILING_NOTIFICATION_ID
 
 
 async def test_worker_failure_observed_by_hub(coord_for_fail_tests):

@@ -543,16 +543,27 @@ class Shop2ParcelHub:
         dispatch mechanism (RESEARCH.md Pattern 3). Synchronous, lock-free
         (mirrors the check_and_mark/try_consume idiom above): adds entry_id
         to the failing set; once ``len(_stage2_failing_entry_ids)`` reaches
-        ``HUB_STAGE2_NOTIFY_THRESHOLD``, fires exactly ONE consolidated
+        the EFFECTIVE threshold, fires exactly ONE consolidated
         persistent_notification, guarded by ``_hub_notification_active`` so
-        a 6th+ distinct failing account never re-creates it (D-06 no-
+        a subsequent distinct failing account never re-creates it (D-06 no-
         duplicate). The message body is composed ONLY from the aggregate
         failing-account count — no per-job/email/tracking-number/sender
         data is ever touched here (PROH-1/D-08).
+
+        CR-02 (34-REVIEW.md): ``HUB_STAGE2_NOTIFY_THRESHOLD`` is a CAP, not a
+        fixed floor — the effective threshold scales DOWN to the number of
+        CURRENTLY-ATTACHED accounts (``min(HUB_STAGE2_NOTIFY_THRESHOLD,
+        max(1, len(self._coordinators)))``). Without this, a 1- or 2-account
+        fleet (the project's stated primary use case per CLAUDE.md) could
+        never reach a fixed threshold of 5 distinct failing accounts, so a
+        sustained Stage-2/Ollama outage would never surface a proactive
+        notification at all. A larger fleet (~10 accounts) still keeps the
+        original higher bar, so a single flaky account never fires it alone.
         """
         self._stage2_failing_entry_ids.add(entry_id)
+        effective_threshold = min(HUB_STAGE2_NOTIFY_THRESHOLD, max(1, len(self._coordinators)))
         if (
-            len(self._stage2_failing_entry_ids) >= HUB_STAGE2_NOTIFY_THRESHOLD
+            len(self._stage2_failing_entry_ids) >= effective_threshold
             and not self._hub_notification_active
         ):
             persistent_notification.async_create(
