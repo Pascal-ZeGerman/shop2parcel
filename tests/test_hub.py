@@ -2,9 +2,11 @@
 
 Covers LIFE-01..05 (SPEC.md R1-R5): hub singleton creation exactly once under
 concurrent setup, the constructor-race asyncio.Lock, reference-counted
-attach/detach lifecycle, the hass-scoped worker stub (NotImplementedError on
-any dequeue, D-02), and the shop2parcel.__shared__ store version handling
-(including the T-29-01 corrupt-version backstop).
+attach/detach lifecycle, the shop2parcel.__shared__ store version handling
+(including the T-29-01 corrupt-version backstop), and — from Phase 32 Plan 03
+onward — the real shared Stage-2 worker (_async_hub_worker, replacing the
+Phase 29 _stub_worker): FIFO dispatch, entry_id resolution/skip, reload-to-
+fresh-coordinator routing, and the crash-isolation ladder.
 
 Direct-hub tests construct Shop2ParcelHub(hass) directly and mock
 Shop2ParcelStore at the hub's own import path. Wiring tests drive the real
@@ -57,31 +59,6 @@ def mock_config_entry_b() -> MockConfigEntry:
 # ---------------------------------------------------------------------------
 # Direct-hub tests (construct Shop2ParcelHub(hass) directly)
 # ---------------------------------------------------------------------------
-
-
-async def test_stub_worker_raises_not_implemented(hass):
-    """D-02/R4: enqueuing a job directly (hub._queue.put_nowait) makes the
-    stub worker crash with NotImplementedError — no coordinator wiring needed.
-    """
-    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
-
-    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-
-        hub = Shop2ParcelHub(hass)
-        await hub.async_setup()
-
-        hub._queue.put_nowait("sentinel-job")
-        # async_create_background_task tasks are not awaited by
-        # hass.async_block_till_done(); give the loop a few ticks to run the
-        # stub past its `await self._queue.get()` suspension point.
-        for _ in range(5):
-            await asyncio.sleep(0)
-
-        assert hub._worker_task.done()
-        with pytest.raises(NotImplementedError):
-            hub._worker_task.result()
 
 
 async def test_shared_store_version_written_on_first_setup(hass):
@@ -1639,3 +1616,396 @@ def test_attach_detach_with_config_entry_none_does_not_crash(hass):
 
     hub.detach(coordinator_bare)
     assert hub._coordinators == {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 Plan 03: the real shared worker (_async_hub_worker, replacing
+# _stub_worker). Task 1: resolve + drain + dispatch + finally release
+# (FIFO/routing/skip/reload/empty-idle). Task 2: crash-isolation ladder +
+# purge-vs-drain-race backstop.
+#
+# Driving pattern: hub.async_setup() spawns the real worker, which
+# immediately blocks on `await self._queue.get()`. Because Python's asyncio
+# is single-threaded and cooperative, the worker task is NOT scheduled to
+# run until the test coroutine hits its own `await` — so a sequence of
+# purely-synchronous hub calls (enqueue/attach/detach) after the worker has
+# started is guaranteed to complete BEFORE the worker ever wakes up. Tests
+# exploit this to set up "job enqueued, THEN registry mutated" orderings
+# deterministically, then `await hub._queue.join()` to let the worker drain
+# and observe the outcome. Every test ends with `await hub.async_shutdown()`
+# to cancel the worker cleanly (mirrors test_worker_task_survives_single_
+# entry_removal above).
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_dispatches_single_job_and_releases_inflight_in_finally(hass):
+    """Task 1 behavior: a single enqueued job is dispatched to its resolved
+    coordinator's _async_process_stage2_job exactly once (drain runs first),
+    and the hub in-flight slot is released afterward (finally always runs)."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock()
+        hub.attach(coordinator_a)
+
+        job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-1")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        await hub._queue.join()
+
+        coordinator_a._async_drain_pending_posts.assert_awaited_once()
+        coordinator_a._async_process_stage2_job.assert_awaited_once_with(job)
+        assert hub.inflight_count("entry-a") == 0
+        assert "TN-1" not in hub._stage2_enqueued_keys
+
+        await hub.async_shutdown()
+
+
+async def test_worker_processes_two_accounts_fifo_routing_no_cross_leak(hass):
+    """Task 1 behavior: two accounts each enqueue one job; the single worker
+    processes them in enqueue (FIFO) order and each result lands on its own
+    resolved coordinator — never crossed."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        dispatch_order: list[str] = []
+
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock(
+            side_effect=lambda job: dispatch_order.append(job.entry_id)
+        )
+        coordinator_b = MagicMock()
+        coordinator_b.config_entry.entry_id = "entry-b"
+        coordinator_b._async_drain_pending_posts = AsyncMock()
+        coordinator_b._async_process_stage2_job = AsyncMock(
+            side_effect=lambda job: dispatch_order.append(job.entry_id)
+        )
+        hub.attach(coordinator_a)
+        hub.attach(coordinator_b)
+
+        job_a = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-A")
+        job_b = _make_stage2_job(entry_id="entry-b", normalized_tn="TN-B")
+        assert hub.enqueue(job_a) is EnqueueOutcome.ENQUEUED
+        assert hub.enqueue(job_b) is EnqueueOutcome.ENQUEUED
+
+        await hub._queue.join()
+
+        assert dispatch_order == ["entry-a", "entry-b"]
+        coordinator_a._async_process_stage2_job.assert_awaited_once_with(job_a)
+        coordinator_b._async_process_stage2_job.assert_awaited_once_with(job_b)
+        assert hub.inflight_count("entry-a") == 0
+        assert hub.inflight_count("entry-b") == 0
+
+        await hub.async_shutdown()
+
+
+async def test_worker_skip_job_with_no_attached_coordinator(hass):
+    """Task 1 behavior: a job whose entry_id has NO attached coordinator is
+    skipped — no dispatch, no error, task_done + hub in-flight release still
+    run, and the worker keeps running."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        job = _make_stage2_job(entry_id="entry-never-attached", normalized_tn="TN-ORPHAN")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        await hub._queue.join()
+
+        assert hub.inflight_count("entry-never-attached") == 0
+        assert "TN-ORPHAN" not in hub._stage2_enqueued_keys
+        assert not hub._worker_task.done()
+
+        await hub.async_shutdown()
+
+
+async def test_worker_reload_dispatches_to_fresh_coordinator(hass):
+    """Task 1 behavior (WORK-02, D-01 non-negotiable): a job enqueued for
+    entry_id X while the OLD coordinator is attached dispatches to the FRESH
+    coordinator once X is detached+re-attached BEFORE the worker gets a
+    chance to run — dispatch-time resolution, not enqueue-time."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        old_coordinator = MagicMock()
+        old_coordinator.config_entry.entry_id = "entry-x"
+        old_coordinator._async_drain_pending_posts = AsyncMock()
+        old_coordinator._async_process_stage2_job = AsyncMock()
+
+        new_coordinator = MagicMock()
+        new_coordinator.config_entry.entry_id = "entry-x"
+        new_coordinator._async_drain_pending_posts = AsyncMock()
+        new_coordinator._async_process_stage2_job = AsyncMock()
+
+        hub.attach(old_coordinator)
+        job = _make_stage2_job(entry_id="entry-x", normalized_tn="TN-RELOAD")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        # No `await` has occurred since enqueue — the worker task cannot
+        # have been scheduled yet, so this reload race is deterministic.
+        hub.detach(old_coordinator)
+        hub.attach(new_coordinator)
+
+        await hub._queue.join()
+
+        new_coordinator._async_process_stage2_job.assert_awaited_once_with(job)
+        old_coordinator._async_process_stage2_job.assert_not_awaited()
+
+        await hub.async_shutdown()
+
+
+async def test_worker_idles_on_empty_queue_no_spin_no_error(hass):
+    """Task 1 behavior (R1 empty edge): an empty queue leaves the worker
+    blocked on queue.get() — no busy-loop, no exception, worker stays alive."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert not hub._worker_task.done()
+        assert not hub._worker_task.cancelled()
+
+        await hub.async_shutdown()
+
+
+async def test_async_setup_spawns_async_hub_worker_not_stub(hass):
+    """source: async_setup spawns _async_hub_worker (not _stub_worker) and
+    _stub_worker is deleted."""
+    import inspect  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    assert hasattr(Shop2ParcelHub, "_async_hub_worker")
+    assert not hasattr(Shop2ParcelHub, "_stub_worker")
+
+    setup_source = inspect.getsource(Shop2ParcelHub.async_setup)
+    assert "self._async_hub_worker()" in setup_source
+    assert "_stub_worker" not in setup_source
+
+
+def test_hub_release_and_task_done_appear_once_in_finally_not_duplicated(hass):
+    """source (Task 2 acceptance): the hub in-flight release + task_done
+    appear exactly once, in a single finally — not duplicated per except
+    branch."""
+    import inspect  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    worker_source = inspect.getsource(Shop2ParcelHub._async_hub_worker)
+    assert worker_source.count("self._release_inflight(job.entry_id, normalized_tn)") == 1
+    assert worker_source.count("self._queue.task_done()") == 1
+    # Both calls live inside the single `finally:` block that closes the
+    # per-job try — not scattered across the except branches above it.
+    finally_block = worker_source.split("finally:", 1)[1]
+    assert "self._release_inflight(job.entry_id, normalized_tn)" in finally_block
+    assert "self._queue.task_done()" in finally_block
+
+
+async def test_worker_exception_isolation_join_does_not_hang_and_next_account_processes(
+    hass,
+):
+    """Task 2 behavior: a job whose _async_process_stage2_job raises a
+    generic Exception is isolated via coord._record_stage2_failure and
+    coord._release_inflight (the per-account msg-gate release); the worker
+    continues and a subsequent job for a DIFFERENT account is still
+    processed; queue.join() does not hang."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        boom = ValueError("Ollama exploded")
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock(side_effect=boom)
+        coordinator_a._release_inflight = MagicMock()
+        coordinator_a._record_stage2_failure = MagicMock()
+
+        coordinator_b = MagicMock()
+        coordinator_b.config_entry.entry_id = "entry-b"
+        coordinator_b._async_drain_pending_posts = AsyncMock()
+        coordinator_b._async_process_stage2_job = AsyncMock()
+
+        hub.attach(coordinator_a)
+        hub.attach(coordinator_b)
+
+        job_a = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-A-FAIL")
+        job_b = _make_stage2_job(entry_id="entry-b", normalized_tn="TN-B-OK")
+        assert hub.enqueue(job_a) is EnqueueOutcome.ENQUEUED
+        assert hub.enqueue(job_b) is EnqueueOutcome.ENQUEUED
+
+        await asyncio.wait_for(hub._queue.join(), timeout=5.0)  # must not hang
+
+        coordinator_a._record_stage2_failure.assert_called_once_with(job_a, boom)
+        coordinator_a._release_inflight.assert_called_once_with(job_a)
+        coordinator_b._async_process_stage2_job.assert_awaited_once_with(job_b)
+        assert hub.inflight_count("entry-a") == 0
+        assert hub.inflight_count("entry-b") == 0
+        assert not hub._worker_task.done()
+
+        await hub.async_shutdown()
+
+
+async def test_worker_auth_failure_logged_not_recorded_as_ollama_failure(hass, caplog):
+    """Task 2 behavior (WR-05): a job raising ConfigEntryAuthFailed is
+    logged and does NOT increment _record_stage2_failure (auth is not an
+    Ollama failure), but DOES call coord._release_inflight(job) (the
+    per-account msg-gate release); the worker continues."""
+    from homeassistant.exceptions import ConfigEntryAuthFailed  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        auth_err = ConfigEntryAuthFailed("bad parcelapp key")
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock(side_effect=auth_err)
+        coordinator_a._release_inflight = MagicMock()
+        coordinator_a._record_stage2_failure = MagicMock()
+        hub.attach(coordinator_a)
+
+        job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-AUTH")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        with caplog.at_level(logging.ERROR):
+            await asyncio.wait_for(hub._queue.join(), timeout=5.0)
+
+        coordinator_a._record_stage2_failure.assert_not_called()
+        coordinator_a._release_inflight.assert_called_once_with(job)
+        assert "auth error" in caplog.text
+        assert hub.inflight_count("entry-a") == 0
+        assert not hub._worker_task.done()
+
+        await hub.async_shutdown()
+
+
+async def test_worker_cancelled_error_propagates_and_stops_worker(hass):
+    """Task 2 behavior (R5 adjacency): CancelledError raised during a job
+    runs coord._release_inflight(job), the hub in-flight release + task_done
+    run in finally, and CancelledError propagates out (stops the worker) —
+    the only thing that stops it."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock(side_effect=asyncio.CancelledError())
+        coordinator_a._release_inflight = MagicMock()
+        hub.attach(coordinator_a)
+
+        job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-CANCEL")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        await asyncio.wait_for(hub._queue.join(), timeout=5.0)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        coordinator_a._release_inflight.assert_called_once_with(job)
+        assert hub.inflight_count("entry-a") == 0
+        assert hub._worker_task.done()
+        assert hub._worker_task.cancelled()
+
+        # The worker already exited on its own — async_shutdown must not
+        # raise when the task is already done.
+        await hub.async_shutdown()
+
+
+async def test_worker_purge_vs_drain_race_backstop_skips_departed_account(hass):
+    """Task 2 behavior (🧪 held-out backstop, R4 ordering): a job for
+    account X is enqueued, then X is detached (purging its in-flight keys
+    and registry entry) BEFORE the worker dequeues it; when the worker
+    dequeues, coord resolves to None and the job is skipped — no dispatch,
+    no orphaned POST, no crash."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        coordinator_x = MagicMock()
+        coordinator_x.config_entry.entry_id = "entry-departed"
+        coordinator_x._async_drain_pending_posts = AsyncMock()
+        coordinator_x._async_process_stage2_job = AsyncMock()
+        hub.attach(coordinator_x)
+
+        job = _make_stage2_job(entry_id="entry-departed", normalized_tn="TN-DEPARTED")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        # Detach BEFORE any `await` since enqueue — the worker cannot have
+        # dequeued yet, so this purge-vs-drain race is deterministic: the
+        # job is dequeued strictly AFTER detach's purge has already run.
+        hub.detach(coordinator_x)
+
+        await asyncio.wait_for(hub._queue.join(), timeout=5.0)
+
+        coordinator_x._async_process_stage2_job.assert_not_awaited()
+        assert hub.inflight_count("entry-departed") == 0
+        assert "TN-DEPARTED" not in hub._stage2_enqueued_keys
+        assert not hub._worker_task.done()
+
+        await hub.async_shutdown()
