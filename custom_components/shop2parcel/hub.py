@@ -364,6 +364,32 @@ class Shop2ParcelHub:
         """
         return len(self._inflight.get(entry_id, ()))
 
+    @property
+    def stage2_queue_depth(self) -> int:
+        """Total Stage-2 jobs outstanding across every account (DIAG-02/D-04).
+
+        "Outstanding" = physically queued (not yet dequeued) PLUS currently
+        dispatched-but-not-yet-completed — the exact cardinality Phase 32's
+        ``_inflight`` dict already tracks (D-05: a job is added to
+        ``_inflight`` on successful enqueue and only removed by the worker's
+        finally-block release, so a dequeued-but-still-processing job is
+        still counted here — SPEC R3's in-flight edge). Reads Phase 32 hub
+        state; adds no new bookkeeping (Don't Hand-Roll) — the global
+        queue-sensor's sole public surface onto ``_inflight``.
+        """
+        return sum(len(s) for s in self._inflight.values())
+
+    @property
+    def stage2_pending(self) -> int:
+        """Stage-2 jobs still physically sitting in the shared queue (DIAG-02/D-04).
+
+        Thin passthrough to ``self._queue.qsize()`` — the global queue
+        sensor's sole public surface onto the queue depth; never re-derived
+        or cached. Reads Phase 32 hub state; adds no new bookkeeping (Don't
+        Hand-Roll).
+        """
+        return self._queue.qsize()
+
     # ------------------------------------------------------------------
     # Phase 31 (QUOTA-01/02/04): shared daily-budget + per-poll-cap mutators.
     #

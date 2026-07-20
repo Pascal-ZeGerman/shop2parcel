@@ -77,13 +77,13 @@
     "abort": {
       "already_configured": "Shop2Parcel is already configured for this Gmail account.",
       "already_configured_imap": "An account with this username and host is already configured.",
-      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+      "reauth_successful": "Re-authentication was successful",
       "wrong_account": "Wrong account: please re-authenticate with the originally configured account. To switch accounts, remove this entry and add a new one.",
-      "oauth_error": "[%key:common::config_flow::abort::oauth2_error%]",
-      "oauth_failed": "[%key:common::config_flow::abort::oauth2_failed%]",
-      "oauth_timeout": "[%key:common::config_flow::abort::oauth2_timeout%]",
-      "oauth_unauthorized": "[%key:common::config_flow::abort::oauth2_unauthorized%]",
-      "missing_configuration": "[%key:common::config_flow::abort::oauth2_missing_configuration%]"
+      "oauth_error": "Received invalid token data.",
+      "oauth_failed": "Error while obtaining access token.",
+      "oauth_timeout": "Timeout while resolving the OAuth token.",
+      "oauth_unauthorized": "OAuth authorization error while obtaining access token.",
+      "missing_configuration": "The component is not configured. Please follow the documentation."
     }
   },
   "options": {
