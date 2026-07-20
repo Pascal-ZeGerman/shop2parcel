@@ -538,6 +538,136 @@ async def test_stage2_sensor_device_info_matches_other_diagnostic_sensors(hass, 
     assert (DOMAIN, mock_config_entry.entry_id) in sensor._attr_device_info["identifiers"]
 
 
+# ---------------------------------------------------------------------------
+# Phase 34 Plan 03 (DIAG-02): GlobalQueueSensor — hub-owned global sensor
+# ---------------------------------------------------------------------------
+
+
+def _make_stage2_job(i: int, entry_id: str):
+    from custom_components.shop2parcel.coordinator import Stage2Job
+
+    shipment = _make_shipment(f"msg{i}")
+    return Stage2Job(
+        storage_key=f"key{i}",
+        normalized_tn=f"TN{i}",
+        shipment=shipment,
+        html_body="<html/>",
+        message_id=f"msg{i}",
+        meta={},
+        entry_id=entry_id,
+    )
+
+
+async def test_global_queue_sensor_native_value_empty(hass, mock_config_entry):
+    """DIAG-02: native_value == 0 for an empty hub (nothing queued, nothing in-flight)."""
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    hub = coordinator._hub
+    sensor = GlobalQueueSensor(coordinator, hub)
+    assert sensor.native_value == 0
+
+
+async def test_global_queue_sensor_native_value_enqueued_no_drain(hass, mock_config_entry):
+    """DIAG-02: native_value == 3 after 3 enqueues with no drain — pending == in-flight."""
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    hub = coordinator._hub
+    entry_id = mock_config_entry.entry_id
+    for i in range(3):
+        hub.enqueue(_make_stage2_job(i, entry_id))
+    sensor = GlobalQueueSensor(coordinator, hub)
+    assert sensor.native_value == 3
+    assert sensor.extra_state_attributes["pending"] == 3
+    assert sensor.extra_state_attributes["processing"] == 0
+
+
+async def test_global_queue_sensor_pending_plus_processing_mid_drain(hass, mock_config_entry):
+    """DIAG-02: worker pulls 1 mid-process -> pending=2, processing=1, native_value stays 3."""
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    hub = coordinator._hub
+    entry_id = mock_config_entry.entry_id
+    for i in range(3):
+        hub.enqueue(_make_stage2_job(i, entry_id))
+
+    # Simulate the worker dequeuing one job without yet releasing its in-flight
+    # slot — release only happens in the worker's `finally` on job completion.
+    hub._queue.get_nowait()
+
+    sensor = GlobalQueueSensor(coordinator, hub)
+    assert sensor.native_value == 3
+    attrs = sensor.extra_state_attributes
+    assert attrs["pending"] == 2
+    assert attrs["processing"] == 1
+
+
+async def test_global_queue_sensor_native_value_zero_after_full_drain(hass, mock_config_entry):
+    """DIAG-02: native_value returns to 0 once every job's in-flight slot is released."""
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    hub = coordinator._hub
+    entry_id = mock_config_entry.entry_id
+    jobs = [_make_stage2_job(i, entry_id) for i in range(3)]
+    for job in jobs:
+        hub.enqueue(job)
+    for job in jobs:
+        hub._queue.get_nowait()
+        hub._release_inflight(job.entry_id, job.normalized_tn)
+
+    sensor = GlobalQueueSensor(coordinator, hub)
+    assert sensor.native_value == 0
+
+
+async def test_global_queue_sensor_unique_id_device_info_and_category(hass, mock_config_entry):
+    """DIAG-02/D-02: hub-scoped unique_id, DIAGNOSTIC category, hub DeviceInfo."""
+    from homeassistant.helpers.entity import EntityCategory
+
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    hub = coordinator._hub
+    sensor = GlobalQueueSensor(coordinator, hub)
+
+    assert sensor.unique_id == f"{DOMAIN}___shared___hub_stage2_queue"
+    assert sensor._attr_entity_category == EntityCategory.DIAGNOSTIC
+    assert sensor._attr_device_info is not None
+    assert sensor._attr_device_info["identifiers"] == {(DOMAIN, "__shared__")}
+    assert sensor._attr_device_info["name"] == "Shop2Parcel Hub"
+
+
+async def test_global_queue_sensor_uid_not_prefixed_by_per_entry_sweep_prefix(
+    hass, mock_config_entry
+):
+    """T-34-07: hub-scoped uid does NOT match the per-entry orphan-sweep prefix.
+
+    _sweep_orphaned_entities (__init__.py) only removes uids starting with
+    f"{DOMAIN}_{entry_id}_" — the hub uid inserts an extra "__shared__"
+    scope segment ("shop2parcel___shared___...") that cannot equal any real
+    entry_id-based prefix, so the sweep structurally cannot delete it.
+    """
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    hub = coordinator._hub
+    sensor = GlobalQueueSensor(coordinator, hub)
+
+    per_entry_sweep_prefix = f"{DOMAIN}_{mock_config_entry.entry_id}_"
+    assert not sensor.unique_id.startswith(per_entry_sweep_prefix)
+
+
+async def test_stage2_sensor_still_present_and_unmodified_diag02(hass, mock_config_entry):
+    """DIAG-02/D-01: the per-account Stage2Sensor is NOT removed (additive)."""
+    from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = Stage2Sensor(coordinator, mock_config_entry)
+    assert sensor._unique_id_suffix == "stage2_queue"
+
+
 async def test_all_seven_diagnostic_sensors_registered(hass, mock_config_entry):
     """DIAG-01/DIAG-08: all 7 diagnostic sensors (including Stage2Sensor) registered at setup."""
     await _setup_integration(hass, mock_config_entry)
