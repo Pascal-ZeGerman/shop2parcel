@@ -212,6 +212,11 @@ class Stage2Job:
     message_id: Gmail message ID or IMAP UID — for _emit_scan_event attribution (D-06).
     meta: Email metadata dict {'subject': str, 'from': str} — for _emit_scan_event
         attribution (D-06). Populated from _extract_email_meta / _extract_imap_email_meta.
+    entry_id: Phase 32 (D-11, WORK-02) — the originating config entry's id. The shared
+        hub worker resolves entry_id to whichever coordinator is CURRENTLY attached under
+        that id at dispatch time (not the coordinator instance that existed at enqueue
+        time), so a reload (remove+add, same entry_id) lands the in-flight result on the
+        fresh coordinator instead of a torn-down one.
     prefetched_result: Phase 27 fix — a Stage2Result already produced by the Ollama
         fallback gatekeeper (gmail_coordinator). When set, the worker reuses it instead of
         calling the extractor a second time on the same HTML (avoids double extraction).
@@ -228,6 +233,7 @@ class Stage2Job:
     html_body: str
     message_id: str
     meta: dict
+    entry_id: str
     prefetched_result: Any | None = None
     raw_msg_id: str | None = None
 
@@ -1299,6 +1305,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             html_body=html_body,
             message_id=message_id,
             meta=meta,
+            entry_id=self.config_entry.entry_id,
             prefetched_result=prefetched_result,
             raw_msg_id=raw_msg_id,
         )
