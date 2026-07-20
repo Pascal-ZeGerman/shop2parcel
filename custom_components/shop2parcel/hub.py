@@ -28,9 +28,12 @@ from datetime import time as dt_time
 from homeassistant.components import persistent_notification
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_point_in_time, async_track_time_interval
 
 from .const import (
+    DOMAIN,
     HUB_STAGE2_FAILING_NOTIFICATION_ID,
     HUB_STAGE2_NOTIFY_THRESHOLD,
     HUB_STAGE2_POLL_WINDOW,
@@ -109,6 +112,16 @@ class Shop2ParcelHub:
         # re-creates the single consolidated notification (D-06).
         self._stage2_failing_entry_ids: set[str] = set()
         self._hub_notification_active: bool = False
+        # Phase 34 (R-01/DIAG-01/DIAG-02): per-entry stored AddEntitiesCallback
+        # so the hub can re-add the two global sensors under a SURVIVING
+        # entry's platform when their current owner unloads (the only
+        # HA-supported cross-entry entity re-parenting mechanism — see
+        # maybe_rehome_global_sensors below). _global_sensor_owner_entry_id
+        # tracks which entry currently owns them; both are session-scoped
+        # in-memory ONLY — rebuilt from scratch on every async_setup(), never
+        # persisted to the shared store (RESEARCH.md Pitfall 4).
+        self._sensor_add_entities: dict[str, AddEntitiesCallback] = {}
+        self._global_sensor_owner_entry_id: str | None = None
         # Phase 30 (DEDUP-01/DEDUP-03): single shared dedup set, FIFO-capped
         # at MAX_SUBMITTED_TRACKING_NUMBERS. Pure in-memory core in this plan
         # (30-01) — persistence (async_save/async_load) lands in 30-02.
@@ -243,12 +256,119 @@ class Shop2ParcelHub:
                 del self._coordinators[entry_id]
             for tn in self._inflight.pop(entry_id, set()):
                 self._stage2_enqueued_keys.discard(tn)
+            # Phase 34 (R-01): drop this entry_id's stale AddEntitiesCallback
+            # so a departed entry's callback is never replayed by a later
+            # maybe_rehome_global_sensors() call. Separate concern from the
+            # re-home DECISION itself, which runs earlier in
+            # async_unload_entry using the explicit entry_id (Pitfall 3) —
+            # this purge only prevents stale callback reuse after the fact.
+            self._sensor_add_entities.pop(entry_id, None)
             self._stage2_failing_entry_ids.discard(entry_id)
             if not self._stage2_failing_entry_ids:
                 persistent_notification.async_dismiss(
                     self._hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
                 )
                 self._hub_notification_active = False
+
+    # ------------------------------------------------------------------
+    # Phase 34 (R-01/DIAG-01/DIAG-02): global-sensor cross-entry ownership
+    # + re-home. The two global sensors (GlobalQuotaSensor/GlobalQueueSensor)
+    # must exist EXACTLY ONCE regardless of how many accounts are attached,
+    # and must survive their registering entry's removal as long as >=1
+    # account remains — HA has no "entity owned by the hub" concept, so this
+    # is implemented via the ONLY HA-supported cross-entry re-parenting
+    # mechanism: re-registering the same (domain, platform, unique_id)
+    # triple from a DIFFERENT entry's stored AddEntitiesCallback
+    # (RESEARCH.md Pattern 1 / Assumption A1, proven by 34-01's
+    # characterization test). There is no direct
+    # entity_registry.async_update_entity(config_entry_id=...) shortcut —
+    # that kwarg does not exist on the public API (Anti-Pattern / Pitfall 1).
+    # ------------------------------------------------------------------
+
+    def register_sensor_add_entities(
+        self, entry_id: str, add_entities: AddEntitiesCallback
+    ) -> None:
+        """Store entry_id's async_add_entities callback for later reuse (R-01).
+
+        Called from sensor.py::async_setup_entry for EVERY entry (not just
+        the owner) — maybe_rehome_global_sensors() needs ANY currently-
+        attached entry's callback available to re-add the global sensors
+        under it, not only the entry that happens to be the eventual
+        survivor. Session-scoped in-memory only (Pitfall 4) — never
+        persisted to the shared store.
+        """
+        self._sensor_add_entities[entry_id] = add_entities
+
+    def claim_global_sensor_ownership(self, entry_id: str) -> bool:
+        """Claim ownership of the two global sensors for entry_id (R-01).
+
+        Returns True the first time this is called while the hub has no
+        current owner — the caller (sensor.py::async_setup_entry) should
+        register GlobalQuotaSensor/GlobalQueueSensor now. Returns False on
+        every subsequent call while an owner is already set — the caller
+        must NOT register a duplicate (unique_id collision — RESEARCH.md
+        Anti-Pattern: registering from every entry unconditionally lets the
+        "owner" flip unpredictably on every reload). Ownership is
+        session-scoped in-memory only — rebuilt from scratch on every
+        async_setup(), never persisted (Pitfall 4: the first-to-attach
+        entry_id is not guaranteed stable across HA restarts, which is
+        acceptable — sensor *values* are always freshly computed from hub
+        state regardless of which entry currently owns the entities).
+        """
+        if self._global_sensor_owner_entry_id is None:
+            self._global_sensor_owner_entry_id = entry_id
+            return True
+        return False
+
+    def maybe_rehome_global_sensors(self, departing_entry_id: str) -> None:
+        """Re-home the two global sensors to a surviving entry (R-01).
+
+        MUST be called from __init__.py's async_unload_entry with the
+        departing entry's EXPLICIT entry_id, BEFORE hub.detach() runs
+        (Pitfall 3) — the "was I the owner" decision must use the
+        caller-supplied id, never inferred from post-detach hub state (by
+        the time detach() has run, the departing entry_id may already be
+        gone from self._coordinators).
+
+        No-op unless departing_entry_id is the CURRENT global-sensor owner
+        (another entry's unload is irrelevant here). Also a no-op when the
+        hub has no OTHER attached entry to re-home onto — that is the
+        last-account teardown case, handled instead by async_shutdown()'s
+        explicit entity_registry.async_remove() (Pitfall 2: HA's registry
+        does not auto-clean on a plain unload, only on a full entry
+        removal).
+
+        Re-adds FRESH GlobalQuotaSensor/GlobalQueueSensor instances — never
+        reuses the departing owner's old entity objects, which would stay
+        bound to a coordinator that no longer receives updates (RESEARCH.md
+        Anti-Pattern) — under the survivor's stored AddEntitiesCallback.
+        HA's entity_registry re-parents config_entry_id to the survivor as
+        a side effect of this real async_add_entities() call (Assumption
+        A1, proven by 34-01's characterization test).
+        """
+        if self._global_sensor_owner_entry_id != departing_entry_id:
+            return
+        survivors = [eid for eid in self._coordinators if eid != departing_entry_id]
+        if not survivors:
+            return
+        new_owner_id = survivors[0]
+        add_entities = self._sensor_add_entities.get(new_owner_id)
+        if add_entities is None:
+            # Safety net: no callback recorded for the chosen survivor —
+            # leave the entities as-is rather than raising.
+            return
+
+        from .diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+        from .sensor import GlobalQuotaSensor  # noqa: PLC0415
+
+        new_owner_coordinator = self._coordinators[new_owner_id]
+        add_entities(
+            [
+                GlobalQuotaSensor(new_owner_coordinator, self),
+                GlobalQueueSensor(new_owner_coordinator, self),
+            ]
+        )
+        self._global_sensor_owner_entry_id = new_owner_id
 
     def _trim_submitted_tns(self) -> None:
         """FIFO-trim _submitted_tracking_numbers to MAX_SUBMITTED_TRACKING_NUMBERS.
@@ -778,6 +898,32 @@ class Shop2ParcelHub:
         persistent_notification.async_dismiss(
             self._hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
         )
+        # Phase 34 (R-01/DIAG-01/DIAG-02, Pitfall 2/A2): explicitly remove
+        # both global sensors from the entity registry at last-account
+        # teardown. HA's automatic entity-registry cleanup
+        # (EntityRegistry.async_clear_config_entry) only fires from a full
+        # config-entry async_remove(), NEVER from a plain async_unload() —
+        # which is exactly what refcount-0 teardown is. Without this, the
+        # two global entities are left as orphaned, unavailable rows
+        # pointing at a config entry that no longer exists. Reads the
+        # unique_id suffix directly off each class (single source of truth,
+        # never duplicated as a string literal here) — lazy-imported to
+        # avoid a module-load circular import (mirrors
+        # maybe_rehome_global_sensors above).
+        from .diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+        from .sensor import GlobalQuotaSensor  # noqa: PLC0415
+
+        registry = er.async_get(self._hass)
+        for suffix in (
+            GlobalQuotaSensor._unique_id_suffix,
+            GlobalQueueSensor._unique_id_suffix,
+        ):
+            entity_id = registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{DOMAIN}___shared___{suffix}"
+            )
+            if entity_id is not None:
+                registry.async_remove(entity_id)
+        self._global_sensor_owner_entry_id = None
         # DEDUP-02: flush the dedup set (not just the version) on teardown —
         # the Phase 29 shutdown wrote {"version": SHARED_STORAGE_VERSION}
         # only, which would silently erase the dedup set on every unload.
