@@ -1601,6 +1601,84 @@ def test_detach_with_no_inflight_is_a_noop_purge(hass):
     assert hub.inflight_count("entry-a") == 0
 
 
+def test_detach_leaves_queued_job_physically_queued(hass):
+    """D-01 precondition for the WR-01 fix: detach() must NOT remove an
+    already-queued Stage2Job for the departing entry_id — it has to survive
+    to dispatch against whichever coordinator is attached when the worker
+    reaches it (test_worker_reload_dispatches_to_fresh_coordinator). Only
+    the in-flight/dedup *bookkeeping* is purged, not the physical job."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+    assert hub._queue.qsize() == 1
+
+    hub.detach(coordinator_a)
+
+    assert hub._queue.qsize() == 1  # job stays queued
+    assert hub.inflight_count("entry-a") == 0  # but bookkeeping is purged (D-05)
+    assert "TN-1" not in hub._stage2_enqueued_keys
+
+
+def test_enqueue_rejects_duplicate_still_sitting_in_queue_after_detach(hass):
+    """WR-01: detach() purges _stage2_enqueued_keys (D-05) but deliberately
+    leaves an already-queued job in place (D-01), opening a window where the
+    primary dedup set no longer blocks a fresh duplicate for the same
+    tracking number. enqueue()'s queue-scan backstop must still reject it —
+    the queue must never hold two jobs for the same normalized_tn at once."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    old_coordinator = MagicMock()
+    old_coordinator.config_entry.entry_id = "entry-a"
+    hub.attach(old_coordinator)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+
+    # Reload: detach the old instance, attach a fresh one under the same entry_id.
+    hub.detach(old_coordinator)
+    new_coordinator = MagicMock()
+    new_coordinator.config_entry.entry_id = "entry-a"
+    hub.attach(new_coordinator)
+
+    # Same tracking number re-discovered post-reload — _stage2_enqueued_keys
+    # was purged by detach(), but the original job is still queued.
+    assert "TN-1" not in hub._stage2_enqueued_keys  # primary dedup gate is open
+    outcome = hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+
+    assert outcome is EnqueueOutcome.SKIPPED_DUP
+    assert hub._queue.qsize() == 1  # still only the one original job
+
+
+def test_enqueue_allows_different_tn_after_detach_purge(hass):
+    """The WR-01 backstop scans by normalized_tn, not entry_id or object
+    identity — a genuinely different tracking number for the same
+    (reloaded) entry_id must still enqueue normally, alongside the
+    surviving pre-reload job."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    old_coordinator = MagicMock()
+    old_coordinator.config_entry.entry_id = "entry-a"
+    hub.attach(old_coordinator)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+
+    hub.detach(old_coordinator)
+    new_coordinator = MagicMock()
+    new_coordinator.config_entry.entry_id = "entry-a"
+    hub.attach(new_coordinator)
+
+    outcome = hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-2"))
+
+    assert outcome is EnqueueOutcome.ENQUEUED
+    assert hub._queue.qsize() == 2  # both TN-1 (survivor) and TN-2 (fresh) queued
+
+
 def test_attach_detach_with_config_entry_none_does_not_crash(hass):
     """RESEARCH.md Pitfall 5 / D-01: a coordinator whose config_entry is
     None is tolerated — attach/detach skip the registry write, mirroring
@@ -2012,3 +2090,63 @@ async def test_worker_purge_vs_drain_race_backstop_skips_departed_account(hass):
         assert not hub._worker_task.done()
 
         await hub.async_shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Phase 34 Plan 02 Task 1: stage2_queue_depth / stage2_pending read
+# accessors (DIAG-02/D-04 safety-net) — thin, sensors read these instead of
+# hub._inflight/hub._queue directly.
+# ---------------------------------------------------------------------------
+
+
+def test_stage2_queue_depth_and_pending_empty_hub_are_zero(hass):
+    """Empty hub (no _inflight entries, empty _queue): both accessors read 0."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    assert hub.stage2_queue_depth == 0
+    assert hub.stage2_pending == 0
+
+
+def test_stage2_queue_depth_sums_inflight_across_accounts(hass):
+    """D-04: stage2_queue_depth == sum(len(s) for s in hub._inflight.values())
+    across multiple entry_ids — total outstanding (pending + in-flight)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub._inflight = {"a": {"1Z1", "1Z2"}, "b": {"1Z3"}}
+
+    assert hub.stage2_queue_depth == 3
+
+
+def test_stage2_pending_reflects_queue_size_before_dequeue(hass):
+    """stage2_pending == hub._queue.qsize() when three jobs are enqueued but
+    none have been dequeued yet."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for i in range(3):
+        hub._queue.put_nowait(_make_stage2_job(entry_id="entry-a", normalized_tn=f"TN-{i}"))
+
+    assert hub.stage2_pending == 3
+
+
+def test_stage2_queue_depth_counts_dequeued_but_still_inflight_job(hass):
+    """SPEC R3 in-flight edge: a job dequeued from _queue (stage2_pending
+    drops to 0) but still tracked in _inflight (the worker hasn't hit its
+    finally-block release yet) is still counted by stage2_queue_depth —
+    pending + in-flight, not just physically-queued."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-INFLIGHT")
+    assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+    # Simulate the worker dequeuing the job without yet releasing in-flight.
+    dequeued = hub._queue.get_nowait()
+    assert dequeued is job
+
+    assert hub.stage2_pending == 0
+    assert hub.stage2_queue_depth == 1

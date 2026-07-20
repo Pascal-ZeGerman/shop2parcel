@@ -203,6 +203,16 @@ class Shop2ParcelHub:
         _inflight and the flat global _stage2_enqueued_keys so a removed
         account's dedup keys never linger. Guarded against
         ``coordinator.config_entry is None`` like attach().
+
+        Deliberately does NOT touch self._queue: a job already queued for
+        this entry_id must survive detach and dispatch to whichever
+        coordinator is attached when the worker reaches it (D-01,
+        test_worker_reload_dispatches_to_fresh_coordinator) — dropping it
+        here would break same-entry_id reload dispatch. The dedup window
+        this purge opens (WR-01: a fresh duplicate for the same tracking
+        number could be admitted while the original job is still queued) is
+        closed instead in enqueue()'s queue-scan backstop below, which does
+        not require abandoning a live queued job.
         """
         if self._refcount > 0:
             self._refcount -= 1
@@ -299,8 +309,24 @@ class Shop2ParcelHub:
         neither structure (no phantom in-flight slot on a dropped/dup job).
         normalized_tn is matched/stored verbatim — no re-normalization,
         consistent with the global submitted-TN set (check_and_mark above).
+
+        WR-01 dedup backstop: detach() purges a departing entry_id's
+        _stage2_enqueued_keys immediately (D-05) but deliberately leaves any
+        already-queued job physically in self._queue so it can still
+        dispatch to a fresh coordinator on reload (D-01). That combination
+        opens a window where the primary dedup set no longer blocks a
+        duplicate normalized_tn even though the original job is still
+        sitting in the queue. self._queue is bounded to
+        HUB_STAGE2_QUEUE_MAXLEN (64) entries, so a linear scan here is cheap
+        — it catches exactly that window without requiring detach() to
+        abandon a live queued job.
         """
         if job.normalized_tn in self._stage2_enqueued_keys:
+            return EnqueueOutcome.SKIPPED_DUP
+        if any(
+            queued.normalized_tn == job.normalized_tn
+            for queued in self._queue._queue  # type: ignore[attr-defined]  # noqa: SLF001
+        ):
             return EnqueueOutcome.SKIPPED_DUP
         if len(self._inflight.get(job.entry_id, ())) >= STAGE2_PER_ACCOUNT_INFLIGHT_CAP:
             return EnqueueOutcome.DROPPED_BACKPRESSURE
