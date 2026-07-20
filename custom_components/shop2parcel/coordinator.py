@@ -62,6 +62,7 @@ from .const import (
     DEFAULT_OLLAMA_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
+    MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
     MAX_STAGE2_FALLBACK_INLINE_SECONDS,
     MAX_STAGE2_POSTS_PER_POLL,
     SEEN_MESSAGE_IDS_MAXLEN,
@@ -74,7 +75,7 @@ from .const import (
     stage2_failing_notification_id,
 )
 from .extractors.ollama_extractor import OllamaExtractor, preprocess_html
-from .merge import merge_llm_authoritative_with_grounding
+from .merge import merge_llm_authoritative_with_grounding, validate_grounding
 
 if TYPE_CHECKING:
     # Phase 30-03: hub.py imports coordinator.py, so a module-level runtime import
@@ -1227,6 +1228,372 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             return False
         self._diagnostics.stage2_enqueued_total += 1  # DIAG-02: only on successful enqueue
         return True
+
+    async def _run_inline_fallback(
+        self,
+        *,
+        msg_key: str,
+        prefix: str,
+        html: str,
+        meta: dict,
+        email_date: int,
+        candidate_tokens: list[str],
+        debug_mode: bool,
+    ) -> None:
+        """Shared Stage-1-miss inline Ollama fallback gatekeeper (Phase 33 Plan 02, D-04).
+
+        Pure params-in: every per-message value the gatekeeper needs is passed in as
+        a keyword argument (msg_key, prefix, html, meta, email_date, candidate_tokens,
+        debug_mode) and every side effect routes through self.<hook> calls
+        (_mark_message_seen, _mark_inflight, _register_inline_schema_failure,
+        _surface_stage2_failure, _emit_scan_event, _enqueue_stage2). There is no
+        subclass-type flag or branch — Gmail and IMAP call this identically.
+
+        This is a verbatim move of the former GmailCoordinator inline fallback body
+        (gmail_coordinator.py, pre-Phase-33) with ONLY mechanical renames applied
+        (msg_id -> msg_key, email_meta -> meta, the gmail-prefixed scan-event ID ->
+        f"{prefix}{msg_key}", result.candidate_tokens -> candidate_tokens parameter,
+        the `d` diagnostics alias -> self._diagnostics, time.monotonic() ->
+        _time.monotonic(), and every loop-control `continue` -> `return`, since this
+        method has no loop of its own). Callers own the pre-loop seen/in-flight skip
+        gate and MUST only invoke this on a genuine Stage-1 miss (result.shipment is
+        None) — this method does not re-check that condition. Immediately after
+        awaiting this method, the caller issues a single `continue` to resume its
+        own per-message loop.
+        """
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
+        # Phase 27 Plan 03: Ollama fallback gatekeeper on Stage-1 miss.
+        # Runs only when stage2 is enabled, NOT in debug_mode, and a live extractor
+        # exists. The None guard defends against any window where stage2_enabled is
+        # True but async_setup_stage2_extractor has not (yet) populated _extractor
+        # (e.g. a bare-coordinator test), routing that case to the re-fetch branch
+        # below (finding #523) rather than caching the message as a reject.
+        #
+        # Seen-ID model = convergence: a fallback that ENQUEUES does NOT mark the
+        # message seen here. The message is re-fetched next poll; once the worker has
+        # POSTed the tracking number, the re-fetch hits the _submitted_tracking_numbers
+        # dedup guard and marks it seen then. Marking per-message at enqueue while work
+        # is per-shipment is what lost deferred/QueueFull jobs (findings #1/#594), so
+        # the tracking-number dedup converges the seen-ID instead of optimistic marking.
+
+        # Quick-260703-mac (A): first-refresh skip guard.
+        # On the bootstrap first refresh (inside HA's 300 s stage-2 global timeout)
+        # inline Ollama calls can overrun the window and cancel setup. Skip them here
+        # — Stage-1 regex already ran above; Stage-1-miss messages are left UN-marked
+        # (identical to the extractor-unavailable path below) so the next poll
+        # re-inspects and runs inline fallback normally. Stage-1 HIT enqueue is on a
+        # separate path and is unaffected.
+        if (
+            self._diagnostics.stage2_enabled
+            and not debug_mode
+            and self._extractor is not None
+            and not self._first_refresh_done
+        ):
+            _LOGGER.debug(
+                "Gmail message %s: inline fallback deferred — first refresh not yet complete",
+                msg_key,
+            )
+            return  # leave UN-marked; re-inspected on the next poll
+
+        if (
+            self._diagnostics.stage2_enabled
+            and not debug_mode
+            and self._extractor is not None
+        ):
+            # IN-07: reuse a cap-deferred prefetched extraction BEFORE the cap
+            # check or any Ollama call. A cache hit is not an extraction — it
+            # consumes no cap slot and re-records no LLM counters (the original
+            # run already counted the attempt and latency); previously the
+            # worker's cap-skip discarded the prefetched result and this
+            # gatekeeper ran a second full Ollama pass on the same body.
+            result_fb = self._fallback_prefetch_cache.pop(msg_key, None)
+            if result_fb is None:
+                # Per-poll cap check (Design §4 / T-27-03-03 DoS guard): if we have
+                # already run MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions this
+                # poll, skip WITHOUT caching the ID so it is retried next poll (Pitfall 6).
+                if (
+                    self._stage2_fallback_extractions_this_poll
+                    >= MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL
+                ):
+                    _LOGGER.debug(
+                        "Gmail message %s: fallback cap reached (%d/%d) — skipping this poll",
+                        msg_key,
+                        self._stage2_fallback_extractions_this_poll,
+                        MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
+                    )
+                    return  # do NOT cache (retry next poll)
+
+                # Quick-260703-mac (B): per-poll wall-clock budget check.
+                # Checked between extractions (a single in-flight call can still run up
+                # to ollama_timeout). Budget-deferred messages are left UN-marked so
+                # they are retried on the next poll — same as the cap's return path.
+                # Inside the result_fb is None branch so a prefetch-cache reuse
+                # (already-computed, no new Ollama call) is not blocked.
+                if (
+                    self._stage2_fallback_inline_deadline is not None
+                    and _time.monotonic() >= self._stage2_fallback_inline_deadline
+                ):
+                    _LOGGER.debug(
+                        "Gmail message %s: inline fallback wall-clock budget exhausted"
+                        " — deferring to next poll",
+                        msg_key,
+                    )
+                    return  # do NOT cache (retry next poll)
+
+                # Run Ollama fallback extraction (Design §3 / Pattern 3 / T-27-03-01).
+                # Count the attempt regardless of outcome (increment before try so cap
+                # applies even if the extractor raises).
+                self._stage2_fallback_extractions_this_poll += 1
+                # Finding #4: count the LLM attempt before the call (parity with the
+                # worker) so the emails_sent_to_llm diagnostic includes fallback runs.
+                self._diagnostics.stage2_llm_attempts_total += 1
+                try:
+                    result_fb = await self._extractor.async_extract(html, None)
+                except (OllamaTransientError, OllamaSchemaError) as fb_err:
+                    # Finding #2: route fallback failures through the shared failure
+                    # surface (the worker path's _record_stage2_failure equivalent) so a
+                    # sustained Ollama outage increments the consecutive-failure streak
+                    # and raises the persistent notification — instead of being swallowed
+                    # at DEBUG. Finding #450: only the FIRST fallback failure of a poll
+                    # escalates (bumps the streak / may notify); the rest are recorded
+                    # without inflating the shared streak ~10x per poll on a no-match
+                    # backlog.
+                    escalate = not self._stage2_fallback_failed_this_poll
+                    self._stage2_fallback_failed_this_poll = True
+                    self._surface_stage2_failure(
+                        meta=meta,
+                        message_id=f"{prefix}{msg_key}",
+                        normalized_tn="",
+                        err=fb_err,
+                        escalate=escalate,
+                    )
+                    # ollama-fallback-retry-loop: split the two error classes.
+                    # OllamaSchemaError is DETERMINISTIC — the same body yields the same
+                    # unparseable model output every poll, so without a terminal action
+                    # the message re-infers forever (observed 93x/15h on a USPS digest).
+                    # Count per-message schema failures; once the count reaches
+                    # STAGE2_MSG_QUARANTINE_THRESHOLD, mark the message seen (terminal —
+                    # mirrors the carrier-format-reject branch below) so the poll gate
+                    # stops re-fetching it. Below threshold it is left un-cached and
+                    # retried next poll (a rare few schema errors may be a model warm-up
+                    # blip). OllamaTransientError (network/5xx) is NEVER counted or marked
+                    # seen: a transient outage must keep retrying and must not permanently
+                    # skip a legitimate shipment email (findings #1/#594).
+                    if isinstance(
+                        fb_err, OllamaSchemaError
+                    ) and self._register_inline_schema_failure(msg_key):
+                        _LOGGER.warning(
+                            "Gmail message %s ('%s' from '%s'): quarantining after "
+                            "%d consecutive inline OllamaSchemaError failures — marking "
+                            "seen to stop the per-poll re-inference loop (session-scoped; "
+                            "cleared on restart)",
+                            msg_key,
+                            meta.get("subject", ""),
+                            meta.get("from", ""),
+                            STAGE2_MSG_QUARANTINE_THRESHOLD,
+                        )
+                        self._mark_message_seen(msg_key)
+                        self._emit_scan_event(
+                            message_id=f"{prefix}{msg_key}",
+                            meta=meta,
+                            outcome="stage2_no_data",
+                        )
+                    return  # do NOT cache (below threshold: retry next poll)
+                except Exception as fb_err:  # noqa: BLE001
+                    # Finding #505: an unexpected (non-Ollama) exception must NOT abort the
+                    # whole poll mid-iteration (which would skip every later message and
+                    # drop the per-poll save). Surface it like a Stage-2 failure and move
+                    # on; the message stays un-cached, so it is retried next poll. Finding
+                    # #450: escalate at most once per poll (shared latch).
+                    _LOGGER.error(
+                        "Gmail message %s: unexpected error during Ollama fallback "
+                        "extraction — skipping this message: %s",
+                        msg_key,
+                        fb_err,
+                        exc_info=True,
+                    )
+                    escalate = not self._stage2_fallback_failed_this_poll
+                    self._stage2_fallback_failed_this_poll = True
+                    self._surface_stage2_failure(
+                        meta=meta,
+                        message_id=f"{prefix}{msg_key}",
+                        normalized_tn="",
+                        err=fb_err,
+                        escalate=escalate,
+                    )
+                    return  # do NOT cache (retry next poll)
+
+                # Finding #4: record the successful extraction's latency (parity with the
+                # worker) so the LLM-call / parse-success-rate diagnostics stay accurate.
+                self._diagnostics.record_llm_call(
+                    result_fb.latency_ms,
+                    fence_retry=result_fb.passes_used == 2,
+                )
+
+            # Extract + validate the tracking number from the Ollama result.
+            # Phase 28 Plan 04 (R1/R2/R3): strict carrier-format gate via
+            # validate_carrier_format strips internal separators ([ -]) and
+            # uppercases before pattern-matching, then returns the canonical
+            # clean form used for dedup + enqueue + ShipmentData (D-03).
+            tn = (result_fb.locked.get("tracking_number") or "").strip()
+            fb_clean, fb_ok, fb_reason = validate_carrier_format(tn)
+            if not fb_ok:
+                # Hard reject: the fallback model returned a hallucinated or
+                # non-carrier string. Record the rejection (R3/D-06) and log at
+                # DEBUG only (D-07/T-28-09 — no INFO/WARNING leakage of TN values).
+                # This is a terminal decision (mirror the no-match branch below):
+                # mark seen so the gatekeeper does not re-run Ollama on this
+                # non-shipment email every poll.
+                self._diagnostics.record_carrier_format_rejection(
+                    fb_clean, fb_reason or "no_carrier_match"
+                )
+                _LOGGER.debug(
+                    "Gmail message %s: fallback carrier-format gate rejected '%s' "
+                    "(reason=%s) — cached as rejected",
+                    msg_key,
+                    fb_clean,
+                    fb_reason,
+                )
+                self._mark_message_seen(msg_key)
+                self._emit_scan_event(
+                    message_id=f"{prefix}{msg_key}",
+                    meta=meta,
+                    outcome="stage2_no_data",
+                )
+            elif self._hub.is_submitted(fb_clean):
+                # Finding #5: mirror the main shipment loop's dedup guard. An
+                # already-forwarded tracking number is terminal — mark seen and do
+                # not re-enqueue (the worker only checks the in-flight set, not
+                # the shared hub's dedup set, so a re-POST would burn a quota slot).
+                self._mark_message_seen(msg_key)
+                _LOGGER.debug(
+                    "Gmail message %s: fallback tracking %s already submitted — skipping",
+                    msg_key,
+                    fb_clean,
+                )
+            else:
+                # Gate pass, not-yet-forwarded: build ShipmentData using the gate
+                # clean canonical form (D-03 — separator-free, uppercased). Do NOT
+                # route through merge_llm_authoritative (Stage-1 is None here; Pattern 3).
+                # Do NOT mark seen — convergence re-fetch + dedup marks it once POSTed.
+                #
+                # Phase 35 Plan 04 (MRG-05, SC-1 Pitfall 2): gate order_name/
+                # order_summary through validate_grounding() directly — there is no
+                # Stage-1 ShipmentData here, so merge_llm_authoritative_with_grounding's
+                # wrapper does not apply (Pattern 3). Source text is always body-only
+                # prose (preprocess_html(html)) per SC-2 — never the raw html and never
+                # any sender/subject envelope string.
+                prose, _fb_links = preprocess_html(html)
+                raw_order_name = result_fb.locked.get("order_name") or ""
+                raw_order_summary = result_fb.locked.get("order_summary")
+                _on_val, on_ok, on_reason = validate_grounding(raw_order_name, prose)
+                _os_val, os_ok, os_reason = validate_grounding(raw_order_summary, prose)
+                gated_order_name = raw_order_name if on_ok else ""
+                gated_order_summary = raw_order_summary if os_ok else None
+                if not on_ok and raw_order_name:
+                    self._diagnostics.record_grounding_rejection(
+                        raw_order_name, on_reason or "ungrounded"
+                    )
+                    _LOGGER.debug(
+                        "Gmail message %s: inline fallback grounding gate rejected "
+                        "order_name '%s' (reason=%s)",
+                        msg_key,
+                        raw_order_name,
+                        on_reason,
+                    )
+                if not os_ok and raw_order_summary:
+                    self._diagnostics.record_grounding_rejection(
+                        raw_order_summary, os_reason or "ungrounded"
+                    )
+                    _LOGGER.debug(
+                        "Gmail message %s: inline fallback grounding gate rejected "
+                        "order_summary '%s' (reason=%s)",
+                        msg_key,
+                        raw_order_summary,
+                        os_reason,
+                    )
+                fb_shipment = ShipmentData(
+                    tracking_number=fb_clean,
+                    carrier_name=result_fb.locked.get("carrier_name") or "",
+                    order_name=gated_order_name,
+                    message_id=msg_key,
+                    email_date=email_date,
+                    custom_attributes=result_fb.custom,
+                    order_summary=gated_order_summary,
+                )
+                enqueued = self._enqueue_stage2(
+                    fb_clean,
+                    storage_key=msg_key,
+                    shipment=fb_shipment,
+                    html_body=html,
+                    message_id=f"{prefix}{msg_key}",
+                    meta=meta,
+                    # Finding #3: hand the already-extracted result to the worker so
+                    # it does NOT call Ollama a second time on the same body.
+                    prefetched_result=result_fb,
+                    raw_msg_id=msg_key,
+                )
+                if enqueued:
+                    # IN-07: fallback-found shipments are real matches — count them
+                    # in the matched/found diagnostics like the Stage-1 loop does
+                    # (post-dedup, pre-POST), so LLM-found parcels are visible in
+                    # emails_matched / tracking_numbers_found / last_poll_found.
+                    self._diagnostics.emails_matched_total += 1
+                    self._diagnostics.last_poll_emails_matched += 1
+                    self._diagnostics.tracking_numbers_found_total += 1
+                    self._diagnostics.last_poll_found.append(
+                        {
+                            "tracking_number": fb_clean,
+                            "carrier": fb_shipment.carrier_name,
+                            "order_name": fb_shipment.order_name,
+                            "message_id": msg_key,
+                            "candidates": candidate_tokens,
+                            **meta,
+                        }
+                    )
+                    # Round-4 fix #512: add to the in-memory in-flight gate so the
+                    # gatekeeper does NOT re-run Ollama on this message every poll
+                    # until the worker POSTs. The worker releases it on a defer; it
+                    # converges to a persisted seen ID via dedup once POSTed.
+                    self._mark_inflight(msg_key)
+                    _LOGGER.debug(
+                        "Gmail message %s: Ollama fallback found tracking %s — "
+                        "enqueued (re-fetch converges the seen-ID)",
+                        msg_key,
+                        fb_clean,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Gmail message %s: Stage-2 queue full — fallback tracking %s "
+                        "not enqueued; will retry next poll",
+                        msg_key,
+                        fb_clean,
+                    )
+            # Note: empty or non-carrier strings are handled by the `if not fb_ok:`
+            # branch above (reason="empty" or "no_carrier_match") — no separate
+            # soft-reject else-branch is needed.
+            return
+
+        # stage2 enabled but the extractor is transiently unavailable (stop/reload
+        # race): the fallback could not judge this message. Do NOT mark it seen —
+        # leave it re-fetchable so the gatekeeper runs once the extractor is restored
+        # (finding #523).
+        if self._diagnostics.stage2_enabled and not debug_mode:
+            _LOGGER.debug(
+                "Gmail message %s: stage2 enabled but extractor unavailable — "
+                "leaving un-cached for retry",
+                msg_key,
+            )
+            return
+
+        # stage2 disabled: no fallback will ever run for this message, so a Stage-1
+        # miss is a terminal no-match — mark seen. Finding #749: do NOT mark in
+        # debug_mode — that writes the PERSISTED seen cache during a dry-run, so an
+        # email scanned in debug (possibly a real shipment the regex missed) would be
+        # filtered out once debug is disabled, before the fallback could judge it.
+        if not debug_mode:
+            self._mark_message_seen(msg_key)
+        return
 
     async def _async_drain_pending_posts(self) -> None:
         """Drain pending posts from prior quota-blocked extraction cycles.
