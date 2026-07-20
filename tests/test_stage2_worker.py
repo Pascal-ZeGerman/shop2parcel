@@ -78,8 +78,13 @@ def mock_stage2_config_entry() -> MockConfigEntry:
 # ---------------------------------------------------------------------------
 
 
-async def test_worker_task_sentinel_is_none_before_start(hass, mock_stage2_config_entry):
-    """D-02: _stage2_worker_task and _extractor are both None immediately after construction."""
+async def test_extractor_sentinel_is_none_before_setup(hass, mock_stage2_config_entry):
+    """D-02: _extractor is None immediately after construction, before setup.
+
+    Phase 32 (D-03/D-04): the retired _stage2_worker_task sentinel check is gone
+    — the per-entry worker task no longer exists; only the per-account extractor
+    sentinel remains, populated later by async_setup_stage2_extractor.
+    """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -95,13 +100,13 @@ async def test_worker_task_sentinel_is_none_before_start(hass, mock_stage2_confi
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        # Sentinels are asserted at construction time ONLY — do NOT call async_start_stage2.
-        assert coord._stage2_worker_task is None
+        # Sentinel is asserted at construction time ONLY — do NOT call
+        # async_setup_stage2_extractor.
         assert coord._extractor is None
 
 
 async def test_extractor_constructed_from_options(hass, mock_stage2_config_entry):
-    """D-03: async_start_stage2 builds OllamaClient and OllamaExtractor from entry options."""
+    """D-03: async_setup_stage2_extractor builds OllamaClient and OllamaExtractor from entry options."""
     mock_stage2_config_entry.add_to_hass(hass)
     hass.config_entries.async_update_entry(
         mock_stage2_config_entry,
@@ -127,13 +132,12 @@ async def test_extractor_constructed_from_options(hass, mock_stage2_config_entry
         patch(
             "custom_components.shop2parcel.coordinator.OllamaExtractor"
         ) as mock_ollama_extractor_cls,
-        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", new_callable=AsyncMock),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         assert mock_ollama_client_cls.called
         assert mock_ollama_client_cls.call_args.kwargs["base_url"] == "http://localhost:11434"
@@ -172,13 +176,12 @@ async def test_extractor_uses_defaults_when_options_missing(hass, mock_stage2_co
         patch(
             "custom_components.shop2parcel.coordinator.OllamaExtractor"
         ) as mock_ollama_extractor_cls,
-        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", new_callable=AsyncMock),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         assert mock_ollama_client_cls.called
         assert mock_ollama_client_cls.call_args.kwargs["model"] == DEFAULT_OLLAMA_MODEL
@@ -219,13 +222,12 @@ async def test_extractor_skips_non_dict_custom_fields(hass, mock_stage2_config_e
         patch(
             "custom_components.shop2parcel.coordinator.OllamaExtractor"
         ) as mock_ollama_extractor_cls,
-        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", new_callable=AsyncMock),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         assert mock_ollama_extractor_cls.called
         assert mock_ollama_extractor_cls.call_args.kwargs["field_list"] == [
@@ -235,286 +237,14 @@ async def test_extractor_skips_non_dict_custom_fields(hass, mock_stage2_config_e
 
 
 # ---------------------------------------------------------------------------
-# Task 2: Lifecycle tests — worker spawn, cancel, no-leak (QUE-04, QUE-05, Pitfall 1)
+# Phase 32 (WORK-01/WORK-04): the per-entry worker spawn/cancel/no-leak/crash-
+# swallow/never-started lifecycle tests that used to live here are retired —
+# the per-entry queue/worker they exercised (async_start_stage2's worker-spawn
+# half, async_stop_stage2, _async_stage2_worker) no longer exists. Equivalent
+# coverage (worker spawn/dispatch, crash isolation, cancellation on shutdown)
+# now lives in tests/test_hub.py against the shared hub worker
+# (_async_hub_worker), which is the sole Stage-2 worker for the whole instance.
 # ---------------------------------------------------------------------------
-
-
-async def test_worker_spawned_in_async_start_stage2(hass, mock_stage2_config_entry):
-    """QUE-04 + SC-1: worker task is alive immediately after async_start_stage2, before first poll."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(
-            Shop2ParcelCoordinator,
-            "_async_process_stage2_job",
-            new_callable=AsyncMock,
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-
-        # Yield control so worker reaches queue.get() blocking point.
-        await asyncio.sleep(0)
-
-        assert coord._stage2_worker_task is not None
-        assert isinstance(coord._stage2_worker_task, asyncio.Task)
-        assert coord._stage2_worker_task.get_name() == "shop2parcel_stage2_worker"
-        # SC-1: worker is RUNNING before any first_refresh fires (blocking at queue.get()).
-        assert not coord._stage2_worker_task.done()
-
-        # Teardown: cancel the running worker.
-        await coord.async_stop_stage2()
-
-
-async def test_worker_cancelled_on_async_stop_stage2(hass, mock_stage2_config_entry):
-    """QUE-05: async_stop_stage2 cancels worker; task.cancelled() is True afterward."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(
-            Shop2ParcelCoordinator,
-            "_async_process_stage2_job",
-            new_callable=AsyncMock,
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-
-        # Let worker reach blocking queue.get() point.
-        await asyncio.sleep(0)
-        task = coord._stage2_worker_task
-        assert task is not None
-
-        await coord.async_stop_stage2()
-
-        assert coord._stage2_worker_task is None
-        assert task.done() is True
-        assert task.cancelled() is True
-
-
-async def test_async_stop_stage2_bounded_5_seconds(hass, mock_stage2_config_entry):
-    """QUE-05 timeout: async_stop_stage2 completes within the 5-second backstop window.
-
-    With explicit task.cancel() before wait_for (WR-02 fix), an idle or shielded worker
-    receives CancelledError and exits quickly. The 5-second wait_for is a backstop for
-    truly stuck workers; the normal path completes well under 5 seconds.
-    """
-    mock_stage2_config_entry.add_to_hass(hass)
-
-    _inner_task: asyncio.Task | None = None
-
-    async def _hang(self) -> None:  # noqa: RUF029
-        """Simulates a worker that ignores CancelledError by shielding its internal wait."""
-        nonlocal _inner_task
-        _inner_task = asyncio.get_running_loop().create_task(asyncio.Event().wait())
-        try:
-            await asyncio.shield(_inner_task)
-        except asyncio.CancelledError:
-            raise
-
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", _hang),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-        await asyncio.sleep(0)  # Let worker start.
-
-        loop = asyncio.get_running_loop()
-        start = loop.time()
-        await coord.async_stop_stage2()
-        elapsed = loop.time() - start
-
-        # With task.cancel() before wait_for, the worker receives CancelledError promptly.
-        # The 5-second backstop remains in place for pathological cases but normal shutdown
-        # completes well under 5 seconds (WR-02 fix: no longer waits the full timeout).
-        assert elapsed <= 6.0, (
-            f"async_stop_stage2 must complete within backstop window, got {elapsed:.2f}s"
-        )
-        assert coord._stage2_worker_task is None
-        # Cancel the inner shielded task so Python 3.14 doesn't flag it as a lingering task.
-        if _inner_task is not None and not _inner_task.done():
-            _inner_task.cancel()
-            try:
-                await _inner_task
-            except asyncio.CancelledError:
-                pass
-
-
-async def test_no_worker_leak_after_3_reloads(hass, mock_stage2_config_entry):
-    """Pitfall 1: No zombie worker tasks remain after 3 start/stop (reload) cycles."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", new_callable=AsyncMock),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-
-        for _ in range(3):
-            await coord.async_start_stage2()
-            await asyncio.sleep(0)  # Let AsyncMock worker finish in one tick.
-            await coord.async_stop_stage2()
-
-        # No tasks with the worker name should remain alive.
-        leaked = [t for t in asyncio.all_tasks() if t.get_name() == "shop2parcel_stage2_worker"]
-        assert len(leaked) == 0, f"Leaked worker tasks: {leaked}"
-        assert coord._stage2_worker_task is None
-
-
-async def test_async_stop_stage2_swallows_worker_crash_exception(
-    hass, mock_stage2_config_entry, caplog
-):
-    """IN-06: a worker task that died with a non-CancelledError exception (e.g.
-    AssertionError) re-raises when awaited during shutdown — async_stop_stage2
-    must swallow it (QUE-05: on-unload never raises) and finish the teardown.
-
-    The done-callback registered in async_start_stage2 must retrieve and log the
-    crash at completion time, so asyncio never reports the exception as
-    unretrieved at task GC (the CI-only teardown error this pins)."""
-    mock_stage2_config_entry.add_to_hass(hass)
-
-    async def _crashing_worker():
-        raise AssertionError("worker invariant blew up")
-
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(
-            Shop2ParcelCoordinator,
-            "_async_stage2_worker",
-            side_effect=_crashing_worker,
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-
-        # Keep a handle: async_stop_stage2 nulls coord._stage2_worker_task.
-        worker_task = coord._stage2_worker_task
-        # Give the crashing worker a tick to fail; retrieve the exception so the
-        # event loop does not log an unretrieved-exception warning.
-        for _ in range(3):
-            await asyncio.sleep(0)
-        assert worker_task is not None and worker_task.done()
-
-        # The done-callback must have retrieved AND logged the crash already —
-        # this is what keeps asyncio from flagging the exception as unretrieved.
-        assert "Stage-2 worker crashed" in caplog.text
-        assert "worker invariant blew up" in caplog.text
-
-        # Must NOT raise despite the dead task re-raising AssertionError on await.
-        await coord.async_stop_stage2()
-        assert coord._stage2_worker_task is None
-        assert coord._stage2_queue is None
-
-
-async def test_worker_exits_cleanly_without_queue(hass, mock_stage2_config_entry, caplog):
-    """IN-06: the worker started without a queue/config-entry exits with an ERROR
-    log instead of crashing on a bare assert."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        # No async_start_stage2 → _stage2_queue is None.
-        with caplog.at_level(logging.ERROR):
-            await coord._async_stage2_worker()
-        assert "without config entry or queue" in caplog.text
-
-
-async def test_async_stop_stage2_safe_when_worker_never_started(hass, mock_stage2_config_entry):
-    """Pitfall 6: async_stop_stage2 is safe even if async_start_stage2 was never called."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        # Do NOT call async_start_stage2 — worker sentinel must protect against this.
-        await coord.async_stop_stage2()
-        assert coord._stage2_worker_task is None
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +255,8 @@ async def test_async_stop_stage2_safe_when_worker_never_started(hass, mock_stage
 
 async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
     """MRG-01: _extractor.async_extract is awaited once for every Stage2Job processed."""
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -544,14 +276,20 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
 
-        # Wire extractor instance with a callable async_extract.
+        # Wire extractor instance with a callable async_extract. Phase 32: this test
+        # now drives _async_process_stage2_job directly (no worker wrapping it in a
+        # try/except), so the mocked result must be a real Stage2Result — a bare
+        # MagicMock previously "worked" only because the old worker's generic
+        # except swallowed the downstream TypeError before it could fail the test.
         mock_extractor_instance = mock_extractor_cls.return_value
-        mock_extractor_instance.async_extract = AsyncMock(return_value=MagicMock())
+        mock_extractor_instance.async_extract = AsyncMock(
+            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
+        )
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = _make_shipment()
         job = Stage2Job(
@@ -563,7 +301,7 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        coord._stage2_queue.put_nowait(job)
+        await coord._async_process_stage2_job(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
@@ -603,7 +341,7 @@ async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry)
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = _make_shipment()
         job = Stage2Job(
@@ -615,7 +353,7 @@ async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry)
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        coord._stage2_queue.put_nowait(job)
+        await coord._async_process_stage2_job(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
@@ -653,7 +391,7 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         pre = coord.data  # Capture reference before job is processed.
 
@@ -667,7 +405,7 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        coord._stage2_queue.put_nowait(job)
+        await coord._async_process_stage2_job(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
@@ -723,7 +461,7 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = _make_shipment()
         job = Stage2Job(
@@ -735,7 +473,7 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        coord._stage2_queue.put_nowait(job)
+        await coord._async_process_stage2_job(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
@@ -743,116 +481,15 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
         assert coord._hub.is_submitted("1Z999")
 
 
-async def test_enqueued_key_discarded_on_ollama_failure_without_dedup(
-    hass, mock_stage2_config_entry
-):
-    """Pitfall 5 (worker-level failure): key discarded without dedup write on RuntimeError."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(
-            Shop2ParcelCoordinator,
-            "_async_process_stage2_job",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("simulated crash"),
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-
-        coord._stage2_enqueued_keys = {"1Z999"}
-        shipment = _make_shipment()
-        job = Stage2Job(
-            storage_key="1Z999",
-            normalized_tn="1Z999",
-            shipment=shipment,
-            html_body="<html/>",
-            message_id="test-msg-id",
-            meta={"subject": "test", "from": "test@example.com"},
-            entry_id=coord.config_entry.entry_id,
-        )
-        coord._stage2_queue.put_nowait(job)
-
-        await asyncio.sleep(0)
-        await hass.async_block_till_done()
-
-        # Worker-level except Exception block discards key without dedup write.
-        assert "1Z999" not in coord._stage2_enqueued_keys
-        assert not coord._hub.is_submitted("1Z999")
-
-
-async def test_worker_does_not_swallow_cancelled_error_during_process_job(
-    hass, mock_stage2_config_entry
-):
-    """Test 3.6: CancelledError propagates from _async_process_stage2_job through worker."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(
-            Shop2ParcelCoordinator,
-            "_async_process_stage2_job",
-            new_callable=AsyncMock,
-            side_effect=asyncio.CancelledError(),
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-
-        shipment = _make_shipment()
-        job = Stage2Job(
-            storage_key="msg-17a3f4c8b",
-            normalized_tn="1Z999",
-            shipment=shipment,
-            html_body="<html/>",
-            message_id="test-msg-id",
-            meta={"subject": "test", "from": "test@example.com"},
-            entry_id=coord.config_entry.entry_id,
-        )
-        # Pre-seed _stage2_enqueued_keys as _enqueue_stage2 would have done.
-        # Without this, the discard assertion is trivially true even when discard is a no-op.
-        coord._stage2_enqueued_keys.add(job.normalized_tn)
-        coord._stage2_queue.put_nowait(job)
-
-        # Let worker receive the job and the CancelledError propagate.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
-        # Worker should have self-terminated due to CancelledError propagation.
-        task = coord._stage2_worker_task
-        assert task is not None
-        # Give the task a moment to be done.
-        assert task.done() or task.cancelled()
-
-        # Key must be discarded so next poll can re-enqueue this tracking number.
-        assert "1Z999" not in coord._stage2_enqueued_keys
+# ---------------------------------------------------------------------------
+# Phase 32 (WORK-01/WORK-05): test_enqueued_key_discarded_on_ollama_failure_
+# without_dedup and test_worker_does_not_swallow_cancelled_error_during_
+# process_job are retired — both drove the retired per-entry
+# _stage2_enqueued_keys/_stage2_worker_task mechanics that no longer exist on
+# the coordinator. Equivalent coverage (crash isolation via a generic
+# Exception, CancelledError propagation + worker termination) now lives in
+# tests/test_hub.py against the shared hub worker (_async_hub_worker).
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -903,7 +540,7 @@ async def test_merge_stage1_none_gate_failing_stage2_no_post(hass, mock_stage2_c
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         # Stage-1 tracking_number is None — MRG-04 strict gate fires on the promotion path.
         shipment = ShipmentData(
@@ -968,7 +605,7 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = ShipmentData(
             tracking_number=stage1_tn,
@@ -1040,7 +677,7 @@ async def test_two_field_conflict_emits_single_event(hass, mock_stage2_config_en
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = ShipmentData(
             tracking_number="ABC",
@@ -1106,7 +743,7 @@ async def test_ollama_transient_no_post_no_dedup(hass, mock_stage2_config_entry)
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = _make_shipment()
         job = Stage2Job(
@@ -1153,7 +790,7 @@ async def test_poison_message_quarantined_after_threshold(hass, mock_stage2_conf
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         raw_id = "poison-msg-1"
         job = Stage2Job(
@@ -1208,7 +845,7 @@ async def test_job_without_raw_msg_id_quarantined_via_tn_skip_set(hass, mock_sta
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         tn = "1Z999AA10123456784"
         job = Stage2Job(
@@ -1283,7 +920,7 @@ async def test_stage2_msg_failure_streak_cleared_on_successful_extraction(
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         tn = "1Z999AA10123456784"
         job = Stage2Job(
@@ -1352,7 +989,7 @@ async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = _make_shipment()
         job = Stage2Job(
@@ -1498,7 +1135,7 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         # Drive 3 jobs with distinct storage_keys.
         for i in range(1, 4):
@@ -1518,8 +1155,10 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
         assert mock_parcel_cls.return_value.async_add_delivery.call_count == 2
         # 3rd job NOT in dedup store — retryable next poll.
         assert not coord._hub.is_submitted("TN000003")
-        # 3rd job NOT in enqueued keys (was discarded by cap gate).
-        assert "TN000003" not in coord._stage2_enqueued_keys
+        # Phase 32 cutover: the hub-owned in-flight/dedup key release is exclusively
+        # the hub worker's finally responsibility (Plan 32-03) — a direct call to
+        # _async_process_stage2_job (as this test drives) never touches it, so
+        # there is no coordinator-side "enqueued keys" assertion left to make here.
 
 
 async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
@@ -1563,7 +1202,7 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         for i in range(1, 4):
             shipment = _make_shipment(message_id=f"msg{i}")
@@ -1619,7 +1258,7 @@ async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entr
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         # Drive 2 successful POSTs.
         for i in range(1, 3):
@@ -1715,76 +1354,14 @@ async def test_coordinator_init_sets_failure_counter_to_zero(hass, mock_stage2_c
         assert coord._stage2_last_notify_ts is None
 
 
-async def test_async_stop_stage2_resets_failure_counter_to_zero(hass, mock_stage2_config_entry):
-    """Phase 21 SPEC Req #5: async_stop_stage2 resets _stage2_consecutive_failures to 0
-    and _stage2_last_notify_ts to None, even if they were non-zero/non-None before the call.
-    """
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", new_callable=AsyncMock),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-
-        # Manually set non-default state to simulate a prior streak.
-        coord._stage2_consecutive_failures = 5
-        coord._stage2_last_notify_ts = 1700000000.0
-
-        await coord.async_stop_stage2()
-
-        assert coord._stage2_consecutive_failures == 0
-        assert coord._stage2_last_notify_ts is None
-
-
-async def test_async_stop_stage2_resets_even_when_worker_is_none(hass, mock_stage2_config_entry):
-    """Phase 21 SPEC Req #5: async_stop_stage2 resets failure counter UNCONDITIONALLY.
-
-    The Phase 18 CR-01 sentinel means async_stop_stage2 has an early-return path
-    when _stage2_queue is None (worker never started). The reset must fire even on
-    this path — this test guards against a naive 'append at end' placement that would
-    be skipped by the early return.
-    """
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        # Do NOT call async_start_stage2 — _stage2_queue remains None (CR-01 sentinel path).
-        assert coord._stage2_queue is None
-        assert coord._stage2_worker_task is None
-
-        # Set non-default failure state.
-        coord._stage2_consecutive_failures = 3
-
-        await coord.async_stop_stage2()
-
-        # Reset must have fired despite the early-return path.
-        assert coord._stage2_consecutive_failures == 0
-        assert coord._stage2_last_notify_ts is None
+# ---------------------------------------------------------------------------
+# Phase 32 (D-04): test_async_stop_stage2_resets_failure_counter_to_zero and
+# test_async_stop_stage2_resets_even_when_worker_is_none are retired —
+# async_stop_stage2 no longer exists. Per D-04, the failure-streak reset it
+# used to perform is subsumed by fresh-coordinator construction on reload
+# (self._stage2_consecutive_failures defaults to 0 in __init__); no
+# replacement reset method exists to test.
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -1857,8 +1434,6 @@ async def test_fail_01_ollama_transient_error_logs_error_with_4_fields(
     job = _make_job(subject="Your order has shipped", sender="noreply@shopify.com")
     err = OllamaTransientError("connection refused")
 
-    import logging
-
     with caplog.at_level(logging.ERROR):
         coord._record_stage2_failure(job, err)
 
@@ -1879,8 +1454,6 @@ async def test_fail_01_ollama_schema_error_logs_error_with_4_fields(caplog, coor
     job = _make_job(subject="Shipment update", sender="carrier@example.com")
     err = OllamaSchemaError("bad json")
 
-    import logging
-
     with caplog.at_level(logging.ERROR):
         coord._record_stage2_failure(job, err)
 
@@ -1893,52 +1466,15 @@ async def test_fail_01_ollama_schema_error_logs_error_with_4_fields(caplog, coor
     assert "carrier@example.com" in msg
 
 
-async def test_fail_01_worker_outer_generic_exception_logs_error_with_4_fields(
-    hass, mock_stage2_config_entry, caplog
-):
-    """FAIL-01: Generic RuntimeError from the worker outer-except path also produces
-    an ERROR log with the 4 required fields (worker-outer wiring, not just Ollama except).
-    """
-    import logging
-
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(
-            Shop2ParcelCoordinator,
-            "_async_process_stage2_job",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("unexpected"),
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-
-        job = _make_job()
-        coord._stage2_queue.put_nowait(job)
-
-        with caplog.at_level(logging.ERROR):
-            await asyncio.sleep(0)
-            await hass.async_block_till_done()
-
-        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert len(error_records) >= 1
-        combined = " ".join(r.getMessage() for r in error_records)
-        assert "RuntimeError" in combined
-        assert "unexpected" in combined
+# ---------------------------------------------------------------------------
+# Phase 32 (D-09): test_fail_01_worker_outer_generic_exception_logs_error_
+# with_4_fields is retired — it patched over _async_process_stage2_job itself
+# to prove the retired per-entry worker's outer except-Exception branch called
+# _record_stage2_failure. That wiring now lives in the shared hub worker
+# (_async_hub_worker); equivalent coverage (a generic Exception from
+# _async_process_stage2_job routes through coord._record_stage2_failure and
+# the worker continues) is in tests/test_hub.py (Plan 32-03).
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -2702,8 +2238,14 @@ def test_record_grounding_rejection_isolated_counter():
     assert stats.carrier_format_rejected_total == 0
 
 
-async def test_stage2_queue_depth_returns_zero_when_queue_is_none(hass, mock_stage2_config_entry):
-    """DIAG-02: stage2_queue_depth returns 0 when _stage2_queue is None (stage2 not started)."""
+async def test_stage2_queue_depth_returns_zero_when_nothing_inflight(
+    hass, mock_stage2_config_entry
+):
+    """DIAG-02: stage2_queue_depth returns 0 when this account has nothing in-flight.
+
+    Phase 32 cutover: stage2_queue_depth is hub-derived (hub.inflight_count) —
+    the retired per-entry _stage2_queue no longer exists to assert None on.
+    """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -2719,7 +2261,6 @@ async def test_stage2_queue_depth_returns_zero_when_queue_is_none(hass, mock_sta
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        assert coord._stage2_queue is None
         assert coord.stage2_queue_depth == 0
 
 
@@ -2764,8 +2305,6 @@ async def test_diag_02_stage2_enqueued_total_increments_on_successful_put(
     hass, mock_stage2_config_entry
 ):
     """DIAG-02: stage2_enqueued_total increments on each successful put_nowait."""
-    import asyncio
-
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -2781,7 +2320,9 @@ async def test_diag_02_stage2_enqueued_total_increments_on_successful_put(
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        coord._stage2_queue = asyncio.Queue(maxsize=32)
+        # Phase 32 cutover: no per-entry _stage2_queue to construct — the
+        # conftest autouse fixture already attaches an I/O-free test hub, so
+        # _enqueue_stage2's hub.enqueue() delegation has somewhere to land.
         shipment = _make_shipment()
         # Enqueue 2 distinct tracking numbers.
         coord._enqueue_stage2("TN001", "key1", shipment, "<html/>", message_id="m1", meta={})
@@ -2793,8 +2334,6 @@ async def test_diag_02_stage2_enqueued_total_does_not_increment_on_dedup_skip(
     hass, mock_stage2_config_entry
 ):
     """DIAG-02: stage2_enqueued_total does NOT increment on QUE-06 dedup short-circuit."""
-    import asyncio
-
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -2810,7 +2349,8 @@ async def test_diag_02_stage2_enqueued_total_does_not_increment_on_dedup_skip(
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        coord._stage2_queue = asyncio.Queue(maxsize=32)
+        # Phase 32 cutover: no per-entry _stage2_queue to construct — the
+        # conftest autouse fixture already attaches an I/O-free test hub.
         shipment = _make_shipment()
         # First enqueue succeeds.
         coord._enqueue_stage2("TN001", "key1", shipment, "<html/>", message_id="m1", meta={})
@@ -3502,7 +3042,6 @@ async def test_debug_mode_extractor_runs_no_post_no_store_write(hass, mock_stage
     testing exercises the real extraction path.
     RED until plan 03 adds the debug-mode early-return after extraction.
     """
-    import logging
 
     from custom_components.shop2parcel.const import CONF_DEBUG_MODE
     from custom_components.shop2parcel.extractors.types import Stage2Result
@@ -3574,7 +3113,6 @@ async def test_quota_skip_warning_throttled_after_first(hass, mock_stage2_config
     flag is set to True after the first skip.
     RED until plan 03 adds the _stage2_quota_warned_this_poll throttle flag.
     """
-    import logging
     import time as stdlib_time
 
     from custom_components.shop2parcel.extractors.types import Stage2Result
@@ -3789,7 +3327,7 @@ async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_st
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         job = Stage2Job(
             storage_key="none_tn_key",
@@ -3800,7 +3338,7 @@ async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_st
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        coord._stage2_queue.put_nowait(job)
+        await coord._async_process_stage2_job(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
@@ -3836,7 +3374,7 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         job = Stage2Job(
             storage_key="none_tn_key2",
@@ -3847,7 +3385,7 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        coord._stage2_queue.put_nowait(job)
+        await coord._async_process_stage2_job(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
@@ -3896,7 +3434,7 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         normalized_tn = "1Z999AA10123456784"
         job = Stage2Job(
@@ -3908,7 +3446,7 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        coord._stage2_queue.put_nowait(job)
+        await coord._async_process_stage2_job(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
@@ -3951,7 +3489,7 @@ async def test_non_none_tracking_number_still_posts(hass, mock_stage2_config_ent
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = _make_shipment()
         job = Stage2Job(
@@ -3963,7 +3501,7 @@ async def test_non_none_tracking_number_still_posts(hass, mock_stage2_config_ent
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        coord._stage2_queue.put_nowait(job)
+        await coord._async_process_stage2_job(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
@@ -4019,7 +3557,7 @@ async def test_worker_never_touches_seen_message_ids(hass, mock_stage2_config_en
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         def _make_job(tn: str) -> Stage2Job:
             return Stage2Job(
@@ -4050,8 +3588,6 @@ async def test_worker_never_touches_seen_message_ids(hass, mock_stage2_config_en
         await coord._async_process_stage2_job(_make_job("1Z333"))
         assert coord._seen_message_ids == {"seed": None}
 
-        await coord.async_stop_stage2()
-
 
 async def test_prefetched_result_skips_reextraction(hass, mock_stage2_config_entry):
     """Finding #3: a job carrying a prefetched result must NOT re-run the extractor.
@@ -4079,7 +3615,7 @@ async def test_prefetched_result_skips_reextraction(hass, mock_stage2_config_ent
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         prefetched = Stage2Result(
             locked={
@@ -4108,8 +3644,6 @@ async def test_prefetched_result_skips_reextraction(hass, mock_stage2_config_ent
         # And the shipment is still POSTed.
         mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
 
-        await coord.async_stop_stage2()
-
 
 async def test_cap_skip_caches_prefetched_result_for_gatekeeper(hass, mock_stage2_config_entry):
     """IN-07: when the worker cap-skips a job carrying a prefetched fallback result,
@@ -4137,7 +3671,7 @@ async def test_cap_skip_caches_prefetched_result_for_gatekeeper(hass, mock_stage
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         prefetched = Stage2Result(
             locked={
@@ -4170,8 +3704,6 @@ async def test_cap_skip_caches_prefetched_result_for_gatekeeper(hass, mock_stage
         mock_extractor_cls.return_value.async_extract.assert_not_called()
         assert coord._fallback_prefetch_cache.get("msg_capped") is prefetched
 
-        await coord.async_stop_stage2()
-
 
 async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stage2_config_entry):
     """Finding #501 (iter 4): the worker must not POST a tracking number that is already
@@ -4197,7 +3729,7 @@ async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stag
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         # tn already forwarded (e.g. by the pending-posts drain).
         coord._hub.check_and_mark("1Z999AA10123456784")
@@ -4220,8 +3752,6 @@ async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stag
         mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
         mock_extractor_cls.return_value.async_extract.assert_not_called()
 
-        await coord.async_stop_stage2()
-
 
 async def test_enqueue_returns_false_on_inflight_skip(hass, mock_stage2_config_entry):
     """Finding #674: _enqueue_stage2 must return False when the tracking number is already
@@ -4237,14 +3767,13 @@ async def test_enqueue_returns_false_on_inflight_skip(hass, mock_stage2_config_e
         patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
         patch("custom_components.shop2parcel.coordinator.OllamaClient"),
         patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch.object(Shop2ParcelCoordinator, "_async_stage2_worker", new_callable=AsyncMock),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         # Fresh tracking number → a new job is created → True.
         assert (
@@ -4408,7 +3937,6 @@ async def test_worker_posts_clean_canonical_form(hass, mock_stage2_config_entry)
             entry_id=coord.config_entry.entry_id,
             prefetched_result=MagicMock(),  # skip Ollama re-extract path
         )
-        coord._stage2_enqueued_keys.add(expected_clean)
 
         await coord._async_process_stage2_job(job)
 
@@ -4467,7 +3995,7 @@ async def test_description_uses_order_summary_when_present(hass, mock_stage2_con
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = ShipmentData(
             tracking_number="1Z999AA10123456784",
@@ -4540,7 +4068,7 @@ async def test_description_falls_back_to_order_name_when_no_summary(hass, mock_s
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = ShipmentData(
             tracking_number="1Z999AA10123456784",
@@ -4660,7 +4188,7 @@ async def test_worker_already_added_publishes_and_consumes_no_cap_slot(
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         job = Stage2Job(
             storage_key="already_key",
@@ -4681,11 +4209,12 @@ async def test_worker_already_added_publishes_and_consumes_no_cap_slot(
         assert coord._hub._stage2_posts_this_poll == 0, (
             "AlreadyAdded must not consume a MAX_STAGE2_POSTS_PER_POLL slot"
         )
-        # Existing semantics preserved: dedup written, key discarded.
+        # Existing semantics preserved: dedup written.
         assert coord._hub.is_submitted(tn)
-        assert tn not in coord._stage2_enqueued_keys
-
-        await coord.async_stop_stage2()
+        # Phase 32 cutover: the hub-owned in-flight/dedup key release is exclusively
+        # the hub worker's finally responsibility — a direct call to
+        # _async_process_stage2_job never touches it, so there is no
+        # coordinator-side "enqueued keys" assertion left to make here.
 
 
 async def test_worker_auth_failure_not_counted_as_ollama_failure(hass, mock_stage2_config_entry):
@@ -4693,6 +4222,7 @@ async def test_worker_auth_failure_not_counted_as_ollama_failure(hass, mock_stag
     Ollama consecutive-failure streak nor fire the 'check Ollama' notification —
     it is handled distinctly (log + key discard) per the D-05 contract."""
     from homeassistant.components import persistent_notification
+    from homeassistant.exceptions import ConfigEntryAuthFailed
 
     from custom_components.shop2parcel.api.exceptions import ParcelAppAuthError
     from custom_components.shop2parcel.extractors.types import Stage2Result
@@ -4724,7 +4254,7 @@ async def test_worker_auth_failure_not_counted_as_ollama_failure(hass, mock_stag
 
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         job = Stage2Job(
             storage_key=tn,
@@ -4736,12 +4266,15 @@ async def test_worker_auth_failure_not_counted_as_ollama_failure(hass, mock_stag
             entry_id=coord.config_entry.entry_id,
         )
         # Three auth failures — enough to trip the old (buggy) Ollama-streak
-        # notification threshold if they were miscounted.
+        # notification threshold if they were miscounted. _async_process_stage2_job
+        # raises ConfigEntryAuthFailed on a parcelapp auth error (coordinator.py);
+        # Phase 32: the shared hub worker is the one that catches this and logs it
+        # (D-09) — a direct call here must catch it itself to keep looping.
         for _ in range(3):
-            coord._stage2_queue.put_nowait(job)
+            with pytest.raises(ConfigEntryAuthFailed):
+                await coord._async_process_stage2_job(job)
             await asyncio.sleep(0)
             await hass.async_block_till_done()
-            coord._stage2_enqueued_keys.discard(tn)
 
         assert coord._stage2_consecutive_failures == 0, (
             "parcelapp auth errors must not inflate the Ollama failure streak (D-05)"
@@ -4749,11 +4282,11 @@ async def test_worker_auth_failure_not_counted_as_ollama_failure(hass, mock_stag
         assert mock_create.call_count == 0, (
             "the 'Stage-2 Failing / check Ollama' notification must not fire for auth errors"
         )
-        assert tn not in coord._stage2_enqueued_keys
-        # Worker must survive the auth error and keep running.
-        assert not coord._stage2_worker_task.done()
-
-        await coord.async_stop_stage2()
+        # Phase 32 cutover: the hub-owned in-flight/dedup key release and the
+        # per-entry worker's survival are both retired concerns for a direct
+        # _async_process_stage2_job call — the shared hub worker's crash
+        # isolation (equivalent "auth error doesn't stop the worker" guarantee)
+        # is covered by tests/test_hub.py instead.
 
 
 async def test_imap_poll_drains_pending_posts_without_new_jobs(hass, mock_imap_config_entry):

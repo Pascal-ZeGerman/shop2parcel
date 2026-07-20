@@ -111,96 +111,27 @@ def test_stage2job_is_frozen():
 
 
 # ---------------------------------------------------------------------------
-# Test 2: queue maxsize matches config value (QUE-01)
+# Phase 32 (D-03, WORK-03): test_queue_maxsize_matches_config and
+# test_queue_maxsize_clamped are retired — both asserted on the retired
+# per-entry _stage2_queue.maxsize, sized from the now-vestigial
+# CONF_QUEUE_MAXLEN option (const.py). async_setup_stage2_extractor no longer
+# constructs any queue; the shared hub queue is sized by the fixed
+# HUB_STAGE2_QUEUE_MAXLEN constant instead (test_hub.py coverage).
 # ---------------------------------------------------------------------------
 
 
-async def test_queue_maxsize_matches_config(hass, mock_stage2_config_entry):
-    """After async_start_stage2, _stage2_queue.maxsize equals the configured queue_maxlen."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    # Override to 64 to distinguish from the default.
-    hass.config_entries.async_update_entry(
-        mock_stage2_config_entry,
-        options={CONF_OLLAMA_URL: "http://localhost:11434", CONF_QUEUE_MAXLEN: 64},
-    )
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-        assert coord._stage2_queue.maxsize == 64
-        assert coord._stage2_enqueued_keys == set()
+async def test_setup_stage2_extractor_survives_corrupt_custom_fields(
+    hass, mock_stage2_config_entry, caplog
+):
+    """IN-05 (coordinators): corrupt custom_fields options must not abort
+    async_setup_stage2_extractor (entry setup) — malformed entries are skipped
+    with a WARNING, valid entries survive.
 
-
-# ---------------------------------------------------------------------------
-# Test 3: maxsize clamped to [1, 256] for out-of-range values (QUE-01 constraint)
-# ---------------------------------------------------------------------------
-
-
-async def test_queue_maxsize_clamped(hass, mock_stage2_config_entry):
-    """async_start_stage2 clamps queue_maxlen to [1, 256] regardless of options value."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        # Case 1: 0 → clamped to 1
-        hass.config_entries.async_update_entry(
-            mock_stage2_config_entry,
-            options={CONF_OLLAMA_URL: "http://localhost:11434", CONF_QUEUE_MAXLEN: 0},
-        )
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-        assert coord._stage2_queue.maxsize == 1
-
-        # Case 2: 9999 → clamped to 256
-        hass.config_entries.async_update_entry(
-            mock_stage2_config_entry,
-            options={CONF_OLLAMA_URL: "http://localhost:11434", CONF_QUEUE_MAXLEN: 9999},
-        )
-        coord2 = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord2._async_load_store()
-        await coord2.async_start_stage2()
-        assert coord2._stage2_queue.maxsize == 256
-
-        # Case 3: default (32) stays 32
-        hass.config_entries.async_update_entry(
-            mock_stage2_config_entry,
-            options={
-                CONF_OLLAMA_URL: "http://localhost:11434",
-                CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
-            },
-        )
-        coord3 = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord3._async_load_store()
-        await coord3.async_start_stage2()
-        assert coord3._stage2_queue.maxsize == DEFAULT_QUEUE_MAXLEN
-
-
-async def test_start_stage2_survives_corrupt_options(hass, mock_stage2_config_entry, caplog):
-    """IN-05 (coordinators): corrupt queue_maxlen / custom_fields options must not
-    abort async_start_stage2 (entry setup) — default gracefully with a WARNING."""
+    Phase 32 cutover: the CONF_QUEUE_MAXLEN corrupt-value/clamp scenario this
+    test used to also cover is retired along with the per-entry queue
+    construction it guarded (D-03) — only the extractor-build half's IN-05
+    resilience survives to test here.
+    """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -219,7 +150,6 @@ async def test_start_stage2_survives_corrupt_options(hass, mock_stage2_config_en
             mock_stage2_config_entry,
             options={
                 CONF_OLLAMA_URL: "http://localhost:11434",
-                CONF_QUEUE_MAXLEN: "not-a-number",
                 "custom_fields": [
                     {"description": "missing name key"},
                     "not-a-dict",
@@ -230,88 +160,24 @@ async def test_start_stage2_survives_corrupt_options(hass, mock_stage2_config_en
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
         with caplog.at_level(logging.WARNING):
-            await coord.async_start_stage2()
+            await coord.async_setup_stage2_extractor()
 
-        # Queue constructed with the default maxlen despite the corrupt option.
-        assert coord._stage2_queue is not None
-        assert coord._stage2_queue.maxsize == DEFAULT_QUEUE_MAXLEN
         # Extractor constructed; the valid custom field survived, junk was skipped.
         assert coord._extractor is not None
         field_names = [name for name, _desc in coord._extractor._fields]
         assert "valid_field" in field_names
-        assert "queue_maxlen option is not a valid integer" in caplog.text
         assert "malformed custom field entry" in caplog.text
 
-        await coord.async_stop_stage2()
-
 
 # ---------------------------------------------------------------------------
-# Test 4: async_stop_stage2 clears all state (QUE-01 lifecycle)
+# Phase 32 (D-04): test_stop_stage2_clears_state is retired — async_stop_stage2
+# no longer exists, and the per-entry _stage2_queue/_stage2_enqueued_keys it
+# used to clear are gone. The tail behavior it also proved ("_enqueue_stage2
+# still works via the hub, independent of any per-entry lifecycle") no longer
+# needs a "stop" precondition to demonstrate — it is simply how _enqueue_stage2
+# always works now (covered by test_in_flight_dedup_prevents_double_enqueue
+# and test_drop_newest_backpressure below).
 # ---------------------------------------------------------------------------
-
-
-async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
-    """After async_stop_stage2, queue is empty and _stage2_enqueued_keys is empty."""
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        await coord._async_load_store()
-        await coord.async_start_stage2()
-
-        # Manually put an item in the queue to confirm stop drains it.
-        shipment = _make_shipment()
-        job = Stage2Job(
-            storage_key="1Z999AA10123456784",
-            normalized_tn="1Z999AA10123456784",
-            shipment=shipment,
-            html_body="<html/>",
-            message_id="test-msg-id",
-            meta={"subject": "test", "from": "test@example.com"},
-            entry_id=coord.config_entry.entry_id,
-        )
-        coord._stage2_queue.put_nowait(job)
-        coord._stage2_enqueued_keys.add("1Z999AA10123456784")
-        coord._diagnostics.stage2_enabled = True
-        assert not coord._stage2_queue.empty()
-        assert len(coord._stage2_enqueued_keys) == 1
-
-        await coord.async_stop_stage2()
-        # IN-03: stop nulls the queue (no live workerless queue), clears the
-        # in-flight keys, resets stage2_enabled, and email_processing_active
-        # can no longer read True from a stale queue depth.
-        assert coord._stage2_queue is None
-        assert len(coord._stage2_enqueued_keys) == 0
-        assert coord._diagnostics.stage2_enabled is False
-        assert coord.stage2_queue_depth == 0
-        assert coord.email_processing_active is False
-
-        # Phase 32 cutover: _enqueue_stage2 now delegates entirely to the shared hub
-        # (hub.enqueue), independent of this entry's now-idle per-entry queue/worker
-        # lifecycle — an enqueue after async_stop_stage2 no longer races a torn-down
-        # local queue, it succeeds via the still-attached hub (no assert crash either way).
-        assert (
-            coord._enqueue_stage2(
-                "1Z999AA10123456785",
-                "key-after-stop",
-                shipment,
-                "<html/>",
-                message_id="late-msg",
-                meta={"subject": "late", "from": "t@example.com"},
-            )
-            is True
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +211,7 @@ async def test_in_flight_dedup_prevents_double_enqueue(hass, mock_stage2_config_
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = _make_shipment()
         meta = {"subject": "Shipped", "from": "noreply@shopify.com", "date": "", "snippet": ""}
@@ -405,7 +271,7 @@ async def test_drop_newest_backpressure(hass, mock_stage2_config_entry, caplog):
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         shipment = _make_shipment()
         meta = {"subject": "Shipped", "from": "noreply@shopify.com", "date": "", "snippet": ""}
@@ -500,7 +366,7 @@ async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
         # stage2_enabled is derived from entry.options in __init__.py, but here
         # we are testing the coordinator directly so set it explicitly.
         coord._diagnostics.stage2_enabled = True
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         await coord._async_update_data()
 
@@ -568,12 +434,11 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         await coord._async_load_store()
         coord._diagnostics.stage2_enabled = True
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         # The autouse test hub (conftest.py) never calls hub.async_setup(), so there is
-        # no live worker to drain the hub queue — no cancel/race concern remains for the
-        # (now-idle) per-entry worker either way.
-        assert coord._stage2_worker_task is not None
+        # no live worker to drain the hub queue — Phase 32 retired the per-entry
+        # worker entirely, so there is no per-entry sentinel left to assert here.
 
         # Pre-fill the account's hub in-flight cap with filler jobs (distinct TNs to
         # avoid dedup skip) so the incoming poll's enqueue hits DROPPED_BACKPRESSURE.
@@ -626,11 +491,17 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
 # ---------------------------------------------------------------------------
 
 
-async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry):
-    """With stage2_enabled=False, async_start_stage2 is never called and _stage2_queue is absent.
+async def test_stage2_disabled_does_not_construct_extractor(hass, mock_config_entry):
+    """With stage2_enabled=False, async_setup_stage2_extractor is never called and
+    the extractor sentinel stays None.
 
-    Validates the CONSTRAINTS boundary: queue must NOT be constructed for non-Stage-2 entries.
-    Also verifies that the legacy inline POST path still works for stage2_enabled=False entries.
+    Validates the CONSTRAINTS boundary: the extractor must NOT be built for
+    non-Stage-2 entries. Also verifies that the legacy inline POST path still
+    works for stage2_enabled=False entries.
+
+    Phase 32 cutover: renamed from test_stage2_disabled_does_not_construct_queue
+    — there is no per-entry queue to assert None on anymore (D-03/D-04); the
+    surviving sentinel is the per-account extractor.
     """
     mock_config_entry.add_to_hass(hass)
     with (
@@ -647,9 +518,9 @@ async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry)
         ),
         patch.object(
             Shop2ParcelCoordinator,
-            "async_start_stage2",
+            "async_setup_stage2_extractor",
             new_callable=AsyncMock,
-        ) as mock_start_stage2,
+        ) as mock_setup_extractor,
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.OAuth2Session.return_value.token = {
@@ -669,12 +540,12 @@ async def test_stage2_disabled_does_not_construct_queue(hass, mock_config_entry)
 
         coord = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
 
-        # (a) async_start_stage2 must NOT have been called.
-        mock_start_stage2.assert_not_called()
-        # (b) _stage2_queue sentinel must remain None (never started) on a
-        # stage2_enabled=False coordinator (CR-01 fix: __init__ sets None sentinel).
-        assert coord._stage2_queue is None, (
-            "_stage2_queue must be None on a stage2_enabled=False coordinator"
+        # (a) async_setup_stage2_extractor must NOT have been called.
+        mock_setup_extractor.assert_not_called()
+        # (b) _extractor sentinel must remain None (never built) on a
+        # stage2_enabled=False coordinator.
+        assert coord._extractor is None, (
+            "_extractor must be None on a stage2_enabled=False coordinator"
         )
 
         # (c) The legacy inline POST path still works: exercise one poll with a matched email.

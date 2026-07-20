@@ -5915,7 +5915,7 @@ async def test_worker_merge_path_carrier_gate_rejects_order_number(hass, mock_st
 
         coord = GmailCoordinator(hass, mock_stage2_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         # Stage-1 tracking_number=None triggers the promotion path.
         # After GREEN: the I6 assert is replaced by MRG-04 strict gate logic.

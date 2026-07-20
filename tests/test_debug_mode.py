@@ -825,19 +825,12 @@ async def _make_debug_coordinator(hass, mock_config_entry, mock_store_cls):
 # timer-driven persist path for quota state to guard here.
 
 
-async def test_dbg03_stop_stage2_no_store_write_in_debug(hass, mock_config_entry):
-    """CR-02/DBG-03: the async_stop_stage2 teardown save is skipped in debug mode."""
-    import asyncio
-
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        delay_save = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
-        coord._stage2_queue = asyncio.Queue(maxsize=8)
-        await coord.async_stop_stage2()
-    assert delay_save.call_count == 0, "DBG-03: no store write on stage2 stop in debug mode"
-    assert mock_store_cls.return_value.async_save.call_count == 0
+# Phase 32 (D-04): test_dbg03_stop_stage2_no_store_write_in_debug is removed.
+# It drove the now-retired async_stop_stage2's teardown store save (CR-02/DBG-03
+# gate). async_stop_stage2 no longer exists — the per-entry queue/worker it
+# tore down are retired in favor of the shared hub queue+worker (hub.py), and
+# with it went the teardown save this test guarded. No replacement store-save
+# call site exists on the coordinator for this scenario.
 
 
 # ---------------------------------------------------------------------------

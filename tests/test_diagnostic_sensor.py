@@ -438,12 +438,16 @@ async def test_stage2_sensor_inherits_state_class_measurement(hass, mock_config_
     assert sensor.state_class == SensorStateClass.MEASUREMENT
 
 
-async def test_stage2_sensor_native_value_zero_when_queue_is_none(hass, mock_config_entry):
-    """DIAG-01: Stage2Sensor.native_value returns 0 (not None) when _stage2_queue is None."""
+async def test_stage2_sensor_native_value_zero_when_nothing_inflight(hass, mock_config_entry):
+    """DIAG-01: Stage2Sensor.native_value returns 0 (not None) when nothing is in-flight.
+
+    Phase 32 cutover: native_value reads stage2_queue_depth, which is hub-derived
+    (hub.inflight_count) — the retired per-entry _stage2_queue no longer exists
+    to assert None on.
+    """
     from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
 
     coordinator = await _setup_integration(hass, mock_config_entry)
-    assert coordinator._stage2_queue is None
     sensor = Stage2Sensor(coordinator, mock_config_entry)
     assert sensor.native_value == 0
 
