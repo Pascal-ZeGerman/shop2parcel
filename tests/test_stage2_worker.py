@@ -1332,8 +1332,10 @@ async def test_async_remove_entry_dismisses_cap_notification(hass, mock_stage2_c
 
 
 async def test_coordinator_init_sets_failure_counter_to_zero(hass, mock_stage2_config_entry):
-    """Phase 21 FAIL-04/05: _stage2_consecutive_failures is 0 and _stage2_last_notify_ts is
-    None immediately after coordinator construction (before any Stage-2 activity).
+    """Phase 21 FAIL-04/05: _stage2_consecutive_failures is 0 immediately after coordinator
+    construction (before any Stage-2 activity). Phase 34 (DIAG-03/D-05): the
+    _stage2_last_notify_ts cooldown timestamp this test used to also assert on is retired
+    along with the per-account notification it gated.
     """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -1351,7 +1353,6 @@ async def test_coordinator_init_sets_failure_counter_to_zero(hass, mock_stage2_c
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
         assert coord._stage2_consecutive_failures == 0
-        assert coord._stage2_last_notify_ts is None
 
 
 # ---------------------------------------------------------------------------
@@ -1560,102 +1561,106 @@ async def test_fail_02_error_msg_is_sanitized_and_truncated(coord_for_fail_tests
 
 # ---------------------------------------------------------------------------
 # FAIL-04: threshold notification + cooldown + re-fire
+#
+# Phase 34 (DIAG-03/D-05): test_fail_04_notification_fires_at_threshold,
+# test_fail_04_notification_does_not_refire_within_cooldown, and
+# test_fail_04_notification_refires_after_cooldown are retired — the
+# per-account persistent_notification (and its STAGE2_NOTIFY_THRESHOLD/
+# STAGE2_NOTIFY_COOLDOWN_S gate) they exercised no longer exists;
+# _surface_stage2_failure now only increments the per-account counter
+# (retained telemetry) and dispatches listeners. The hub owns the single
+# consolidated cross-account notification instead — see
+# test_per_account_stage2_failure_notification_removed (proves the
+# per-account banner never fires) and test_worker_failure_observed_by_hub
+# (proves the hub is notified) below, plus tests/test_hub.py's
+# test_record_stage2_worker_failure_* suite for the hub's own
+# threshold/no-refire coverage.
 # ---------------------------------------------------------------------------
 
 
-async def test_fail_04_notification_fires_at_threshold(hass, coord_for_fail_tests):
-    """FAIL-04: After 3 consecutive Ollama failures, persistent_notification.async_create
-    fires exactly once with the correct notification_id, title, and message body.
+# ---------------------------------------------------------------------------
+# Phase 34 (DIAG-03/D-05, T-34-08/T-34-09): hub observation of worker outcomes
+# ---------------------------------------------------------------------------
+
+
+async def test_per_account_stage2_failure_notification_removed(hass, coord_for_fail_tests):
+    """DIAG-03: the retired per-account Stage-2 failure notification never fires, even
+    well past the old STAGE2_NOTIFY_THRESHOLD — persistent_notification.async_create is
+    never called for the failure streak. (The hub owns the single consolidated
+    notification instead, gated on HUB_STAGE2_NOTIFY_THRESHOLD distinct failing
+    accounts — never reached here since every call below shares one entry_id.)
     """
     from homeassistant.components import persistent_notification
 
     from custom_components.shop2parcel.api.exceptions import OllamaTransientError
-    from custom_components.shop2parcel.const import (
-        STAGE2_NOTIFY_THRESHOLD,
-        stage2_failing_notification_id,
-    )
+    from custom_components.shop2parcel.const import STAGE2_NOTIFY_THRESHOLD
 
     coord = coord_for_fail_tests
     job = _make_job()
     err = OllamaTransientError("connection refused")
 
     with patch.object(persistent_notification, "async_create") as mock_create:
-        for _ in range(STAGE2_NOTIFY_THRESHOLD):
+        for _ in range(STAGE2_NOTIFY_THRESHOLD * 3):
             coord._record_stage2_failure(job, err)
 
-        assert mock_create.call_count == 1
-        call_kwargs = mock_create.call_args.kwargs
-        assert call_kwargs["notification_id"] == stage2_failing_notification_id(
-            coord.config_entry.entry_id
+        assert mock_create.call_count == 0, (
+            "per-account Stage-2 failure notification must never fire (DIAG-03/D-05)"
         )
-        assert call_kwargs["title"] == "Shop2Parcel Stage-2 Failing"
-        assert "failed 3 times in a row" in call_kwargs["message"]
-        assert "Stage-1" in call_kwargs["message"]
 
 
-async def test_fail_04_notification_does_not_refire_within_cooldown(hass, coord_for_fail_tests):
-    """FAIL-04 cooldown: A 4th failure within STAGE2_NOTIFY_COOLDOWN_S does NOT re-fire."""
-    from homeassistant.components import persistent_notification
-
+async def test_worker_failure_observed_by_hub(coord_for_fail_tests):
+    """DIAG-03/D-05: a worker-path failure (_record_stage2_failure) is observed by the
+    hub exactly once, with the coordinator's entry_id.
+    """
     from custom_components.shop2parcel.api.exceptions import OllamaTransientError
-    from custom_components.shop2parcel.const import (
-        STAGE2_NOTIFY_COOLDOWN_S,
-        STAGE2_NOTIFY_THRESHOLD,
-    )
 
     coord = coord_for_fail_tests
     job = _make_job()
     err = OllamaTransientError("connection refused")
 
-    BASE_TIME = 1700000000.0
+    with patch.object(coord._hub, "record_stage2_worker_failure") as mock_observe:
+        coord._record_stage2_failure(job, err)
 
-    with patch.object(persistent_notification, "async_create") as mock_create:
-        with patch("custom_components.shop2parcel.coordinator._time.time", return_value=BASE_TIME):
-            for _ in range(STAGE2_NOTIFY_THRESHOLD):
-                coord._record_stage2_failure(job, err)
-            assert mock_create.call_count == 1
-
-        # Still within cooldown window — should NOT re-fire.
-        inside_cooldown = BASE_TIME + STAGE2_NOTIFY_COOLDOWN_S - 1
-        with patch(
-            "custom_components.shop2parcel.coordinator._time.time", return_value=inside_cooldown
-        ):
-            coord._record_stage2_failure(job, err)
-
-        assert mock_create.call_count == 1  # no re-fire
+    mock_observe.assert_called_once_with(coord.config_entry.entry_id)
 
 
-async def test_fail_04_notification_refires_after_cooldown(hass, coord_for_fail_tests):
-    """FAIL-04 re-fire: After STAGE2_NOTIFY_COOLDOWN_S elapses, the next failure DOES re-fire."""
-    from homeassistant.components import persistent_notification
+async def test_worker_success_observed_by_hub(coord_for_fail_tests):
+    """DIAG-03/D-05: a successful POST (_record_stage2_success) is observed by the hub
+    exactly once, with the coordinator's entry_id, and still resets the per-account
+    consecutive-failure counter to 0 (retained telemetry, D-05).
+    """
+    coord = coord_for_fail_tests
+    coord._stage2_consecutive_failures = 3
 
+    with patch.object(coord._hub, "record_stage2_worker_success") as mock_observe:
+        coord._record_stage2_success()
+
+    mock_observe.assert_called_once_with(coord.config_entry.entry_id)
+    assert coord._stage2_consecutive_failures == 0
+
+
+async def test_inline_fallback_does_not_inflate_hub_streak(coord_for_fail_tests):
+    """T-34-09: a non-escalating Gmail inline-fallback failure (_surface_stage2_failure
+    with escalate=False) does NOT observe the hub — only worker-path failures
+    (_record_stage2_failure) do. Prevents a no-match email backlog within one poll from
+    inflating the hub's cross-account failure streak ~10x (mirrors the per-account
+    escalate=False rationale — Finding #450).
+    """
     from custom_components.shop2parcel.api.exceptions import OllamaTransientError
-    from custom_components.shop2parcel.const import (
-        STAGE2_NOTIFY_COOLDOWN_S,
-        STAGE2_NOTIFY_THRESHOLD,
-    )
 
     coord = coord_for_fail_tests
-    job = _make_job()
     err = OllamaTransientError("connection refused")
 
-    BASE_TIME = 1700000000.0
+    with patch.object(coord._hub, "record_stage2_worker_failure") as mock_observe:
+        coord._surface_stage2_failure(
+            meta={"subject": "s", "from": "f"},
+            message_id="msg-1",
+            normalized_tn="",
+            err=err,
+            escalate=False,
+        )
 
-    with patch.object(persistent_notification, "async_create") as mock_create:
-        with patch("custom_components.shop2parcel.coordinator._time.time", return_value=BASE_TIME):
-            for _ in range(STAGE2_NOTIFY_THRESHOLD):
-                coord._record_stage2_failure(job, err)
-            assert mock_create.call_count == 1
-
-        # Past cooldown — should re-fire.
-        after_cooldown = BASE_TIME + STAGE2_NOTIFY_COOLDOWN_S + 1
-        with patch(
-            "custom_components.shop2parcel.coordinator._time.time", return_value=after_cooldown
-        ):
-            coord._record_stage2_failure(job, err)
-            assert mock_create.call_count == 2
-            # _stage2_last_notify_ts must be updated to the new fire time.
-            assert coord._stage2_last_notify_ts == after_cooldown
+    mock_observe.assert_not_called()
 
 
 async def test_fail_04_counter_does_not_reset_after_notification_fires(hass, coord_for_fail_tests):
@@ -1782,82 +1787,13 @@ async def test_fail_04_parcelapp_already_added_does_not_count_toward_threshold(
 # ---------------------------------------------------------------------------
 
 
-async def test_fail_05_first_success_after_streak_dismisses_notification(
-    hass, mock_stage2_config_entry
-):
-    """FAIL-05: After a failure streak + notification fire, a successful POST resets the
-    counter to 0 and calls persistent_notification.async_dismiss with the correct ID.
-    """
-    from homeassistant.components import persistent_notification
-
-    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
-    from custom_components.shop2parcel.const import (
-        STAGE2_NOTIFY_THRESHOLD,
-        stage2_failing_notification_id,
-    )
-    from custom_components.shop2parcel.extractors.types import Stage2Result
-
-    mock_stage2_config_entry.add_to_hass(hass)
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
-        ),
-        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
-        patch.object(persistent_notification, "async_create") as mock_create,
-        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
-
-        coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        # GmailCoordinator.__init__ calls async_dismiss(debug_mode_notification_id) when
-        # CONF_DEBUG_MODE is False — capture baseline BEFORE the success test to isolate it.
-        baseline_dismiss_count = mock_dismiss.call_count
-
-        await coord._async_load_store()
-        # Wire extractor directly — do NOT start the background worker to avoid races.
-        fail_extractor = MagicMock()
-        fail_extractor.async_extract = AsyncMock(
-            side_effect=[
-                OllamaTransientError("err1"),
-                OllamaTransientError("err2"),
-                OllamaTransientError("err3"),
-            ]
-        )
-        coord._extractor = fail_extractor
-
-        # 3 failures — notification fires.
-        for i in range(STAGE2_NOTIFY_THRESHOLD):
-            job = _make_job(normalized_tn=f"TN{i:04d}")
-            await coord._async_process_stage2_job(job)
-
-        assert mock_create.call_count == 1
-        assert coord._stage2_consecutive_failures == STAGE2_NOTIFY_THRESHOLD
-
-        # Switch extractor to success mode + run success job.
-        success_extractor = MagicMock()
-        success_extractor.async_extract = AsyncMock(
-            return_value=Stage2Result(locked={}, custom={}, passes_used=1, latency_ms=5.0)
-        )
-        coord._extractor = success_extractor
-
-        success_job = _make_job(normalized_tn="TNSUCCESS")
-        await coord._async_process_stage2_job(success_job)
-
-        assert coord._stage2_consecutive_failures == 0
-        # Exactly ONE new dismiss (from _record_stage2_success) since the baseline.
-        assert mock_dismiss.call_count == baseline_dismiss_count + 1
-        assert mock_dismiss.call_args.kwargs["notification_id"] == stage2_failing_notification_id(
-            coord.config_entry.entry_id
-        )
+# Phase 34 (DIAG-03/D-05): test_fail_05_first_success_after_streak_dismisses_notification
+# is retired — it proved a per-account persistent_notification.async_dismiss fired from
+# _record_stage2_success, which no longer exists (the hub owns the single consolidated
+# dismiss now). Counter-reset-to-0 coverage lives on in
+# test_fail_05_already_added_is_not_a_success et al. (which never reset); hub-dismiss
+# coverage is test_worker_success_observed_by_hub below and
+# tests/test_hub.py::test_record_stage2_worker_success_last_failing_dismisses.
 
 
 async def test_fail_05_already_added_is_not_a_success(hass, mock_stage2_config_entry):
