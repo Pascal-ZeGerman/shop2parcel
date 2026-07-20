@@ -2380,3 +2380,206 @@ def test_hub_notification_body_is_pii_free(hass):
         )
         for token in forbidden_tokens:
             assert token not in message
+
+
+# ---------------------------------------------------------------------------
+# Phase 34-05 (R-01): global-sensor cross-entry ownership, re-home, teardown
+# ---------------------------------------------------------------------------
+
+
+async def test_global_sensors_registered_exactly_once(hass, mock_config_entry, mock_config_entry_b):
+    """DIAG-01/DIAG-02/R-01: with two entries attached, exactly one registry
+    row exists per global-sensor unique_id — never two, even though both
+    entries' sensor.py::async_setup_entry ran (claim_global_sensor_ownership
+    guards the unique_id-collision anti-pattern)."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry_b.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        registry = er.async_get(hass)
+        hub_entities = [
+            entry
+            for entry in registry.entities.values()
+            if entry.unique_id.startswith(f"{DOMAIN}___shared___")
+        ]
+        assert len(hub_entities) == 2, (
+            f"expected exactly 2 hub-scoped entity rows, got {[e.unique_id for e in hub_entities]}"
+        )
+
+        # Cleanup: unload both accounts so the hub worker task is cancelled
+        # before the mocked-Store context exits.
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
+
+
+async def test_global_sensor_rehomes_on_owner_unload(hass, mock_config_entry, mock_config_entry_b):
+    """R-01/Pitfall 2/3: unloading the entry that owns the two global sensors,
+    while the hub survives, re-parents them to the surviving entry — the
+    entity_id is stable, native_value is unchanged, and the entity stays
+    available (the smoking-gun assertion from Pitfall 3: config_entry_id must
+    flip to the survivor, not stay pointed at the now-removed owner)."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry_b.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        hub = hass.data[DOMAIN]["__shared__"]
+        owner_entry_id = hub._global_sensor_owner_entry_id
+        assert owner_entry_id in (mock_config_entry.entry_id, mock_config_entry_b.entry_id)
+        survivor_entry_id = (
+            mock_config_entry_b.entry_id
+            if owner_entry_id == mock_config_entry.entry_id
+            else mock_config_entry.entry_id
+        )
+
+        registry = er.async_get(hass)
+        quota_unique_id = f"{DOMAIN}___shared___{GlobalQuotaSensor._unique_id_suffix}"
+        queue_unique_id = f"{DOMAIN}___shared___{GlobalQueueSensor._unique_id_suffix}"
+        quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert quota_entity_id is not None
+        assert queue_entity_id is not None
+        assert registry.async_get(quota_entity_id).config_entry_id == owner_entry_id
+        assert registry.async_get(queue_entity_id).config_entry_id == owner_entry_id
+
+        value_before = hass.states.get(quota_entity_id).state
+
+        await hass.config_entries.async_unload(owner_entry_id)
+        await hass.async_block_till_done()
+
+        assert hub._refcount == 1
+        assert hass.data[DOMAIN]["__shared__"] is hub
+
+        assert registry.async_get(quota_entity_id).config_entry_id == survivor_entry_id, (
+            "config_entry_id must re-parent to the surviving entry after the owner unloads"
+        )
+        assert registry.async_get(queue_entity_id).config_entry_id == survivor_entry_id
+
+        state_after = hass.states.get(quota_entity_id)
+        assert state_after is not None
+        assert state_after.state != "unavailable"
+        assert state_after.state == value_before
+
+        # Cleanup: unload the surviving entry.
+        await hass.config_entries.async_unload(survivor_entry_id)
+
+
+async def test_teardown_removes_global_sensors(hass, mock_config_entry, mock_config_entry_b):
+    """R-01/Pitfall 2/A2: at last-account teardown (refcount 0), both global
+    sensors are removed from the entity registry and
+    hass.data[DOMAIN]["__shared__"] is deleted — no orphaned registry rows."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry_b.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        registry = er.async_get(hass)
+        quota_unique_id = f"{DOMAIN}___shared___{GlobalQuotaSensor._unique_id_suffix}"
+        queue_unique_id = f"{DOMAIN}___shared___{GlobalQueueSensor._unique_id_suffix}"
+        quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert quota_entity_id is not None
+        assert queue_entity_id is not None
+
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
+        await hass.async_block_till_done()
+
+        assert registry.async_get(quota_entity_id) is None
+        assert registry.async_get(queue_entity_id) is None
+        assert "__shared__" not in hass.data.get(DOMAIN, {})
+
+
+async def test_global_sensor_ownership_not_persisted(hass):
+    """Pitfall 4: ownership is session-scoped in-memory only — the shared
+    store's async_save payload never contains an ownership-related key."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        assert hub.claim_global_sensor_ownership("entry-a") is True
+        assert hub._global_sensor_owner_entry_id == "entry-a"
+        # A second claim by a different entry_id must be refused.
+        assert hub.claim_global_sensor_ownership("entry-b") is False
+
+        await hub.async_save()
+
+        last_call = mock_store_cls.return_value.async_save.call_args
+        payload = last_call.args[0]
+        assert not any("owner" in key.lower() for key in payload), (
+            f"no ownership-related key should ever be persisted (Pitfall 4); got keys={list(payload)}"
+        )
+
+        await hub.async_shutdown()
