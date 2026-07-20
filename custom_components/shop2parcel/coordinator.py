@@ -1295,11 +1295,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             )
             return  # leave UN-marked; re-inspected on the next poll
 
-        if (
-            self._diagnostics.stage2_enabled
-            and not debug_mode
-            and self._extractor is not None
-        ):
+        if self._diagnostics.stage2_enabled and not debug_mode and self._extractor is not None:
             # IN-07: reuse a cap-deferred prefetched extraction BEFORE the cap
             # check or any Ollama call. A cache hit is not an extraction — it
             # consumes no cap slot and re-records no LLM counters (the original
