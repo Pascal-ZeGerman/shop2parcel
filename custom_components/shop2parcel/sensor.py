@@ -36,6 +36,7 @@ from .diagnostic_sensor import (
     EmailsParsedByLLMSensor,
     EmailsScannedSensor,
     EmailsSentToLLMSensor,
+    GlobalQueueSensor,
     KeywordHitsSensor,
     NewEmailsInspectedSensor,
     OllamaLatencySensor,
@@ -68,6 +69,13 @@ async def async_setup_entry(
 
     Phase 7 (D-09): 14 static diagnostic sensors co-registered here.
     Phase 26 Plan 03 (P26-ENT-01..03): 3 primary operational sensors registered here.
+    Phase 34-05 (R-01/DIAG-01/DIAG-02): registers the two hub-owned global
+    sensors from EXACTLY ONE entry (whichever first claims ownership via
+    hub.claim_global_sensor_ownership) — never unconditionally from every
+    entry, which would produce a unique_id collision (RESEARCH.md
+    Anti-Pattern). Every entry's async_add_entities callback is stored on
+    the hub regardless of ownership so a LATER entry can still serve as a
+    re-home target if it becomes the survivor after the owner unloads.
     """
     coordinator: Shop2ParcelCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
@@ -100,6 +108,27 @@ async def async_setup_entry(
             ParcelAppQuotaSensor(coordinator, entry),
         ]
     )
+
+    # Phase 34-05 (R-01/DIAG-01/DIAG-02): remember this entry's callback so
+    # the hub can re-add the global sensors here later if THIS entry becomes
+    # the new owner (maybe_rehome_global_sensors, hub.py). Guarded with
+    # .get() defensively — the hub is always present after __init__.py's
+    # attach() by this point, but this mirrors the .get()-guard style used
+    # elsewhere in this codebase (e.g. _debug_mode_active's None tolerance).
+    hub: Shop2ParcelHub | None = hass.data.get(DOMAIN, {}).get("__shared__")
+    if hub is not None:
+        hub.register_sensor_add_entities(entry.entry_id, async_add_entities)
+        if hub.claim_global_sensor_ownership(entry.entry_id):
+            # First entry ever to attach (or the hub had no owner) —
+            # register the two global sensors now. This is the ONLY
+            # registration site for them — never registered unconditionally
+            # from every entry (unique_id-collision anti-pattern).
+            async_add_entities(
+                [
+                    GlobalQuotaSensor(coordinator, hub),
+                    GlobalQueueSensor(coordinator, hub),
+                ]
+            )
 
 
 class ShipmentsForwardedSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):

@@ -283,6 +283,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     RESEARCH.md Open Question 1). If the hub's refcount reaches 0, shut it
     down and delete hass.data[DOMAIN]["__shared__"] — the hub itself never
     touches hass.data (D-06).
+
+    Phase 34-05 (R-01, Pitfall 3): hub.maybe_rehome_global_sensors(entry.entry_id)
+    runs BEFORE hub.detach(coordinator) — using the EXPLICIT entry.entry_id
+    (never inferred from post-detach hub state) so the re-home decision can
+    still tell whether THIS departing entry was the global-sensor owner and
+    the hub still has full coordinator state to pick a survivor from.
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
@@ -291,6 +297,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         coordinator = entry_data.get("coordinator") if entry_data else None
         hub = hass.data.get(DOMAIN, {}).get("__shared__")
+        if hub is not None:
+            hub.maybe_rehome_global_sensors(entry.entry_id)
         if hub is not None and coordinator is not None:
             hub.detach(coordinator)
         if hub is not None and hub._refcount == 0:
