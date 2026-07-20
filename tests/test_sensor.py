@@ -177,6 +177,78 @@ async def test_no_shipment_sensor_registered(hass, mock_config_entry):
 
 
 # ---------------------------------------------------------------------------
+# Phase 34 Plan 03 (DIAG-01): GlobalQuotaSensor — hub-owned global sensor
+# ---------------------------------------------------------------------------
+
+
+async def test_global_quota_sensor_native_value_clamp(hass, mock_config_entry):
+    """DIAG-01: native_value == max(0, 20 - hub.used_today); clamps at 0, never negative."""
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    hub = coordinator._hub
+    sensor = GlobalQuotaSensor(coordinator, hub)
+
+    # used_today=0 -> 20
+    assert sensor.native_value == 20
+
+    # after 3 consumed slots -> 17
+    hub._used_today = 3
+    assert sensor.native_value == 17
+
+    # used_today at the limit -> clamped to 0
+    hub._used_today = 20
+    assert sensor.native_value == 0
+
+    # used_today beyond the limit -> still clamped to 0 (never negative)
+    hub._used_today = 25
+    assert sensor.native_value == 0
+
+
+async def test_global_quota_sensor_extra_state_attributes(hass, mock_config_entry):
+    """DIAG-01: extra_state_attributes mirrors the per-account set plus scope='shared'."""
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    hub = coordinator._hub
+    hub._used_today = 3
+    sensor = GlobalQuotaSensor(coordinator, hub)
+
+    attrs = sensor.extra_state_attributes
+    assert attrs == {
+        "daily_limit": 20,
+        "used_today": hub.used_today,
+        "exhausted": hub.quota_is_exhausted,
+        "scope": "shared",
+        "description": ("estimate from our own count; authoritative only once a 429 is seen"),
+    }
+
+
+async def test_global_quota_sensor_unique_id_and_device_info(hass, mock_config_entry):
+    """DIAG-01/D-02: hub-scoped unique_id and DeviceInfo — never entry_id-scoped."""
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    hub = coordinator._hub
+    sensor = GlobalQuotaSensor(coordinator, hub)
+
+    assert sensor.unique_id == f"{DOMAIN}___shared___hub_quota_remaining"
+    assert sensor._attr_device_info is not None
+    assert sensor._attr_device_info["identifiers"] == {(DOMAIN, "__shared__")}
+    assert sensor._attr_device_info["name"] == "Shop2Parcel Hub"
+
+
+async def test_parcelapp_quota_sensor_still_present_and_unmodified(hass, mock_config_entry):
+    """DIAG-01/D-01: the per-account ParcelAppQuotaSensor is NOT removed (additive)."""
+    from custom_components.shop2parcel.sensor import ParcelAppQuotaSensor
+
+    coordinator = await _setup_with_data(hass, mock_config_entry, {})
+    sensor = ParcelAppQuotaSensor(coordinator, mock_config_entry)
+    assert sensor._unique_id_suffix == "parcelapp_quota"
+    assert sensor.native_value == max(0, 20 - coordinator.used_today)
+
+
+# ---------------------------------------------------------------------------
 # Phase 5 tests retained — not ShipmentSensor-specific
 # ---------------------------------------------------------------------------
 
