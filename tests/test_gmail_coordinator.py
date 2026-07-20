@@ -1562,3 +1562,107 @@ async def test_gmail_inline_already_added_keeps_reserve(hass, mock_no_stage2_ent
         f"Expected used_today to stay at 1 (no refund on AlreadyAdded), got {coord._hub.used_today}"
     )
     mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase 33 Plan 01 (D-01 baseline gap): multi-shipment-digest characterization.
+# ---------------------------------------------------------------------------
+
+
+async def test_fallback_multi_shipment_digest(hass, mock_stage2_entry):
+    """Closes the one identified D-01 baseline gap: a multi-shipment digest email
+    (several tracking-number-shaped strings in one body) that Stage-1 fully misses
+    must still yield exactly ONE fallback-extracted tracking number and exactly ONE
+    `_enqueue_stage2` call.
+
+    Assumption A2 (RESEARCH.md Pitfall 6): the inline Gmail fallback path is
+    structurally single-shipment — `Stage2Result.locked` holds one
+    `tracking_number`, and one `ShipmentData` is built and enqueued per message.
+    This test pins that behavior; it does NOT attempt to make the fallback
+    iterate multiple shipments per email (that would be new behavior, out of
+    scope for this characterization-only plan, and would violate Prohibition P2).
+    """
+    mock_stage2_entry.add_to_hass(hass)
+    msg_id = "msg_multi_shipment_digest"
+    mock_gmail = _make_stage1_miss_poll(msg_id)
+    mock_extractor = AsyncMock()
+
+    # A realistic multi-shipment digest body: several tracking-number-shaped
+    # strings for different carriers, all in one email. Stage-1 (EmailParser.parse)
+    # is mocked to a genuine full miss below (shipment=None, no extra_shipments),
+    # so only the Ollama fallback extracts anything from this body.
+    digest_html = (
+        "<html><body>"
+        "<p>Your recent shipments:</p>"
+        "<p>Package 1 - UPS 1Z999AA10123456784</p>"
+        "<p>Package 2 - USPS 9400111122223333444455</p>"
+        "<p>Package 3 - FedEx 999999999999</p>"
+        "</body></html>"
+    )
+
+    # The extractor returns exactly ONE Stage2Result (structurally single-shipment
+    # per Assumption A2) — one of the tracking numbers drawn from the digest body.
+    digest_result = Stage2Result(
+        locked={
+            "tracking_number": "1Z999AA10123456784",
+            "carrier_name": "UPS",
+            "order_name": "",
+        },
+        custom={},
+        passes_used=1,
+        latency_ms=10.0,
+    )
+    mock_extractor.async_extract = AsyncMock(return_value=digest_result)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value=digest_html,
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(GmailCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        # Genuine full Stage-1 miss: the parser populates neither `shipment` nor
+        # `extra_shipments` even though the body contains multiple TN-shaped strings.
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_no_match()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
+        coord._first_refresh_done = True
+
+        await coord._async_update_data()
+
+    # Exactly ONE Ollama extraction ran against the whole digest body.
+    mock_extractor.async_extract.assert_awaited_once()
+
+    # Exactly ONE _enqueue_stage2 call, carrying the single extracted tracking number.
+    mock_enqueue.assert_called_once()
+    call_args = mock_enqueue.call_args
+    first_pos_arg = call_args[0][0] if call_args[0] else call_args[1].get("normalized_tn")
+    assert first_pos_arg == "1Z999AA10123456784", (
+        f"Expected exactly one enqueue with tracking number '1Z999AA10123456784' "
+        f"(got {first_pos_arg!r})"
+    )
+    shipment_kwarg = call_args[1].get("shipment")
+    assert shipment_kwarg is not None
+    assert shipment_kwarg.tracking_number == "1Z999AA10123456784"
+
+    # Matched/found diagnostics reflect exactly one shipment found, not three.
+    assert coord._diagnostics.tracking_numbers_found_total == 1
+    assert len(coord._diagnostics.last_poll_found) == 1
