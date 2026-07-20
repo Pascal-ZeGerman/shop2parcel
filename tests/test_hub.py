@@ -2150,3 +2150,233 @@ def test_stage2_queue_depth_counts_dequeued_but_still_inflight_job(hass):
 
     assert hub.stage2_pending == 0
     assert hub.stage2_queue_depth == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 34 Plan 02 Task 2: consolidated failure-streak + single hub
+# notification (DIAG-03 / D-05..D-08)
+# ---------------------------------------------------------------------------
+
+
+def test_stage2_failing_entry_ids_init_empty(hass):
+    """Init: hub._stage2_failing_entry_ids starts as an empty set."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    assert hub._stage2_failing_entry_ids == set()
+
+
+def test_record_stage2_worker_failure_below_threshold_no_notification(hass):
+    """4 distinct failing accounts (threshold 5) do NOT fire the notification."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for entry_id in ("a", "b", "c", "d"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        mock_create.assert_not_called()
+        assert hub._stage2_failing_entry_ids == {"a", "b", "c", "d"}
+
+
+def test_record_stage2_worker_failure_fifth_fires_notification_once(hass):
+    """The 5th distinct failing account fires async_create exactly once with
+    the fixed HUB_STAGE2_FAILING_NOTIFICATION_ID and expected title."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for entry_id in ("a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        assert mock_create.call_count == 1
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["notification_id"] == HUB_STAGE2_FAILING_NOTIFICATION_ID
+        assert call_kwargs["title"] == "Shop2Parcel Stage-2 Failing"
+
+
+def test_record_stage2_worker_failure_sixth_does_not_refire(hass):
+    """A 6th distinct failing account does not fire a second notification
+    (no duplicate, D-06)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for entry_id in ("a", "b", "c", "d", "e", "f"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        assert mock_create.call_count == 1
+
+
+def test_record_stage2_worker_success_one_of_many_does_not_dismiss(hass):
+    """A success for ONE failing account while others remain failing does
+    NOT dismiss the notification (set still non-empty, D-07 reset semantics)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        for entry_id in ("a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        hub.record_stage2_worker_success("a")
+
+        mock_dismiss.assert_not_called()
+        assert hub._stage2_failing_entry_ids == {"b", "c", "d", "e"}
+
+
+def test_record_stage2_worker_success_last_failing_dismisses(hass):
+    """A success for the LAST failing account dismisses the notification
+    (set empties)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        for entry_id in ("a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_failure(entry_id)
+        for entry_id in ("a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_success(entry_id)
+
+        mock_dismiss.assert_called_once_with(
+            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+        )
+        assert hub._stage2_failing_entry_ids == set()
+
+
+def test_detach_discards_failing_account_from_set(hass):
+    """detach(coordinator) discards that account's entry_id from the
+    failing set (D-07); other accounts still failing means no dismiss."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        for entry_id in ("entry-a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        hub.detach(coordinator_a)
+
+        assert "entry-a" not in hub._stage2_failing_entry_ids
+        mock_dismiss.assert_not_called()
+
+
+def test_detach_of_last_failing_account_dismisses_notification(hass):
+    """detach() of the LAST failing account empties the set and dismisses
+    the notification — removing a failing account counts as recovery (D-07)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        hub.record_stage2_worker_failure("entry-a")
+
+        hub.detach(coordinator_a)
+
+        assert hub._stage2_failing_entry_ids == set()
+        mock_dismiss.assert_called_once_with(
+            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+        )
+
+
+async def test_async_shutdown_dismisses_hub_notification_unconditionally(hass):
+    """async_shutdown() calls async_dismiss for the hub notification
+    unconditionally, even with no active failing streak (D-07 teardown-dismiss)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        with patch.object(persistent_notification, "async_dismiss") as mock_dismiss:
+            await hub.async_shutdown()
+
+            mock_dismiss.assert_called_once_with(
+                hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+            )
+
+
+def test_hub_notification_body_is_pii_free(hass):
+    """PROH-1: the consolidated notification message is composed only from
+    aggregate counts + generic guidance — none of the forbidden per-job
+    fields (email, tracking number, subject, order name, credential-looking
+    tokens) ever appear in it."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_NOTIFY_THRESHOLD,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for i in range(HUB_STAGE2_NOTIFY_THRESHOLD):
+            hub.record_stage2_worker_failure(f"entry-{i}")
+
+        assert mock_create.call_count == 1
+        message = mock_create.call_args.kwargs["message"]
+        forbidden_tokens = (
+            "@",
+            "tracking_number",
+            "subject",
+            "order_name",
+            "Bearer ",
+            "api_key",
+            "token=",
+        )
+        for token in forbidden_tokens:
+            assert token not in message

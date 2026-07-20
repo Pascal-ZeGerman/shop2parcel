@@ -25,11 +25,14 @@ from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 
+from homeassistant.components import persistent_notification
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_point_in_time, async_track_time_interval
 
 from .const import (
+    HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    HUB_STAGE2_NOTIFY_THRESHOLD,
     HUB_STAGE2_POLL_WINDOW,
     HUB_STAGE2_QUEUE_MAXLEN,
     MAX_STAGE2_POSTS_PER_POLL,
@@ -98,6 +101,14 @@ class Shop2ParcelHub:
         self._coordinators: dict[str, Shop2ParcelCoordinator] = {}
         self._inflight: dict[str, set[str]] = {}
         self._stage2_enqueued_keys: set[str] = set()
+        # Phase 34 (DIAG-03/D-05..D-08): consolidated hub-level Stage-2
+        # failure-streak tracking — the set of entry_ids currently failing
+        # (a PARALLEL observation to the per-account int counter in
+        # coordinator.py, not a replacement for it). _hub_notification_active
+        # is a fire-once guard so a 6th+ distinct failing account never
+        # re-creates the single consolidated notification (D-06).
+        self._stage2_failing_entry_ids: set[str] = set()
+        self._hub_notification_active: bool = False
         # Phase 30 (DEDUP-01/DEDUP-03): single shared dedup set, FIFO-capped
         # at MAX_SUBMITTED_TRACKING_NUMBERS. Pure in-memory core in this plan
         # (30-01) — persistence (async_save/async_load) lands in 30-02.
@@ -213,6 +224,13 @@ class Shop2ParcelHub:
         number could be admitted while the original job is still queued) is
         closed instead in enqueue()'s queue-scan backstop below, which does
         not require abandoning a live queued job.
+
+        Phase 34 (D-07): also discards this entry_id from the consolidated
+        Stage-2 failure-streak set — a departing account counts as recovery
+        for the hub notification, same as record_stage2_worker_success. If
+        that empties the set, the notification is dismissed unconditionally
+        (mirrors record_stage2_worker_success's dismiss trigger; HA's
+        async_dismiss is a safe no-op on an unknown/already-dismissed ID).
         """
         if self._refcount > 0:
             self._refcount -= 1
@@ -225,6 +243,12 @@ class Shop2ParcelHub:
                 del self._coordinators[entry_id]
             for tn in self._inflight.pop(entry_id, set()):
                 self._stage2_enqueued_keys.discard(tn)
+            self._stage2_failing_entry_ids.discard(entry_id)
+            if not self._stage2_failing_entry_ids:
+                persistent_notification.async_dismiss(
+                    self._hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+                )
+                self._hub_notification_active = False
 
     def _trim_submitted_tns(self) -> None:
         """FIFO-trim _submitted_tracking_numbers to MAX_SUBMITTED_TRACKING_NUMBERS.
@@ -389,6 +413,60 @@ class Shop2ParcelHub:
         Hand-Roll).
         """
         return self._queue.qsize()
+
+    def record_stage2_worker_failure(self, entry_id: str) -> None:
+        """Record one Stage-2 job failure for entry_id; maybe notify (DIAG-03/D-05..D-08).
+
+        Called by the shared hub worker's except-Exception branch (Phase 32
+        D-09) alongside the existing per-account ``coord._record_stage2_failure``
+        — a PARALLEL hub-level observation at the same call site, not a new
+        dispatch mechanism (RESEARCH.md Pattern 3). Synchronous, lock-free
+        (mirrors the check_and_mark/try_consume idiom above): adds entry_id
+        to the failing set; once ``len(_stage2_failing_entry_ids)`` reaches
+        ``HUB_STAGE2_NOTIFY_THRESHOLD``, fires exactly ONE consolidated
+        persistent_notification, guarded by ``_hub_notification_active`` so
+        a 6th+ distinct failing account never re-creates it (D-06 no-
+        duplicate). The message body is composed ONLY from the aggregate
+        failing-account count — no per-job/email/tracking-number/sender
+        data is ever touched here (PROH-1/D-08).
+        """
+        self._stage2_failing_entry_ids.add(entry_id)
+        if (
+            len(self._stage2_failing_entry_ids) >= HUB_STAGE2_NOTIFY_THRESHOLD
+            and not self._hub_notification_active
+        ):
+            persistent_notification.async_create(
+                self._hass,
+                message=(
+                    f"Shop2Parcel: Stage-2 (LLM) extraction has failed repeatedly "
+                    f"across {len(self._stage2_failing_entry_ids)} account(s). "
+                    f"Ollama may be unreachable or misconfigured — check the "
+                    f"Ollama server and the integration logs."
+                ),
+                title="Shop2Parcel Stage-2 Failing",
+                notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID,
+            )
+            self._hub_notification_active = True
+
+    def record_stage2_worker_success(self, entry_id: str) -> None:
+        """Record one Stage-2 job success for entry_id; maybe dismiss (DIAG-03/D-07).
+
+        Called by the shared hub worker's success path alongside the
+        existing per-account ``coord._record_stage2_success``. Discards
+        entry_id from the failing set; once the set is empty (every
+        previously-failing account has recovered), unconditionally
+        dismisses the consolidated notification — HA's ``async_dismiss`` is
+        a no-op on an unknown/already-dismissed ID (Assumption A1, proven at
+        coordinator.py:900-904), so no ``_hub_notification_active`` guard is
+        needed on this side (D-07 reset semantics: a single success while
+        another account still fails does NOT dismiss).
+        """
+        self._stage2_failing_entry_ids.discard(entry_id)
+        if not self._stage2_failing_entry_ids:
+            persistent_notification.async_dismiss(
+                self._hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+            )
+            self._hub_notification_active = False
 
     # ------------------------------------------------------------------
     # Phase 31 (QUOTA-01/02/04): shared daily-budget + per-poll-cap mutators.
@@ -693,6 +771,13 @@ class Shop2ParcelHub:
         if self._poll_window_unsub is not None:
             self._poll_window_unsub()
             self._poll_window_unsub = None
+        # Phase 34 (D-07 teardown-dismiss): unconditionally dismiss the
+        # consolidated hub Stage-2 notification on every teardown, regardless
+        # of whether a failing streak was active — HA's async_dismiss is a
+        # no-op on an unknown/already-dismissed ID (Assumption A1).
+        persistent_notification.async_dismiss(
+            self._hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+        )
         # DEDUP-02: flush the dedup set (not just the version) on teardown —
         # the Phase 29 shutdown wrote {"version": SHARED_STORAGE_VERSION}
         # only, which would silently erase the dedup set on every unload.
