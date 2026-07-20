@@ -67,12 +67,9 @@ from .const import (
     MAX_STAGE2_POSTS_PER_POLL,
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
-    STAGE2_NOTIFY_COOLDOWN_S,
-    STAGE2_NOTIFY_THRESHOLD,
     EnqueueOutcome,
     normalize_tracking_number,
     stage2_cap_notification_id,
-    stage2_failing_notification_id,
 )
 from .extractors.ollama_extractor import OllamaExtractor, preprocess_html
 from .merge import merge_llm_authoritative_with_grounding, validate_grounding
@@ -564,13 +561,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # email_processing_active property.  Never modified inside _async_update_data itself —
         # only the subclass poll methods touch this flag.
         self._poll_in_progress: bool = False
-        # Phase 21 FAIL-04/05: consecutive-failure streak across polls + notification cooldown timestamp.
+        # Phase 21 FAIL-04/05: consecutive-failure streak across polls (per-account telemetry).
         # Persist across polls; reset only on real success (_record_stage2_success).
         # Phase 32 (D-04): the async_stop_stage2 reset path is retired — a fresh
         # coordinator instance on reload already defaults this to 0, so no
         # replacement reset is needed.
+        # Phase 34 (DIAG-03/D-05): the per-account notification (and its cooldown
+        # timestamp, formerly _stage2_last_notify_ts) is retired — the hub now owns
+        # the single consolidated notification; this counter stays as telemetry.
         self._stage2_consecutive_failures: int = 0
-        self._stage2_last_notify_ts: float | None = None
         # Phase 31 (D-08): the per-account time-boundary refresh timers (quota-expiry +
         # UTC-midnight used_today) are removed — the hub now owns exactly 3 shared timers
         # (armed once in hub.async_setup(), cancelled once in hub.async_shutdown()),
@@ -800,6 +799,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Thin wrapper over _surface_stage2_failure (Phase 27): the Gmail Ollama fallback
         gatekeeper has no Stage2Job at failure time, so the side-effect body lives in the
         kwargs-based helper and both call sites share one consecutive-failure streak.
+
+        Phase 34 (DIAG-03/D-05, T-34-08/T-34-09): also observes this worker-job outcome
+        at the hub, which owns the single consolidated cross-account failure notification.
+        Wired here (not inside _surface_stage2_failure) so the Gmail inline-fallback's
+        non-escalating backlog (escalate=False) never inflates the hub streak — only real
+        worker-path failures (this method) are observed.
         """
         self._surface_stage2_failure(
             meta=job.meta,
@@ -807,6 +812,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             normalized_tn=job.normalized_tn,
             err=err,
         )
+        if self._hub is not None:
+            self._hub.record_stage2_worker_failure(self.config_entry.entry_id)  # type: ignore[union-attr]
 
     def _surface_stage2_failure(
         self,
@@ -865,27 +872,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not escalate:
             return
 
-        # FAIL-04: consecutive-failure counter increment + threshold/cooldown notification gate.
+        # FAIL-04: consecutive-failure counter increment (per-account telemetry, D-05).
+        # Phase 34 (DIAG-03): the per-account threshold/cooldown notification gate that
+        # used to live here is retired — the hub now owns the single consolidated
+        # notification (see _record_stage2_failure's hub.record_stage2_worker_failure
+        # call, worker path only).
         self._stage2_consecutive_failures += 1
-
-        # D-09 cooldown state machine: fire if at/past threshold AND (never fired OR cooldown elapsed).
-        if self._stage2_consecutive_failures >= STAGE2_NOTIFY_THRESHOLD and (
-            self._stage2_last_notify_ts is None
-            or _time.time() - self._stage2_last_notify_ts >= STAGE2_NOTIFY_COOLDOWN_S
-        ):
-            # D-08: notification body mentions failure count + Stage-1 still working callout.
-            persistent_notification.async_create(
-                self.hass,
-                message=(
-                    f"Stage-2 extraction has failed {self._stage2_consecutive_failures} times in a row. "
-                    f"Check that the Ollama server is reachable and the configured model is pulled. "
-                    f"The integration continues running with Stage-1 results."
-                ),
-                title="Shop2Parcel Stage-2 Failing",
-                notification_id=stage2_failing_notification_id(self.config_entry.entry_id),  # type: ignore[union-attr]
-            )
-            # Update cooldown timestamp to gate re-fires (D-09).
-            self._stage2_last_notify_ts = _time.time()
 
         # Finding 2: this runs in the background Stage-2 worker, outside any poll's
         # listener dispatch. Push the updated streak to subscribers so ProblemBinarySensor
@@ -898,24 +890,23 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def _record_stage2_success(self) -> None:
         """Centralize loud-surface side effects for a Stage-2 successful POST.
 
-        Implements FAIL-05 (counter reset + notification dismiss) per D-03/D-06.
+        Implements FAIL-05 (counter reset) per D-03/D-06.
 
         Called ONLY from the success path at line 710 (after _stage2_posts_this_poll += 1)
         — D-06 defines 'success' as a real 2xx POST to parcelapp.net. Graceful rejections
         (AlreadyAdded, InvalidTracking), cap-skip, and quota-exhausted-skip do NOT call this.
 
-        The async_dismiss is unconditional (D-04): HA no-ops on unknown notification IDs
-        (Assumption A1 in 21-RESEARCH.md), so no _stage2_consecutive_failures > 0 guard is needed.
         Note (D-03): stage2_succeeded_total increment is Plan 03's job.
+
+        Phase 34 (DIAG-03/D-05, D-07): the per-account persistent_notification.async_dismiss
+        that used to live here is retired — the hub now owns the single consolidated
+        notification and its own dismiss (record_stage2_worker_success), called below.
         """
         self._stage2_consecutive_failures = 0
         # DIAG-02: lifetime success counter; incremented only on real 2xx POST (D-06).
         self._diagnostics.stage2_succeeded_total += 1
-        # FAIL-05: unconditional dismiss — HA is a no-op when the ID is unknown.
-        persistent_notification.async_dismiss(
-            self.hass,
-            notification_id=stage2_failing_notification_id(self.config_entry.entry_id),  # type: ignore[union-attr]
-        )
+        if self._hub is not None:
+            self._hub.record_stage2_worker_success(self.config_entry.entry_id)  # type: ignore[union-attr]
 
     @property
     def diagnostics(self) -> PollStats:
