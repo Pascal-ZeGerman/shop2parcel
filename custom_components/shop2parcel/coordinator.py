@@ -1262,6 +1262,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         own per-message loop.
         """
         assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
+        # WR-01 (Phase 33 review): every log line below must attribute the event to
+        # the correct account type. `prefix` is already threaded through this method
+        # for scan-event IDs (f"{prefix}{msg_key}") — reuse it here so IMAP messages
+        # are no longer logged as "Gmail message" (the twelve _LOGGER.* calls below).
+        log_label = "Gmail message" if prefix == "gmail:" else "IMAP UID"
         # Phase 27 Plan 03: Ollama fallback gatekeeper on Stage-1 miss.
         # Runs only when stage2 is enabled, NOT in debug_mode, and a live extractor
         # exists. The None guard defends against any window where stage2_enabled is
@@ -1290,7 +1295,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             and not self._first_refresh_done
         ):
             _LOGGER.debug(
-                "Gmail message %s: inline fallback deferred — first refresh not yet complete",
+                "%s %s: inline fallback deferred — first refresh not yet complete",
+                log_label,
                 msg_key,
             )
             return  # leave UN-marked; re-inspected on the next poll
@@ -1312,7 +1318,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     >= MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL
                 ):
                     _LOGGER.debug(
-                        "Gmail message %s: fallback cap reached (%d/%d) — skipping this poll",
+                        "%s %s: fallback cap reached (%d/%d) — skipping this poll",
+                        log_label,
                         msg_key,
                         self._stage2_fallback_extractions_this_poll,
                         MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
@@ -1330,8 +1337,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     and _time.monotonic() >= self._stage2_fallback_inline_deadline
                 ):
                     _LOGGER.debug(
-                        "Gmail message %s: inline fallback wall-clock budget exhausted"
+                        "%s %s: inline fallback wall-clock budget exhausted"
                         " — deferring to next poll",
+                        log_label,
                         msg_key,
                     )
                     return  # do NOT cache (retry next poll)
@@ -1379,10 +1387,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                         fb_err, OllamaSchemaError
                     ) and self._register_inline_schema_failure(msg_key):
                         _LOGGER.warning(
-                            "Gmail message %s ('%s' from '%s'): quarantining after "
+                            "%s %s ('%s' from '%s'): quarantining after "
                             "%d consecutive inline OllamaSchemaError failures — marking "
                             "seen to stop the per-poll re-inference loop (session-scoped; "
                             "cleared on restart)",
+                            log_label,
                             msg_key,
                             meta.get("subject", ""),
                             meta.get("from", ""),
@@ -1402,8 +1411,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     # on; the message stays un-cached, so it is retried next poll. Finding
                     # #450: escalate at most once per poll (shared latch).
                     _LOGGER.error(
-                        "Gmail message %s: unexpected error during Ollama fallback "
+                        "%s %s: unexpected error during Ollama fallback "
                         "extraction — skipping this message: %s",
+                        log_label,
                         msg_key,
                         fb_err,
                         exc_info=True,
@@ -1444,8 +1454,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     fb_clean, fb_reason or "no_carrier_match"
                 )
                 _LOGGER.debug(
-                    "Gmail message %s: fallback carrier-format gate rejected '%s' "
+                    "%s %s: fallback carrier-format gate rejected '%s' "
                     "(reason=%s) — cached as rejected",
+                    log_label,
                     msg_key,
                     fb_clean,
                     fb_reason,
@@ -1463,7 +1474,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # the shared hub's dedup set, so a re-POST would burn a quota slot).
                 self._mark_message_seen(msg_key)
                 _LOGGER.debug(
-                    "Gmail message %s: fallback tracking %s already submitted — skipping",
+                    "%s %s: fallback tracking %s already submitted — skipping",
+                    log_label,
                     msg_key,
                     fb_clean,
                 )
@@ -1491,8 +1503,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                         raw_order_name, on_reason or "ungrounded"
                     )
                     _LOGGER.debug(
-                        "Gmail message %s: inline fallback grounding gate rejected "
+                        "%s %s: inline fallback grounding gate rejected "
                         "order_name '%s' (reason=%s)",
+                        log_label,
                         msg_key,
                         raw_order_name,
                         on_reason,
@@ -1502,8 +1515,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                         raw_order_summary, os_reason or "ungrounded"
                     )
                     _LOGGER.debug(
-                        "Gmail message %s: inline fallback grounding gate rejected "
+                        "%s %s: inline fallback grounding gate rejected "
                         "order_summary '%s' (reason=%s)",
+                        log_label,
                         msg_key,
                         raw_order_summary,
                         os_reason,
@@ -1553,15 +1567,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     # converges to a persisted seen ID via dedup once POSTed.
                     self._mark_inflight(msg_key)
                     _LOGGER.debug(
-                        "Gmail message %s: Ollama fallback found tracking %s — "
+                        "%s %s: Ollama fallback found tracking %s — "
                         "enqueued (re-fetch converges the seen-ID)",
+                        log_label,
                         msg_key,
                         fb_clean,
                     )
                 else:
                     _LOGGER.warning(
-                        "Gmail message %s: Stage-2 queue full — fallback tracking %s "
+                        "%s %s: Stage-2 queue full — fallback tracking %s "
                         "not enqueued; will retry next poll",
+                        log_label,
                         msg_key,
                         fb_clean,
                     )
@@ -1576,8 +1592,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # (finding #523).
         if self._diagnostics.stage2_enabled and not debug_mode:
             _LOGGER.debug(
-                "Gmail message %s: stage2 enabled but extractor unavailable — "
+                "%s %s: stage2 enabled but extractor unavailable — "
                 "leaving un-cached for retry",
+                log_label,
                 msg_key,
             )
             return
