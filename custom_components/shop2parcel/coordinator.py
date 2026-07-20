@@ -1183,6 +1183,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         raw_msg_id are forwarded onto the Stage2Job (see its docstring).
         """
         assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
+        assert self.config_entry is not None
         if normalized_tn in self._stage2_quarantined_tns:
             # WR-03: poison quarantine — extraction for this tracking number failed
             # STAGE2_MSG_QUARANTINE_THRESHOLD times in a row this session. Skip the
