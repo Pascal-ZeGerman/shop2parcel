@@ -195,6 +195,20 @@ def stage2_failing_notification_id(entry_id: str) -> str:
     return f"{STAGE2_FAILING_NOTIFICATION_ID_PREFIX}_{entry_id}"
 
 
+# Phase 34 (D-06): hub-scoped consolidated Stage-2 failure notification —
+# ONE notification for the whole HA instance instead of one per account.
+# HUB_STAGE2_NOTIFY_THRESHOLD is deliberately HIGHER than the per-account
+# STAGE2_NOTIFY_THRESHOLD=3 above: the hub aggregates the affected-account
+# count across up to ~10 accounts sharing the queue+worker, so the streak
+# crosses the threshold faster than any single account would, and the
+# all-recovered dismiss (D-07) makes a low threshold sticky/noisy. Unlike
+# stage2_failing_notification_id() above, HUB_STAGE2_FAILING_NOTIFICATION_ID
+# is a FIXED string, not a per-entry helper — there is exactly ONE hub-scoped
+# notification with no entry_id parameter (D-05/D-08).
+HUB_STAGE2_NOTIFY_THRESHOLD: int = 5
+HUB_STAGE2_FAILING_NOTIFICATION_ID: str = "shop2parcel_hub_stage2_failing"
+
+
 def normalize_tracking_number(tracking_number: str) -> str:
     """Normalize a tracking number to the single canonical dedup form.
 
