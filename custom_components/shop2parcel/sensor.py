@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
@@ -45,6 +45,13 @@ from .diagnostic_sensor import (
     Stage2Sensor,
     TrackingNumbersFoundSensor,
 )
+
+if TYPE_CHECKING:
+    # Phase 34-03: hub.py imports coordinator.py, so a module-level runtime
+    # import here would create a circular import. TYPE_CHECKING-only import
+    # lets GlobalQuotaSensor's hub param be typed without one (mirrors
+    # coordinator.py's identical TYPE_CHECKING guard for self._hub).
+    from .hub import Shop2ParcelHub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -210,6 +217,65 @@ class ParcelAppQuotaSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEnti
             "daily_limit": PARCELAPP_DAILY_LIMIT,
             "used_today": self.coordinator.used_today,
             "exhausted": self.coordinator.quota_is_exhausted,
+            "description": ("estimate from our own count; authoritative only once a 429 is seen"),
+        }
+
+
+class GlobalQuotaSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
+    """Hub-owned global remaining-ParcelApp-quota sensor (DIAG-01, D-01/D-02/D-03).
+
+    Additive to ParcelAppQuotaSensor (D-01) — the three per-account sensors
+    are NOT removed. Post-Phase-31, every per-account quota sensor already
+    reads the shared hub value via coordinator.used_today, so this entity's
+    number is deliberately identical; its purpose is being the ONE
+    hub-scoped, removal-surviving source of truth under a distinct
+    "Shop2Parcel Hub" device (D-02), disambiguated by device + name rather
+    than by removing existing entities.
+
+    Registered under a hub-scoped identifier (not entry_id-scoped, D-02) so
+    exactly one instance exists regardless of which/how many accounts are
+    attached. Registration in async_setup_entry is deferred to 34-05 to
+    avoid the unique_id-collision anti-pattern (R-01) — this class only
+    defines the value/attribute/identity surface, unit-tested by driving
+    hub state directly.
+
+    Reads ONLY the public hub.used_today / hub.quota_is_exhausted
+    properties — never the private _used_today / quota_exhausted_until
+    (mirrors ParcelAppQuotaSensor's discipline, RESEARCH Pitfall 4 /
+    STRIDE T-26-05 / T-34-06).
+    """
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_name = "Hub Quota Remaining"
+    _unique_id_suffix = "hub_quota_remaining"  # hub-scoped — never entry_id-scoped (D-02)
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        hub: Shop2ParcelHub,
+    ) -> None:
+        super().__init__(coordinator)
+        self._hub = hub
+        self._attr_unique_id = f"{DOMAIN}___shared___{self._unique_id_suffix}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, "__shared__")},
+            name="Shop2Parcel Hub",
+        )
+
+    @property
+    def native_value(self) -> int:
+        """Estimated shared remaining quota; clamped to 0 (never negative)."""
+        return max(0, PARCELAPP_DAILY_LIMIT - self._hub.used_today)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """daily_limit, used_today, exhausted flag, scope='shared', and estimate caveat."""
+        return {
+            "daily_limit": PARCELAPP_DAILY_LIMIT,
+            "used_today": self._hub.used_today,
+            "exhausted": self._hub.quota_is_exhausted,
+            "scope": "shared",
             "description": ("estimate from our own count; authoritative only once a 429 is seen"),
         }
 
