@@ -5481,10 +5481,9 @@ async def test_fallback_enqueue_marks_inflight_not_seen(hass, mock_stage2_entry)
         coord._extractor = mock_extractor
         # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
         coord._first_refresh_done = True
-        # Provide a real queue so the real _enqueue_stage2 can put_nowait.
-        import asyncio as _asyncio
-
-        coord._stage2_queue = _asyncio.Queue(maxsize=100)
+        # The _auto_attach_test_hub autouse fixture (conftest.py) already attaches a
+        # real (I/O-free) test hub to this coordinator, so the real _enqueue_stage2
+        # -> hub.enqueue(job) path has somewhere to go with no additional setup.
         await coord._async_update_data()
 
     assert "msg_fb_inflight" not in coord._seen_message_ids

@@ -68,6 +68,7 @@ from .const import (
     STAGE2_MSG_QUARANTINE_THRESHOLD,
     STAGE2_NOTIFY_COOLDOWN_S,
     STAGE2_NOTIFY_THRESHOLD,
+    EnqueueOutcome,
     normalize_tracking_number,
     stage2_cap_notification_id,
     stage2_failing_notification_id,
@@ -1260,43 +1261,39 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         prefetched_result: Any | None = None,
         raw_msg_id: str | None = None,
     ) -> bool:
-        """Enqueue a Stage-2 job with in-flight dedup and drop-newest backpressure.
+        """Enqueue a Stage-2 job onto the shared hub queue (WORK-01/02/03).
 
-        QUE-06: skips silently if normalized_tn already in _stage2_enqueued_keys.
-        QUE-03: on QueueFull, logs warning + emits stage2_dropped_backpressure event,
-                does NOT write to the shared hub's dedup set.
-        Uses put_nowait (never await put) per QUE-07.
+        Phase 32 cutover: the coordinator keeps its per-account poison-quarantine
+        pre-check (_stage2_quarantined_tns) and builds the Stage2Job, then
+        delegates ALL queue mechanics — global in-flight dedup, per-account
+        in-flight cap, and the global bound — to self._hub.enqueue(job) (D-02).
+        The hub returns a three-way EnqueueOutcome:
 
-        The add to _stage2_enqueued_keys happens ONLY after successful put_nowait
-        (Anti-Patterns §3) — if put_nowait raises QueueFull, the key is NOT added.
+        - ENQUEUED: bumps _diagnostics.stage2_enqueued_total, returns True.
+        - SKIPPED_DUP: a job for this tracking number is already in-flight
+          (this or another message/account) — returns False, no event, no
+          counter change (this call did not create a job).
+        - DROPPED_BACKPRESSURE: per-account cap or global bound is full — emits
+          stage2_dropped_backpressure (R3: no silent drop) + bumps
+          _diagnostics.stage2_dropped_backpressure_total, returns False.
 
-        Phase 27 fix: returns True ONLY when THIS call created a new Stage-2 job for this
-        tracking number (a successful put_nowait). Returns False for both QueueFull (job
-        dropped) AND the in-flight-skip case (the tracking number is already queued — possibly
-        from a DIFFERENT message). The fallback caller uses the True return to decide whether
-        to mark its message in-flight: it must only do so when it actually owns a job, so a
-        defer's _release_inflight (keyed by that job's raw_msg_id) frees the right message
-        (finding #674). A False return leaves the message un-pinned, so it converges via the
-        tracking-number dedup-skip / re-fetch instead. prefetched_result and raw_msg_id are
-        forwarded onto the Stage2Job (see its docstring).
+        Phase 27 fix (preserved): returns True ONLY when THIS call created a new
+        Stage-2 job for this tracking number. The fallback caller uses the True
+        return to decide whether to mark its message in-flight: it must only do
+        so when it actually owns a job, so a defer's _release_inflight (keyed by
+        that job's raw_msg_id) frees the right message (finding #674). A False
+        return leaves the message un-pinned, so it converges via the
+        tracking-number dedup-skip / re-fetch instead. prefetched_result and
+        raw_msg_id are forwarded onto the Stage2Job (see its docstring).
         """
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
         if normalized_tn in self._stage2_quarantined_tns:
             # WR-03: poison quarantine — extraction for this tracking number failed
             # STAGE2_MSG_QUARANTINE_THRESHOLD times in a row this session. Skip the
             # re-enqueue: the Gmail Stage-1 and IMAP paths re-parse and re-enqueue on
             # every poll, so without this seam the retry loop the quarantine was built
             # to stop stayed live on those paths. Session-scoped; a restart re-tries.
-            return False
-        if normalized_tn in self._stage2_enqueued_keys:
-            # In-flight skip (QUE-06): a job for this tracking number already exists (this or
-            # another message). Return False — THIS call did not create a job, so the caller
-            # must not pin its message in-flight under a job it does not own (finding #674).
-            return False
-        if self._stage2_queue is None:
-            # IN-03: stop/teardown race — async_stop_stage2 nulled the queue while a
-            # poll was still iterating. Drop this enqueue; the message stays
-            # re-fetchable and re-enqueues after the next (re)start.
-            _LOGGER.debug("Stage-2 queue is stopped — dropping enqueue for %s", normalized_tn)
+            # Per-account pre-check — retained ahead of the hub delegation below.
             return False
         job = Stage2Job(
             storage_key=storage_key,
@@ -1309,13 +1306,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             prefetched_result=prefetched_result,
             raw_msg_id=raw_msg_id,
         )
-        try:
-            self._stage2_queue.put_nowait(job)
-        except asyncio.QueueFull:
+        outcome = self._hub.enqueue(job)
+        if outcome is EnqueueOutcome.DROPPED_BACKPRESSURE:
             _LOGGER.warning(
-                "Stage-2 queue full (%d/%d); dropping %s — will retry next poll",
-                self._stage2_queue.qsize(),
-                self._stage2_queue.maxsize,
+                "Stage-2 backpressure (hub cap/bound full); dropping %s — will retry next poll",
                 normalized_tn,
             )
             self._emit_scan_event(
@@ -1328,8 +1322,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             return (
                 False  # NO dedup write (QUE-03), NO add to enqueued_keys; caller must not mark seen
             )
-        self._stage2_enqueued_keys.add(normalized_tn)  # add AFTER successful put (Anti-Patterns §3)
-        self._diagnostics.stage2_enqueued_total += 1  # DIAG-02: only on successful put_nowait
+        if outcome is EnqueueOutcome.SKIPPED_DUP:
+            # In-flight skip: a job for this tracking number already exists (this or
+            # another message/account). Return False — THIS call did not create a job, so
+            # the caller must not pin its message in-flight under a job it does not own
+            # (finding #674).
+            return False
+        self._diagnostics.stage2_enqueued_total += 1  # DIAG-02: only on successful enqueue
         return True
 
     async def _async_stage2_worker(self) -> None:

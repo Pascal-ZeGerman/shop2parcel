@@ -17,6 +17,7 @@ from custom_components.shop2parcel.const import (
     CONF_QUEUE_MAXLEN,
     DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
+    STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
 )
 from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator, Stage2Job
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
@@ -296,7 +297,10 @@ async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
         assert coord.stage2_queue_depth == 0
         assert coord.email_processing_active is False
 
-        # IN-03: an enqueue racing the teardown is dropped gracefully (no assert crash).
+        # Phase 32 cutover: _enqueue_stage2 now delegates entirely to the shared hub
+        # (hub.enqueue), independent of this entry's now-idle per-entry queue/worker
+        # lifecycle — an enqueue after async_stop_stage2 no longer races a torn-down
+        # local queue, it succeeds via the still-attached hub (no assert crash either way).
         assert (
             coord._enqueue_stage2(
                 "1Z999AA10123456785",
@@ -306,7 +310,7 @@ async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
                 message_id="late-msg",
                 meta={"subject": "late", "from": "t@example.com"},
             )
-            is False
+            is True
         )
 
 
@@ -316,7 +320,15 @@ async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
 
 
 async def test_in_flight_dedup_prevents_double_enqueue(hass, mock_stage2_config_entry):
-    """Calling _enqueue_stage2 twice with the same normalized_tn enqueues exactly one item."""
+    """Calling _enqueue_stage2 twice with the same normalized_tn enqueues exactly one item.
+
+    Phase 32 cutover: _enqueue_stage2 now delegates dedup entirely to the shared hub's
+    global in-flight set (hub.enqueue) — assert on the hub's per-account in-flight count
+    instead of the retired per-entry _stage2_queue/_stage2_enqueued_keys attributes.
+    The hub's own dedup-gate unit coverage lives in test_hub.py
+    (test_enqueue_duplicate_tn_returns_skipped_dup); this test locks the coordinator-side
+    call contract (_enqueue_stage2 return value on dup).
+    """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -339,7 +351,7 @@ async def test_in_flight_dedup_prevents_double_enqueue(hass, mock_stage2_config_
         meta = {"subject": "Shipped", "from": "noreply@shopify.com", "date": "", "snippet": ""}
         normalized_tn = "1Z1"
 
-        coord._enqueue_stage2(
+        first = coord._enqueue_stage2(
             normalized_tn,
             storage_key=normalized_tn,
             shipment=shipment,
@@ -347,8 +359,8 @@ async def test_in_flight_dedup_prevents_double_enqueue(hass, mock_stage2_config_
             message_id="msg:1",
             meta=meta,
         )
-        # Second call with the same normalized_tn — must be silently skipped.
-        coord._enqueue_stage2(
+        # Second call with the same normalized_tn — must be silently skipped (SKIPPED_DUP).
+        second = coord._enqueue_stage2(
             normalized_tn,
             storage_key=normalized_tn,
             shipment=shipment,
@@ -357,23 +369,27 @@ async def test_in_flight_dedup_prevents_double_enqueue(hass, mock_stage2_config_
             meta=meta,
         )
 
-        assert coord._stage2_queue.qsize() == 1
-        assert coord._stage2_enqueued_keys == {"1Z1"}
+        assert first is True
+        assert second is False
+        assert coord._hub.inflight_count(coord.config_entry.entry_id) == 1
 
 
 # ---------------------------------------------------------------------------
-# Test 6: drop-newest backpressure on QueueFull (QUE-03)
+# Test 6: drop-newest backpressure on per-account cap exhaustion (WORK-03)
 # ---------------------------------------------------------------------------
 
 
 async def test_drop_newest_backpressure(hass, mock_stage2_config_entry, caplog):
-    """On QueueFull: warning logged, backpressure event emitted, dropped TN NOT in dedup."""
+    """On per-account in-flight cap exhaustion: event emitted, dropped TN NOT in dedup.
+
+    Phase 32 cutover: backpressure is now enforced by the shared hub (global bound
+    HUB_STAGE2_QUEUE_MAXLEN=64 + per-account cap STAGE2_PER_ACCOUNT_INFLIGHT_CAP=8),
+    not the retired per-entry CONF_QUEUE_MAXLEN-sized queue. The hub's own gate-order
+    and cap-boundary unit coverage lives in test_hub.py; this test locks the
+    coordinator-side drop-emission contract (_emit_scan_event + diagnostics counter
+    on DROPPED_BACKPRESSURE).
+    """
     mock_stage2_config_entry.add_to_hass(hass)
-    # Use maxsize=1 so the second enqueue triggers QueueFull.
-    hass.config_entries.async_update_entry(
-        mock_stage2_config_entry,
-        options={CONF_OLLAMA_URL: "http://localhost:11434", CONF_QUEUE_MAXLEN: 1},
-    )
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -394,39 +410,42 @@ async def test_drop_newest_backpressure(hass, mock_stage2_config_entry, caplog):
         shipment = _make_shipment()
         meta = {"subject": "Shipped", "from": "noreply@shopify.com", "date": "", "snippet": ""}
 
-        # First enqueue fills the queue (maxsize=1).
-        coord._enqueue_stage2(
-            "1Z_FILL",
-            storage_key="1Z_FILL",
-            shipment=shipment,
-            html_body="<html/>",
-            message_id="msg:fill",
-            meta=meta,
-        )
-        assert coord._stage2_queue.qsize() == 1
-
-        # Second enqueue with a DIFFERENT normalized_tn triggers QueueFull (not dedup skip).
-        dropped_tn = "1Z_DROP"
-        with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
-            coord._enqueue_stage2(
-                dropped_tn,
-                storage_key=dropped_tn,
+        # Fill the per-account in-flight cap (8) with distinct tracking numbers.
+        for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+            filled = coord._enqueue_stage2(
+                f"1Z_FILL_{i}",
+                storage_key=f"1Z_FILL_{i}",
                 shipment=shipment,
                 html_body="<html/>",
-                message_id="msg:drop",
+                message_id=f"msg:fill:{i}",
                 meta=meta,
             )
-
-        # (a) Warning must have been logged.
-        assert any("Stage-2 queue full" in rec.message for rec in caplog.records), (
-            "Expected 'Stage-2 queue full' warning in caplog"
+            assert filled is True
+        assert coord._hub.inflight_count(coord.config_entry.entry_id) == (
+            STAGE2_PER_ACCOUNT_INFLIGHT_CAP
         )
+
+        # One more (different normalized_tn) triggers DROPPED_BACKPRESSURE (cap full).
+        dropped_tn = "1Z_DROP"
+        dropped = coord._enqueue_stage2(
+            dropped_tn,
+            storage_key=dropped_tn,
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="msg:drop",
+            meta=meta,
+        )
+
+        # (a) Return value is False — no job was created for this call.
+        assert dropped is False
         # (b) Last scan event must be stage2_dropped_backpressure.
         assert coord.diagnostics.scan_events[-1]["outcome"] == "stage2_dropped_backpressure"
-        # (c) Dropped TN must NOT be in the shared hub's dedup set.
+        # (c) Diagnostics counter bumped exactly once (R3: no silent drop).
+        assert coord.diagnostics.stage2_dropped_backpressure_total == 1
+        # (d) Dropped TN must NOT be in the shared hub's dedup set.
         assert not coord._hub.is_submitted(dropped_tn)
-        # (d) Dropped TN must NOT be in _stage2_enqueued_keys.
-        assert dropped_tn not in coord._stage2_enqueued_keys
+        # (e) Dropped TN must NOT be in the hub's global in-flight dedup set.
+        assert dropped_tn not in coord._hub._stage2_enqueued_keys
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +458,10 @@ async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
 
     Validates QUE-01 acceptance criterion R4: the Stage-2 branch routes emails to
     _enqueue_stage2 and completely bypasses the inline parcel POST section.
+
+    Phase 32 cutover: the enqueued job now lands on the shared hub's queue (not the
+    retired per-entry _stage2_queue) — the autouse test hub (conftest.py) never calls
+    hub.async_setup(), so no worker drains it and the item is safe to inspect directly.
     """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
@@ -483,13 +506,13 @@ async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
 
         # (a) No parcel POST must be made.
         mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
-        # (b) Queue must contain exactly 1 item.
-        assert coord._stage2_queue.qsize() == 1
+        # (b) The shared hub's queue must contain exactly 1 item.
+        assert coord._hub._queue.qsize() == 1
         # (c) The item is a Stage2Job with the expected tracking number.
-        job: Stage2Job = coord._stage2_queue.get_nowait()
+        job: Stage2Job = coord._hub._queue.get_nowait()
         assert job.shipment.tracking_number == "1Z999AA10123456784"
-        # (d) Normalized TN is in _stage2_enqueued_keys.
-        assert "1Z999AA10123456784" in coord._stage2_enqueued_keys
+        # (d) Normalized TN is in the hub's global in-flight dedup set.
+        assert "1Z999AA10123456784" in coord._hub._stage2_enqueued_keys
 
 
 # ---------------------------------------------------------------------------
@@ -498,17 +521,19 @@ async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
 
 
 async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_entry, caplog):
-    """QUE-07: Pre-filled queue triggers drop-newest and _async_update_data returns synchronously.
+    """QUE-07: A full hub queue/cap triggers drop-newest and _async_update_data returns
+    synchronously.
 
-    Validates: put_nowait is used (not await put), no Ollama imports exist in coordinator
-    subclass files, and the drop-newest backpressure event is emitted rather than hanging.
+    Validates: hub.enqueue's put_nowait is used (not await put), no Ollama imports exist
+    in coordinator subclass files, and the drop-newest backpressure event is emitted
+    rather than hanging.
+
+    Phase 32 cutover: backpressure is now enforced by the shared hub (global bound
+    HUB_STAGE2_QUEUE_MAXLEN=64 + per-account cap STAGE2_PER_ACCOUNT_INFLIGHT_CAP=8),
+    not the retired per-entry CONF_QUEUE_MAXLEN-sized queue — pre-fill the account's
+    hub in-flight cap instead of the (now inert) per-entry queue.
     """
-    # Set maxsize=1 to trigger QueueFull on the first enqueue after pre-fill.
     mock_stage2_config_entry.add_to_hass(hass)
-    hass.config_entries.async_update_entry(
-        mock_stage2_config_entry,
-        options={CONF_OLLAMA_URL: "http://localhost:11434", CONF_QUEUE_MAXLEN: 1},
-    )
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -545,30 +570,29 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
         coord._diagnostics.stage2_enabled = True
         await coord.async_start_stage2()
 
-        # WR-06: the poll now yields to the event loop at its executor awaits, which
-        # would let the live worker drain the pre-filled queue before the enqueue —
-        # cancel the worker so the queue STAYS full and QueueFull is actually hit
-        # (the drop-newest path under test). With `await put` instead of put_nowait
-        # the poll would now hang here with no worker, so the assertion below still
-        # proves the put_nowait contract.
+        # The autouse test hub (conftest.py) never calls hub.async_setup(), so there is
+        # no live worker to drain the hub queue — no cancel/race concern remains for the
+        # (now-idle) per-entry worker either way.
         assert coord._stage2_worker_task is not None
-        coord._stage2_worker_task.cancel()
-        await asyncio.sleep(0)
 
-        # Pre-fill queue to maxsize=1 with a filler job (different TN to avoid dedup skip).
+        # Pre-fill the account's hub in-flight cap with filler jobs (distinct TNs to
+        # avoid dedup skip) so the incoming poll's enqueue hits DROPPED_BACKPRESSURE.
         filler_shipment = _make_shipment("filler_msg")
-        coord._stage2_queue.put_nowait(
-            Stage2Job(
-                storage_key="filler",
-                normalized_tn="filler",
-                shipment=filler_shipment,
-                html_body="",
-                message_id="filler-msg-id",
-                meta={"subject": "filler", "from": "filler@example.com"},
-                entry_id=coord.config_entry.entry_id,
+        for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+            coord._hub.enqueue(
+                Stage2Job(
+                    storage_key=f"filler-{i}",
+                    normalized_tn=f"filler-{i}",
+                    shipment=filler_shipment,
+                    html_body="",
+                    message_id=f"filler-msg-id-{i}",
+                    meta={"subject": "filler", "from": "filler@example.com"},
+                    entry_id=coord.config_entry.entry_id,
+                )
             )
+        assert coord._hub.inflight_count(coord.config_entry.entry_id) == (
+            STAGE2_PER_ACCOUNT_INFLIGHT_CAP
         )
-        assert coord._stage2_queue.full()
 
         # Run the poll loop — _async_update_data must return synchronously (no hang).
         with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
