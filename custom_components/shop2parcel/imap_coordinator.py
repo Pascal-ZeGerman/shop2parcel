@@ -397,13 +397,20 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                     )
                 else:
                     _LOGGER.debug("IMAP UID %s outcome: %s", uid_str, "no_match")
-                # WR-06: a Stage-1 no-match is TERMINAL on the IMAP path — unlike
-                # Gmail there is no Ollama fallback gatekeeper that could later
-                # judge this message, so mark it seen to stop re-parsing it every
-                # poll. Never marked in debug mode (dry-runs must not poison the
-                # persisted cache — mirrors Gmail finding #749).
-                if not debug_mode:
-                    self._mark_message_seen(uid_key)
+
+                # Phase 33 Plan 03 (PAR-01/PAR-03): a Stage-1 miss now runs the same
+                # shared inline Ollama fallback gatekeeper as Gmail — the gatekeeper
+                # owns the mark-seen decision (stage2-disabled/debug/first-refresh/
+                # cap/budget/quarantine all handled inside _run_inline_fallback).
+                await self._run_inline_fallback(
+                    msg_key=uid_key,
+                    prefix="imap:",
+                    html=html,
+                    meta=imap_meta,
+                    email_date=0,  # synthetic — IMAP has no guaranteed internalDate
+                    candidate_tokens=result.candidate_tokens,
+                    debug_mode=debug_mode,
+                )
                 continue
             # WR-06: per-message convergence bookkeeping (mirrors the Gmail model).
             # msg_pending_retry: a shipment is awaiting retry (quota-blocked or

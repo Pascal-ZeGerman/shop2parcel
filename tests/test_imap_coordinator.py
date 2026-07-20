@@ -998,8 +998,7 @@ async def test_imap_fallback_schema_quarantine_threshold(hass, mock_imap_stage2_
         f"got {mock_extractor.async_extract.await_count} (infinite-loop regression?)"
     )
     assert uid_key in coord._seen_message_ids, (
-        "A quarantined schema-failing IMAP email must be marked seen so it stops "
-        "being re-fetched"
+        "A quarantined schema-failing IMAP email must be marked seen so it stops being re-fetched"
     )
 
 
