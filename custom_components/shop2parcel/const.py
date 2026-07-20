@@ -2,6 +2,7 @@
 
 import re
 from datetime import timedelta
+from enum import Enum
 
 DOMAIN = "shop2parcel"
 
@@ -119,6 +120,38 @@ MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL: int = 10
 # global timeout and caps steady-state inline Ollama time on every poll.
 MAX_STAGE2_FALLBACK_INLINE_SECONDS: float = 60.0
 STAGE2_CAP_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_cap"
+
+# Phase 32 (D-12, WORK-03): shared hub Stage-2 queue/worker bounds. Both are
+# fixed named constants — NOT user-configurable (contrast the vestigial
+# per-account CONF_QUEUE_MAXLEN/DEFAULT_QUEUE_MAXLEN below, which predates the
+# shared hub queue and is retired once the per-entry queue/worker are cut over).
+# HUB_STAGE2_QUEUE_MAXLEN: global asyncio.Queue maxsize on the hub — the
+#   drop-newest bound across ALL accounts sharing the single worker.
+HUB_STAGE2_QUEUE_MAXLEN: int = 64
+# STAGE2_PER_ACCOUNT_INFLIGHT_CAP: max jobs enqueued-but-not-yet-completed for
+#   a single entry_id at any time, independent of the global bound above.
+STAGE2_PER_ACCOUNT_INFLIGHT_CAP: int = 8
+
+
+class EnqueueOutcome(Enum):
+    """Three-way distinguishable result of hub.enqueue() (D-02, Phase 32 WORK-03).
+
+    Lives in const.py (not hub.py or coordinator.py) so both modules can import
+    it with no circular import — hub.py already imports coordinator at module
+    scope, and coordinator imports hub only under TYPE_CHECKING.
+
+    ENQUEUED: job accepted onto the shared queue; coordinator bumps
+        stage2_enqueued_total.
+    DROPPED_BACKPRESSURE: rejected by either bound (global queue-full or the
+        per-account in-flight cap); coordinator emits stage2_dropped_backpressure
+        and bumps stage2_dropped_backpressure_total.
+    SKIPPED_DUP: a job for this tracking number is already in flight (this or
+        another entry); silent no-op — no event, no counter bump.
+    """
+
+    ENQUEUED = "enqueued"
+    DROPPED_BACKPRESSURE = "dropped_backpressure"
+    SKIPPED_DUP = "skipped_dup"
 
 
 def stage2_cap_notification_id(entry_id: str) -> str:
