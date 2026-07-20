@@ -524,3 +524,188 @@ async def test_no_dedup_bypass_through_hub_worker_path(
         # must have gated on hub.is_submitted() and skipped the POST entirely —
         # the surviving path never bypasses the global dedup check.
         mocks.mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Phase 34-06 (LIFE-01a, D-09, PROH-2): add->add->remove->add mixed
+# Gmail/IMAP step-wise lifecycle capstone test.
+# ---------------------------------------------------------------------------
+
+
+async def test_add_add_remove_add_mixed_fleet(hass, mock_config_entry, mock_imap_config_entry):
+    """LIFE-01a (D-09): a step-wise add(Gmail A) -> add(IMAP B) ->
+    remove(A) -> add(Gmail C) sequence over a mixed fleet, driven through
+    the REAL hass.config_entries.async_setup/async_unload machinery (not a
+    single bundled call — each step is its own individual call, mirroring
+    how a user actually adds/removes accounts one at a time).
+
+    After EACH step asserts: hub._refcount == expected,
+    hass.data[DOMAIN]["__shared__"] is the same singleton hub object, both
+    global sensors' native_value are correct, and each surviving account's
+    per-account ParcelAppQuotaSensor (which mirrors the same shared value,
+    D-01) reads correctly. Quota/queue state is driven directly on the hub
+    (hub.try_consume() / hub._inflight) — no live Ollama/network — so these
+    assertions are load-bearing, not incidentally correct (PROH-2/D-10):
+    breaking any one of refcount, hub singleton identity, or a sensor value
+    makes this test fail (demonstrated fail-first — see SUMMARY.md).
+    """
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+    from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import PARCELAPP_DAILY_LIMIT  # noqa: PLC0415
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+    from custom_components.shop2parcel.sensor import (  # noqa: PLC0415
+        GlobalQuotaSensor,
+        ParcelAppQuotaSensor,
+    )
+
+    # A third, distinct Gmail-shaped account (C) — non-colliding unique_id.
+    mock_config_entry_c = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "auth_implementation": DOMAIN,
+            "token": {
+                "access_token": "fake-access-token-c",
+                "refresh_token": "fake-refresh-token-c",
+                "expires_at": 9999999999.0,
+                "token_type": "Bearer",
+                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+            },
+            "api_key": "test-parcelapp-key-c",
+        },
+        unique_id="user3@gmail.com",
+    )
+
+    registry = er.async_get(hass)
+    quota_unique_id = f"{DOMAIN}___shared___{GlobalQuotaSensor._unique_id_suffix}"
+    queue_unique_id = f"{DOMAIN}___shared___{GlobalQueueSensor._unique_id_suffix}"
+
+    def _assert_global_sensors(expected_quota_remaining: int, expected_queue_depth: int) -> None:
+        quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert quota_entity_id is not None, "GlobalQuotaSensor must be registered"
+        assert queue_entity_id is not None, "GlobalQueueSensor must be registered"
+        quota_state = hass.states.get(quota_entity_id)
+        queue_state = hass.states.get(queue_entity_id)
+        assert quota_state is not None and quota_state.state != "unavailable"
+        assert queue_state is not None and queue_state.state != "unavailable"
+        assert int(quota_state.state) == expected_quota_remaining, (
+            f"GlobalQuotaSensor expected {expected_quota_remaining}, got {quota_state.state}"
+        )
+        assert int(queue_state.state) == expected_queue_depth, (
+            f"GlobalQueueSensor expected {expected_queue_depth}, got {queue_state.state}"
+        )
+
+    def _assert_per_account_quota(entry_id: str, expected_quota_remaining: int) -> None:
+        uid = f"{DOMAIN}_{entry_id}_{ParcelAppQuotaSensor._unique_id_suffix}"
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, uid)
+        assert entity_id is not None, f"per-account ParcelAppQuotaSensor missing for {entry_id}"
+        state = hass.states.get(entity_id)
+        assert state is not None and state.state != "unavailable"
+        assert int(state.state) == expected_quota_remaining, (
+            f"account {entry_id} quota sensor expected {expected_quota_remaining}, got {state.state}"
+        )
+
+    mock_config_entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-access-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
+
+        # --- Step add-1: Gmail A --------------------------------------------
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        hub = hass.data[DOMAIN]["__shared__"]
+        assert isinstance(hub, Shop2ParcelHub)
+        assert hub._refcount == 1
+        _assert_global_sensors(PARCELAPP_DAILY_LIMIT, 0)
+        _assert_per_account_quota(mock_config_entry.entry_id, PARCELAPP_DAILY_LIMIT)
+
+        # --- Step add-2: IMAP B ----------------------------------------------
+        mock_imap_config_entry.add_to_hass(hass)
+        await hass.config_entries.async_setup(mock_imap_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert hass.data[DOMAIN]["__shared__"] is hub, "same singleton hub across add-2"
+        assert hub._refcount == 2
+
+        coord_a = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+        coord_b = hass.data[DOMAIN][mock_imap_config_entry.entry_id]["coordinator"]
+
+        # Drive quota/queue state directly on the hub (no live Ollama/network)
+        # so the global sensors' values below are load-bearing, not
+        # incidentally correct. CoordinatorEntity state only refreshes on a
+        # coordinator listener push (not on direct hub mutation), so both
+        # attached coordinators' listeners are nudged to observe the change —
+        # mirrors production: a real poll would call async_update_listeners()
+        # after touching hub state.
+        for _ in range(3):
+            assert hub.try_consume() is True
+        hub._inflight.setdefault(mock_imap_config_entry.entry_id, set()).add("tn-inflight-1")
+        coord_a.async_update_listeners()
+        coord_b.async_update_listeners()
+        await hass.async_block_till_done()
+
+        _assert_global_sensors(PARCELAPP_DAILY_LIMIT - 3, 1)
+        _assert_per_account_quota(mock_config_entry.entry_id, PARCELAPP_DAILY_LIMIT - 3)
+        _assert_per_account_quota(mock_imap_config_entry.entry_id, PARCELAPP_DAILY_LIMIT - 3)
+
+        # --- Step remove: unload A (the current global-sensor owner) --------
+        assert hub._global_sensor_owner_entry_id == mock_config_entry.entry_id, (
+            "A registered first and must be the sole owner before this step"
+        )
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert hass.data[DOMAIN]["__shared__"] is hub, "same singleton hub across remove"
+        assert hub._refcount == 1
+
+        # Re-home worked: both global sensors STILL exist, available, and
+        # UNCHANGED — B's per-account sensor is unaffected by A's removal.
+        _assert_global_sensors(PARCELAPP_DAILY_LIMIT - 3, 1)
+        assert hub._global_sensor_owner_entry_id == mock_imap_config_entry.entry_id, (
+            "ownership must re-home to the sole survivor (IMAP B)"
+        )
+        _assert_per_account_quota(mock_imap_config_entry.entry_id, PARCELAPP_DAILY_LIMIT - 3)
+
+        # --- Step add-3: Gmail C ----------------------------------------------
+        mock_config_entry_c.add_to_hass(hass)
+        await hass.config_entries.async_setup(mock_config_entry_c.entry_id)
+        await hass.async_block_till_done()
+
+        assert hass.data[DOMAIN]["__shared__"] is hub, "same singleton hub across add-3"
+        assert hub._refcount == 2
+
+        _assert_global_sensors(PARCELAPP_DAILY_LIMIT - 3, 1)
+        _assert_per_account_quota(mock_config_entry_c.entry_id, PARCELAPP_DAILY_LIMIT - 3)
+        _assert_per_account_quota(mock_imap_config_entry.entry_id, PARCELAPP_DAILY_LIMIT - 3)
+
+        # Cleanup: unload remaining accounts so the hub worker task is
+        # cancelled before the mocked-Store context exits.
+        await hass.config_entries.async_unload(mock_imap_config_entry.entry_id)
+        await hass.config_entries.async_unload(mock_config_entry_c.entry_id)
