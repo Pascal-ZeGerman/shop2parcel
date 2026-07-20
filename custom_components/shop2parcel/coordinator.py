@@ -1606,7 +1606,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             _LOGGER.debug(
                 "Stage-2: tn=%s already forwarded — skipping duplicate POST", normalized_tn
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return
 
         # MRG-05: per-poll POST cap gate (D-09). Checked BEFORE the extractor call so
@@ -1632,7 +1631,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 MAX_STAGE2_POSTS_PER_POLL,
                 normalized_tn,
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
             # IN-07: preserve the fallback's already-computed extraction across the
             # cap-defer — discarding it made the gatekeeper run a SECOND Ollama pass
             # on the same body next poll. The gatekeeper pops this cache before
@@ -1666,7 +1664,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # FAIL-03: no POST, no dedup write; next poll retries (D-04 pure-surface: helper does
                 # not touch control flow; existing discard+return below remain unchanged).
                 self._record_stage2_failure(job, err)
-                self._stage2_enqueued_keys.discard(normalized_tn)
                 if self._register_stage2_msg_failure(job):
                     # Poison-message quarantine: leave the message in the in-flight
                     # skip set (do NOT release) so the poll gate stops re-fetching it,
@@ -1753,7 +1750,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 "[Shop2Parcel DEBUG] Stage-2 dry-run: extracted tn=%s, no POST",
                 normalized_tn,
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)  # LD-01: allow re-enqueue next poll
             self._release_inflight(job)  # re-fetch next poll (dry-run defer)
             return  # no POST, no dedup write, no pending_posts write, no store save
 
@@ -1775,7 +1771,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 outcome="stage2_no_data",
                 tracking_number=None,
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return  # no POST, no dedup write, no _pending_posts write, no store save
 
         # WR-02: Defensive carrier-format re-gate before the worker POST.
@@ -1796,7 +1791,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._diagnostics.record_carrier_format_rejection(
                 wk_clean, wk_reason or "no_carrier_match"
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return  # terminal — no POST, no _pending_posts write, no _release_inflight
 
         # Rebind merged_shipment to the gate-clean canonical form (D-03) so the quota-defer
@@ -1826,7 +1820,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     " (warning already emitted this poll)",
                     normalized_tn,
                 )
-            self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
             return  # no POST, no dedup write; drain handles the pending item
 
         parcel_client = ParcelAppClient(
@@ -1840,7 +1833,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not self._hub.try_consume():
             self._pending_posts[job.storage_key] = merged_shipment
             await self._async_save_store()
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return
 
         _LOGGER.debug(
@@ -1871,7 +1863,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # drain will POST it once quota resets without re-running Ollama (LD-05).
             self._pending_posts[job.storage_key] = merged_shipment
             await self._async_save_store()
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return
         except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
             _LOGGER.debug(
@@ -1884,9 +1875,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # MAX_STAGE2_POSTS_PER_POLL cap slots for non-POST outcomes (the D-12
             # contract is "increment only on successful POST"). D-01: no refund either
             # — the reserve stays consumed (it genuinely occupied a daily-budget slot).
-            # Write dedup so next poll does not retry; discard in-flight key (DEDUP-01: shared hub).
+            # Write dedup so next poll does not retry (DEDUP-01: shared hub).
             self._hub.check_and_mark(normalized_tn)
-            self._stage2_enqueued_keys.discard(normalized_tn)
             # WR-08: mirror the success path — persist AND publish. Persisting without
             # async_set_updated_data left store and live data divergent (the entry was
             # invisible to sensors/cleanup), and the next poll's snapshot then dropped
@@ -1904,7 +1894,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._diagnostics.stage2_transient_error_total += 1
             # D-01: refund the reserved-but-unspent slot back to the shared budget.
             self._hub.refund_consume()
-            self._stage2_enqueued_keys.discard(normalized_tn)
             self._release_inflight(job)  # re-fetch next poll (transient, not lost)
             return
 
@@ -1913,7 +1902,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
         self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
         self._hub.check_and_mark(normalized_tn)  # DEDUP-01: shared dedup-write
-        self._stage2_enqueued_keys.discard(normalized_tn)  # Phase 18 WR-01 fix
 
         # D-06: snapshot pattern — never mutate self.data directly.
         # Guard: self.data is None before the first coordinator refresh; use empty dict as base.
