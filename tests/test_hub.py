@@ -1333,3 +1333,309 @@ async def test_shutdown_cancels_all_three_timers(hass):
         assert hub._midnight_unsub is None
         assert hub._quota_expiry_unsub is None
         assert hub._poll_window_unsub is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 Plan 02: bounded queue + enqueue/_release_inflight/inflight_count
+# (Task 1) and entry_id -> coordinator registry in attach/detach (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def _make_stage2_job(entry_id: str = "entry-a", normalized_tn: str = "TN-1"):
+    """Build a minimal real Stage2Job for hub.enqueue() tests.
+
+    Mirrors tests/test_stage2_worker.py's _make_shipment/Stage2Job
+    construction pattern.
+    """
+    from custom_components.shop2parcel.api.email_parser import ShipmentData  # noqa: PLC0415
+    from custom_components.shop2parcel.coordinator import Stage2Job  # noqa: PLC0415
+
+    shipment = ShipmentData(
+        tracking_number=normalized_tn,
+        carrier_name="UPS",
+        order_name="#1234",
+        message_id=f"msg-{normalized_tn}",
+        email_date=1700000000,
+    )
+    return Stage2Job(
+        storage_key=normalized_tn,
+        normalized_tn=normalized_tn,
+        shipment=shipment,
+        html_body="<html/>",
+        message_id=f"msg-{normalized_tn}",
+        meta={"subject": "test", "from": "test@example.com"},
+        entry_id=entry_id,
+    )
+
+
+def test_enqueue_fresh_job_returns_enqueued_and_records_inflight(hass):
+    """D-02/D-05/D-06: a fresh normalized_tn on an entry with 0 in-flight is
+    ENQUEUED; the job lands in the queue and both _inflight and
+    _stage2_enqueued_keys gain the tn."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-1")
+
+    assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+    assert hub._queue.qsize() == 1
+    assert hub.inflight_count("entry-a") == 1
+    assert "TN-1" in hub._stage2_enqueued_keys
+
+
+def test_enqueue_duplicate_tn_returns_skipped_dup(hass):
+    """R3 dedup: a normalized_tn already in _stage2_enqueued_keys (from ANY
+    entry_id) is SKIPPED_DUP; queue size and both structures unchanged."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    first = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-DUP")
+    assert hub.enqueue(first) is EnqueueOutcome.ENQUEUED
+
+    dup_from_other_account = _make_stage2_job(entry_id="entry-b", normalized_tn="TN-DUP")
+    assert hub.enqueue(dup_from_other_account) is EnqueueOutcome.SKIPPED_DUP
+
+    assert hub._queue.qsize() == 1
+    assert hub.inflight_count("entry-b") == 0
+
+
+def test_enqueue_per_account_cap_boundary(hass):
+    """WORK-03 boundary + empty edges: the 8th job for an entry_id is
+    ENQUEUED, the 9th is DROPPED_BACKPRESSURE, and a second entry_id with 0
+    in-flight still ENQUEUES (R3 empty edge)."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        EnqueueOutcome,
+        STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+        job = _make_stage2_job(entry_id="entry-a", normalized_tn=f"TN-A-{i}")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+    assert hub.inflight_count("entry-a") == STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+
+    ninth_job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-A-9TH")
+    assert hub.enqueue(ninth_job) is EnqueueOutcome.DROPPED_BACKPRESSURE
+    assert hub.inflight_count("entry-a") == STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+    assert "TN-A-9TH" not in hub._stage2_enqueued_keys
+
+    other_job = _make_stage2_job(entry_id="entry-b", normalized_tn="TN-B-1")
+    assert hub.enqueue(other_job) is EnqueueOutcome.ENQUEUED
+    assert hub.inflight_count("entry-b") == 1
+
+
+def test_enqueue_global_bound_fills_then_65th_dropped(hass):
+    """R3 boundary edge: filling the global queue to HUB_STAGE2_QUEUE_MAXLEN
+    (64, spread across 8 entry_ids x 8 jobs so no per-account cap is hit)
+    leaves the 65th job DROPPED_BACKPRESSURE via QueueFull, with nothing
+    recorded for it."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        EnqueueOutcome,
+        HUB_STAGE2_QUEUE_MAXLEN,
+        STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    accounts = HUB_STAGE2_QUEUE_MAXLEN // STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+
+    for acct in range(accounts):
+        for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+            job = _make_stage2_job(entry_id=f"entry-{acct}", normalized_tn=f"TN-{acct}-{i}")
+            assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+    assert hub._queue.qsize() == HUB_STAGE2_QUEUE_MAXLEN
+
+    overflow_job = _make_stage2_job(entry_id="entry-overflow", normalized_tn="TN-OVERFLOW")
+    assert hub.enqueue(overflow_job) is EnqueueOutcome.DROPPED_BACKPRESSURE
+    assert "TN-OVERFLOW" not in hub._stage2_enqueued_keys
+    assert hub.inflight_count("entry-overflow") == 0
+
+
+def test_enqueue_gate_order_dup_before_cap(hass):
+    """Gate order is dedup -> per-account cap -> global bound: a duplicate
+    tn at a FULL per-account cap still returns SKIPPED_DUP, not
+    DROPPED_BACKPRESSURE."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        EnqueueOutcome,
+        STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+        hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn=f"TN-A-{i}"))
+    assert hub.inflight_count("entry-a") == STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+
+    dup_job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-A-0")
+    assert hub.enqueue(dup_job) is EnqueueOutcome.SKIPPED_DUP
+
+
+def test_enqueue_verbatim_tn_no_normalization(hass):
+    """Prohibition: normalized_tn is matched verbatim — a byte-different key
+    (differing case/whitespace) is treated as new, not re-normalized."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="1z 999aa"))
+
+    different_case = _make_stage2_job(entry_id="entry-b", normalized_tn="1Z999AA")
+    assert hub.enqueue(different_case) is EnqueueOutcome.ENQUEUED
+
+
+def test_release_inflight_decrements_and_deletes_empty_key(hass):
+    """_release_inflight removes tn from _inflight[entry_id] (deleting the
+    entry_id key once its set empties) and discards it from
+    _stage2_enqueued_keys."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-2"))
+    assert hub.inflight_count("entry-a") == 2
+
+    hub._release_inflight("entry-a", "TN-1")
+    assert hub.inflight_count("entry-a") == 1
+    assert "TN-1" not in hub._stage2_enqueued_keys
+    assert "entry-a" in hub._inflight
+
+    hub._release_inflight("entry-a", "TN-2")
+    assert hub.inflight_count("entry-a") == 0
+    assert "entry-a" not in hub._inflight
+
+
+def test_release_inflight_idempotent_on_absent_tn(hass):
+    """_release_inflight on an absent entry_id/tn is a safe no-op."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+
+    hub._release_inflight("entry-unknown", "TN-UNKNOWN")
+    hub._release_inflight("entry-a", "TN-NEVER-ENQUEUED")
+
+    assert hub.inflight_count("entry-a") == 1
+
+
+def test_enqueue_and_release_inflight_are_plain_sync_defs(hass):
+    """source: enqueue/_release_inflight are plain `def`, no `await` between
+    check and mutate (sync lock-free mutator discipline)."""
+    import inspect  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    assert not inspect.iscoroutinefunction(Shop2ParcelHub.enqueue)
+    assert not inspect.iscoroutinefunction(Shop2ParcelHub._release_inflight)
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 Plan 02, Task 2: entry_id -> coordinator registry (attach/detach)
+# ---------------------------------------------------------------------------
+
+
+def test_attach_registers_coordinator_by_entry_id(hass):
+    """D-01: attach() inserts _coordinators[entry_id] = coordinator."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+
+    hub.attach(coordinator_a)
+
+    assert hub._coordinators["entry-a"] is coordinator_a
+
+
+def test_reload_same_entry_id_keeps_fresh_coordinator_registered(hass):
+    """D-01 identity guard: attach(new) then detach(old) for the SAME
+    entry_id leaves the registry pointing at `new` — `old`'s detach cannot
+    evict the freshly-attached replacement."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    old_coordinator = MagicMock()
+    old_coordinator.config_entry.entry_id = "entry-a"
+    new_coordinator = MagicMock()
+    new_coordinator.config_entry.entry_id = "entry-a"
+
+    hub.attach(old_coordinator)
+    hub.attach(new_coordinator)
+    hub.detach(old_coordinator)
+
+    assert hub._coordinators["entry-a"] is new_coordinator
+
+
+def test_detach_removes_registry_entry_when_identity_matches(hass):
+    """detach() removes the registry entry when it still points at the
+    detaching instance."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+
+    hub.attach(coordinator_a)
+    hub.detach(coordinator_a)
+
+    assert "entry-a" not in hub._coordinators
+
+
+def test_detach_purges_inflight_tns_for_entry(hass):
+    """D-05/WORK-04: detach purges the removed account's in-flight tns from
+    both _inflight and _stage2_enqueued_keys; inflight_count(entry_id)
+    becomes 0."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-2"))
+    assert hub.inflight_count("entry-a") == 2
+
+    hub.detach(coordinator_a)
+
+    assert hub.inflight_count("entry-a") == 0
+    assert "TN-1" not in hub._stage2_enqueued_keys
+    assert "TN-2" not in hub._stage2_enqueued_keys
+
+
+def test_detach_with_no_inflight_is_a_noop_purge(hass):
+    """R4 empty edge: detach for an entry_id with no in-flight tns is a
+    no-op purge — no crash."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    hub.detach(coordinator_a)
+
+    assert hub.inflight_count("entry-a") == 0
+
+
+def test_attach_detach_with_config_entry_none_does_not_crash(hass):
+    """RESEARCH.md Pitfall 5 / D-01: a coordinator whose config_entry is
+    None is tolerated — attach/detach skip the registry write, mirroring
+    _debug_mode_active's None tolerance. Not exercised by any existing
+    test (bare MagicMock() auto-mocks a truthy config_entry)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_bare = MagicMock(config_entry=None)
+
+    hub.attach(coordinator_bare)
+    assert hub._coordinators == {}
+
+    hub.detach(coordinator_bare)
+    assert hub._coordinators == {}
