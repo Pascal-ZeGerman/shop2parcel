@@ -1831,11 +1831,14 @@ def test_hub_release_and_task_done_appear_once_in_finally_not_duplicated(hass):
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     worker_source = inspect.getsource(Shop2ParcelHub._async_hub_worker)
-    assert worker_source.count("self._release_inflight(job.entry_id, normalized_tn)") == 1
-    assert worker_source.count("self._queue.task_done()") == 1
+    # Strip the docstring (which narrates both calls in prose) so the count
+    # below reflects actual code, not documentation text.
+    worker_code = worker_source.split('"""', 2)[-1]
+    assert worker_code.count("self._release_inflight(job.entry_id, normalized_tn)") == 1
+    assert worker_code.count("self._queue.task_done()") == 1
     # Both calls live inside the single `finally:` block that closes the
     # per-job try — not scattered across the except branches above it.
-    finally_block = worker_source.split("finally:", 1)[1]
+    finally_block = worker_code.split("finally:", 1)[1]
     assert "self._release_inflight(job.entry_id, normalized_tn)" in finally_block
     assert "self._queue.task_done()" in finally_block
 

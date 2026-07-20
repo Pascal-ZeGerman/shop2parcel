@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_point_in_time, async_track_time_interval
 
 from .const import (
@@ -144,7 +145,7 @@ class Shop2ParcelHub:
         # account being removed, so it is spawned via hass.async_create_background_task
         # rather than the per-entry background-task API (see coordinator.py:1222).
         self._worker_task = self._hass.async_create_background_task(
-            self._stub_worker(),
+            self._async_hub_worker(),
             name="shop2parcel_hub_worker",
         )
         self._worker_task.add_done_callback(self._log_hub_worker_crash)
@@ -644,17 +645,66 @@ class Shop2ParcelHub:
         # only, which would silently erase the dedup set on every unload.
         await self.async_save()
 
-    async def _stub_worker(self) -> None:
-        """Worker stub — raises NotImplementedError on any job dequeue.
+    async def _async_hub_worker(self) -> None:
+        """Single long-lived shared Stage-2 worker draining self._queue serially.
 
-        D-03: this sits idle in production for the whole of Phase 29; the
-        real worker (Ollama extraction + per-account job routing) ships in
-        Phase 32.
+        Phase 32 (WORK-01/WORK-02/WORK-04, D-09): replaces the Phase 29
+        ``_stub_worker``. For every dequeued job, resolves ``coord =
+        self._coordinators.get(job.entry_id)`` (D-01) BEFORE the per-job
+        try — the CURRENTLY-attached coordinator for that entry_id, so a
+        same-entry_id reload dispatches to the fresh instance, not a
+        captured/stale one. A job whose entry_id has no attached coordinator
+        (never attached, or departed via detach()'s purge — the
+        purge-vs-drain race backstop) is skipped: no drain, no dispatch, no
+        error.
+
+        Ports coordinator._async_stage2_worker's try/except crash-isolation
+        ladder verbatim in structure, operating on the resolved ``coord``
+        instead of ``self``: asyncio.CancelledError propagates after
+        releasing state (the only thing that stops this worker — shutdown);
+        ConfigEntryAuthFailed is logged (NOT counted as an Ollama failure,
+        WR-05); any other Exception is isolated via
+        coord._record_stage2_failure so one job's failure never takes down
+        Stage-2 for the whole instance. coord._release_inflight(job) — the
+        per-account raw_msg_id message-gate release — is a DIFFERENT
+        structure from the hub's dedup/cap release and stays per-account
+        (D-08); it is called in every except branch as the coordinator's own
+        worker did.
+
+        The hub-scoped in-flight release (self._release_inflight, D-07) and
+        self._queue.task_done() are ALWAYS run in a single finally — on
+        success, skip, and every exception path — so queue.join() accounting
+        never drifts and a job's dedup/cap slot is freed exactly once per
+        dequeue, regardless of outcome.
         """
         while True:
-            _job = await self._queue.get()
-            self._queue.task_done()
-            raise NotImplementedError("Hub worker stub: real worker ships in Phase 32")
+            job: Stage2Job = await self._queue.get()
+            normalized_tn = job.normalized_tn
+            coord = self._coordinators.get(job.entry_id)
+            try:
+                if coord is not None:
+                    await coord._async_drain_pending_posts()
+                    await coord._async_process_stage2_job(job)
+            except asyncio.CancelledError:
+                if coord is not None:
+                    coord._release_inflight(job)
+                raise  # propagate — shuts down the worker
+            except ConfigEntryAuthFailed as err:
+                _LOGGER.error(
+                    "Stage-2 hub worker: parcelapp auth error for %s — check the "
+                    "ParcelApp API key (reauth is requested on the next poll): %s",
+                    normalized_tn,
+                    err,
+                )
+                if coord is not None:
+                    coord._release_inflight(job)  # re-fetch next poll (not lost)
+            except Exception as err:  # noqa: BLE001
+                if coord is not None:
+                    coord._record_stage2_failure(job, err)
+                    coord._release_inflight(job)  # re-fetch next poll (not lost)
+            finally:
+                self._release_inflight(job.entry_id, normalized_tn)
+                self._queue.task_done()
 
     @callback
     def _log_hub_worker_crash(self, task: asyncio.Task) -> None:
