@@ -466,6 +466,7 @@ async def test_stage2_sensor_native_value_reads_qsize_when_queue_active(hass, mo
             html_body="<html/>",
             message_id=f"msg{i}",
             meta={},
+            entry_id=mock_config_entry.entry_id,
         )
         coordinator._stage2_queue.put_nowait(job)
     sensor = Stage2Sensor(coordinator, mock_config_entry)

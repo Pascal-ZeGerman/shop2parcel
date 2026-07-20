@@ -225,6 +225,7 @@ async def test_parcelapp_post_never_includes_custom_field_keys(hass, mock_config
         html_body="<html>test</html>",
         message_id="msg_pg",
         meta={"subject": "Your order has shipped", "from": "no-reply@shopify.com"},
+        entry_id=mock_config_entry.entry_id,
     )
 
     stage2_result = Stage2Result(

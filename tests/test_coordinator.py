@@ -5933,6 +5933,7 @@ async def test_worker_merge_path_carrier_gate_rejects_order_number(hass, mock_st
             html_body="<html/>",
             message_id="test-gate-msg",
             meta={"subject": "Your order", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
 
         with caplog.at_level(logging.INFO):
@@ -6007,6 +6008,7 @@ async def test_stage2_worker_transient_refunds_reserve(hass, mock_config_entry):
             html_body="<html/>",
             message_id="msg-transient-refund",
             meta={"subject": "Your order", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
 
         await coord._async_process_stage2_job(job)
@@ -6060,6 +6062,7 @@ async def test_stage2_worker_already_added_keeps_reserve(hass, mock_config_entry
             html_body="<html/>",
             message_id="msg-already-added",
             meta={"subject": "Your order", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
 
         await coord._async_process_stage2_job(job)

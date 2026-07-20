@@ -560,6 +560,7 @@ async def test_extractor_called_per_job(hass, mock_stage2_config_entry):
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
 
@@ -611,6 +612,7 @@ async def test_store_saved_after_successful_post(hass, mock_stage2_config_entry)
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
 
@@ -662,6 +664,7 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
 
@@ -722,6 +725,7 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
 
@@ -772,6 +776,7 @@ async def test_enqueued_key_discarded_on_ollama_failure_without_dedup(
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
 
@@ -822,6 +827,7 @@ async def test_worker_does_not_swallow_cancelled_error_during_process_job(
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         # Pre-seed _stage2_enqueued_keys as _enqueue_stage2 would have done.
         # Without this, the discard assertion is trivially true even when discard is a no-op.
@@ -907,6 +913,7 @@ async def test_merge_stage1_none_gate_failing_stage2_no_post(hass, mock_stage2_c
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         # No AssertionError raised — the gate replaces the old I6 assert.
         await coord._async_process_stage2_job(job)
@@ -970,6 +977,7 @@ async def test_merge_conflict_keeps_stage1_and_emits_event(hass, mock_stage2_con
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -1041,6 +1049,7 @@ async def test_two_field_conflict_emits_single_event(hass, mock_stage2_config_en
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -1100,6 +1109,7 @@ async def test_ollama_transient_no_post_no_dedup(hass, mock_stage2_config_entry)
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -1146,6 +1156,7 @@ async def test_poison_message_quarantined_after_threshold(hass, mock_stage2_conf
             html_body="<html/>",
             message_id=f"gmail:{raw_id}",
             meta={"subject": "New job(s) match your search", "from": "careers@x.com"},
+            entry_id=coord.config_entry.entry_id,
             raw_msg_id=raw_id,
         )
 
@@ -1200,6 +1211,7 @@ async def test_job_without_raw_msg_id_quarantined_via_tn_skip_set(hass, mock_sta
             html_body="<html/>",
             message_id="imap:42",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
             raw_msg_id=None,
         )
 
@@ -1272,6 +1284,7 @@ async def test_stage2_msg_failure_streak_cleared_on_successful_extraction(
             html_body="<html/>",
             message_id="imap:42",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
             raw_msg_id=None,
         )
 
@@ -1340,6 +1353,7 @@ async def test_ollama_schema_no_post_no_dedup(hass, mock_stage2_config_entry):
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -1487,6 +1501,7 @@ async def test_cap_skips_after_max_posts(hass, mock_stage2_config_entry):
                 html_body="<html/>",
                 message_id=f"msg-id-{i}",
                 meta={"subject": f"Shipped {i}", "from": "noreply@shopify.com"},
+                entry_id=coord.config_entry.entry_id,
             )
             await coord._async_process_stage2_job(job)
 
@@ -1550,6 +1565,7 @@ async def test_cap_notification_fires_once(hass, mock_stage2_config_entry):
                 html_body="<html/>",
                 message_id=f"msg-id-{i}",
                 meta={"subject": f"Shipped {i}", "from": "noreply@shopify.com"},
+                entry_id=coord.config_entry.entry_id,
             )
             await coord._async_process_stage2_job(job)
 
@@ -1606,6 +1622,7 @@ async def test_reset_clears_counters_for_next_poll(hass, mock_stage2_config_entr
                 html_body="<html/>",
                 message_id=f"msg-id-{i}",
                 meta={"subject": f"Shipped {i}", "from": "noreply@shopify.com"},
+                entry_id=coord.config_entry.entry_id,
             )
             await coord._async_process_stage2_job(job)
 
@@ -1783,6 +1800,7 @@ def _make_job(subject="Order Shipped", sender="noreply@shopify.com", normalized_
         html_body="<html/>",
         message_id="msg-fail-test",
         meta={"subject": subject, "from": sender},
+        entry_id="test_entry",
     )
 
 
@@ -2726,6 +2744,7 @@ async def test_stage2_queue_depth_returns_qsize_when_queue_active(hass, mock_sta
                 html_body="<html/>",
                 message_id=f"msg{i}",
                 meta={},
+                entry_id=coord.config_entry.entry_id,
             )
             coord._stage2_queue.put_nowait(job)
         assert coord.stage2_queue_depth == 3
@@ -3158,6 +3177,7 @@ async def test_worker_discards_ungrounded_order_summary(hass, mock_stage2_config
             html_body=_GROUNDING_TRIGGER_HTML,
             message_id="gmail:msg_grounding_reject",
             meta={"subject": "Order Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -3216,6 +3236,7 @@ async def test_worker_keeps_grounded_order_summary(hass, mock_stage2_config_entr
             html_body=_GROUNDING_TARGET_HTML,
             message_id="gmail:msg_grounding_keep",
             meta={"subject": "Order Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -3681,6 +3702,7 @@ async def test_record_stage2_failure_notifies_listeners(hass, mock_stage2_config
             html_body="<html/>",
             message_id="m",
             meta={"subject": "s", "from": "f"},
+            entry_id=coord.config_entry.entry_id,
         )
         with patch.object(coord, "async_update_listeners") as mock_notify:
             for _ in range(STAGE2_NOTIFY_THRESHOLD):
@@ -3760,6 +3782,7 @@ async def test_skip_post_gate_no_post_when_tracking_number_is_none(hass, mock_st
             html_body="<html/>",
             message_id="test-none-tn",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
 
@@ -3806,6 +3829,7 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
             html_body="<html/>",
             message_id="test-none-tn2",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
 
@@ -3858,6 +3882,7 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
             html_body="<html/>",
             message_id="test-none-tn3",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         # Pre-add the key to simulate the enqueue call
         coord._stage2_enqueued_keys.add(normalized_tn)
@@ -3914,6 +3939,7 @@ async def test_non_none_tracking_number_still_posts(hass, mock_stage2_config_ent
             html_body="<html/>",
             message_id="test-valid-tn",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
 
@@ -3981,6 +4007,7 @@ async def test_worker_never_touches_seen_message_ids(hass, mock_stage2_config_en
                 html_body="<html/>",
                 message_id=f"gmail:{tn}",
                 meta={"subject": "test", "from": "test@example.com"},
+                entry_id=coord.config_entry.entry_id,
             )
 
         # 1. Successful POST.
@@ -4049,6 +4076,7 @@ async def test_prefetched_result_skips_reextraction(hass, mock_stage2_config_ent
             html_body="<html/>",
             message_id="gmail:msg_pf",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
             prefetched_result=prefetched,
         )
         await coord._async_process_stage2_job(job)
@@ -4106,6 +4134,7 @@ async def test_cap_skip_caches_prefetched_result_for_gatekeeper(hass, mock_stage
             html_body="<html/>",
             message_id="gmail:msg_capped",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
             prefetched_result=prefetched,
             raw_msg_id="msg_capped",
         )
@@ -4159,6 +4188,7 @@ async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stag
             html_body="<html/>",
             message_id="gmail:msg_dup",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
             raw_msg_id="msg_dup",
         )
         await coord._async_process_stage2_job(job)
@@ -4279,6 +4309,7 @@ async def test_worker_rejects_malformed_tracking_no_post(hass, mock_stage2_confi
             html_body="<html/>",
             message_id="gmail:msg_wr02_reject",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
             prefetched_result=MagicMock(),  # skip Ollama re-extract path
         )
 
@@ -4354,6 +4385,7 @@ async def test_worker_posts_clean_canonical_form(hass, mock_stage2_config_entry)
             html_body="<html/>",
             message_id="gmail:msg_wr02_clean",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
             prefetched_result=MagicMock(),  # skip Ollama re-extract path
         )
         coord._stage2_enqueued_keys.add(expected_clean)
@@ -4437,6 +4469,7 @@ async def test_description_uses_order_summary_when_present(hass, mock_stage2_con
             ),
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -4503,6 +4536,7 @@ async def test_description_falls_back_to_order_name_when_no_summary(hass, mock_s
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -4615,6 +4649,7 @@ async def test_worker_already_added_publishes_and_consumes_no_cap_slot(
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         await coord._async_process_stage2_job(job)
 
@@ -4678,6 +4713,7 @@ async def test_worker_auth_failure_not_counted_as_ollama_failure(hass, mock_stag
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "Shipped", "from": "noreply@shopify.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         # Three auth failures — enough to trip the old (buggy) Ollama-streak
         # notification threshold if they were miscounted.

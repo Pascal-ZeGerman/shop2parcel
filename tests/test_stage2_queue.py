@@ -103,6 +103,7 @@ def test_stage2job_is_frozen():
         html_body="<html/>",
         message_id="test-msg-id",
         meta={"subject": "test", "from": "test@example.com"},
+        entry_id="test_entry",
     )
     with pytest.raises(FrozenInstanceError):
         job.storage_key = "x"  # type: ignore[misc]
@@ -277,6 +278,7 @@ async def test_stop_stage2_clears_state(hass, mock_stage2_config_entry):
             html_body="<html/>",
             message_id="test-msg-id",
             meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
         coord._stage2_queue.put_nowait(job)
         coord._stage2_enqueued_keys.add("1Z999AA10123456784")
@@ -563,6 +565,7 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
                 html_body="",
                 message_id="filler-msg-id",
                 meta={"subject": "filler", "from": "filler@example.com"},
+                entry_id=coord.config_entry.entry_id,
             )
         )
         assert coord._stage2_queue.full()
@@ -677,6 +680,7 @@ def test_stage2job_has_message_id_and_meta_fields():
         html_body="<html/>",
         message_id="test-msg-id",
         meta={"subject": "test", "from": "test@example.com"},
+        entry_id="test_entry",
     )
     assert job.message_id == "test-msg-id"
     assert job.meta == {"subject": "test", "from": "test@example.com"}
@@ -695,6 +699,7 @@ def test_stage2job_frozen_with_new_fields():
         html_body="<html/>",
         message_id="test-msg-id",
         meta={"subject": "test", "from": "test@example.com"},
+        entry_id="test_entry",
     )
     with pytest.raises(FrozenInstanceError):
         job.message_id = "other"  # type: ignore[misc]
