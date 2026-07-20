@@ -190,22 +190,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # bool() coerces any non-empty URL string to True without exposing the URL value.
     # Empty string fallback prevents AttributeError on v1.2 entries with no ollama_url key.
     coordinator._diagnostics.stage2_enabled = bool(entry.options.get(CONF_OLLAMA_URL, ""))
-    # Phase 18: when Stage-2 is enabled, construct the bounded queue + in-flight
-    # dedup set so the first poll's enqueues already have somewhere to land.
-    # Register async_stop_stage2 via async_on_unload so HA tears down the queue
-    # on every unload path (clean unload, exception, HA shutdown).
-    # WR-01: register the coroutine function DIRECTLY so unload AWAITS Stage-2
-    # shutdown (worker cancel, bounded at 5 s inside async_stop_stage2, + final
-    # save) before returning. The previous sync-lambda + hass.async_create_task
-    # fire-and-forget let an options-save reload (OptionsFlowWithReload) start a
-    # new coordinator/worker while the old worker was still mid-POST, and the old
-    # coordinator's debounced save could land AFTER the new coordinator's saves —
-    # clobbering fresh dedup state and burning quota on duplicate POSTs.
-    # entry.async_on_unload awaits coroutine-returning callables on every HA
-    # version this integration supports (>= 2025.8 for OptionsFlowWithReload).
+    # Phase 32 (D-03/D-04, WORK-01): when Stage-2 is enabled, build this account's
+    # OllamaExtractor from its own options. The per-entry queue/worker this call
+    # used to construct/spawn is retired — every account's Stage-2 jobs now
+    # enqueue onto the shared hub queue (hub.enqueue) drained by the single hub
+    # worker; the hub is attached above and torn down only at last-account
+    # detach (async_unload_entry), so no async_on_unload registration is needed
+    # here anymore for Stage-2 teardown.
     if coordinator._diagnostics.stage2_enabled:
-        await coordinator.async_start_stage2()
-        entry.async_on_unload(coordinator.async_stop_stage2)
+        await coordinator.async_setup_stage2_extractor()
     await coordinator.async_config_entry_first_refresh()
 
     # Phase 31 (D-08): the per-account time-boundary refresh timers (quota-expiry +

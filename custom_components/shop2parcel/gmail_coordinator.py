@@ -545,10 +545,10 @@ class GmailCoordinator(Shop2ParcelCoordinator):
 
                 # Phase 27 Plan 03: Ollama fallback gatekeeper on Stage-1 miss.
                 # Runs only when stage2 is enabled, NOT in debug_mode, and a live extractor
-                # exists. _extractor and stage2_enabled can diverge (async_stop_stage2 nulls
-                # _extractor without clearing stage2_enabled), so the None guard both prevents
-                # an AttributeError and routes the stop/reload-race case to the re-fetch
-                # branch below (finding #523) rather than caching the message as a reject.
+                # exists. The None guard defends against any window where stage2_enabled is
+                # True but async_setup_stage2_extractor has not (yet) populated _extractor
+                # (e.g. a bare-coordinator test), routing that case to the re-fetch branch
+                # below (finding #523) rather than caching the message as a reject.
                 #
                 # Seen-ID model = convergence: a fallback that ENQUEUES does NOT mark the
                 # message seen here. The message is re-fetched next poll; once the worker has

@@ -6,10 +6,11 @@ in async_setup_entry. Reference-counted via attach(coordinator)/
 detach(coordinator); torn down via async_shutdown() only when the last
 account detaches (refcount reaches 0).
 
-Phase 29 is pure scaffolding (D-03): the worker stub sits idle in
-production — no coordinator enqueues jobs to it yet. The per-entry Stage-2
-worker (async_start_stage2/async_stop_stage2 in coordinator.py) is left
-100% intact (D-01); Phase 32 does the coordinator->hub queue cutover.
+Phase 32 (WORK-01..04): the shared queue + _async_hub_worker are the sole
+Stage-2 queue/worker for the whole HA instance. The per-entry Stage-2
+queue/worker that used to live in coordinator.py (async_start_stage2/
+async_stop_stage2/_async_stage2_worker) is retired entirely; every account's
+_enqueue_stage2 now delegates to hub.enqueue().
 
 SHARED_STORAGE_VERSION is a separate version chain from coordinator.py's
 STORAGE_VERSION=3 — the two must never share a key or version number.

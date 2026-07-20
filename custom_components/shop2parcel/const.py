@@ -255,6 +255,11 @@ CONF_OLLAMA_MODEL = "ollama_model"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
 CONF_OLLAMA_TIMEOUT = "ollama_timeout"
 DEFAULT_OLLAMA_TIMEOUT = 60  # seconds
+# Phase 32 (WORK-01, orchestrator decision 2): retained but INERT as of Phase 32 —
+# the per-account Stage-2 queue this option used to size is retired; the Stage-2
+# queue is now hub-global and bounded by HUB_STAGE2_QUEUE_MAXLEN (64) above.
+# Left in the options flow (options_flow.py) to avoid a user-facing migration; a
+# user who changes it will see no effect.
 CONF_QUEUE_MAXLEN = "queue_maxlen"
 DEFAULT_QUEUE_MAXLEN = 32
 CONF_CUSTOM_FIELDS = "custom_fields"  # list[dict]: {"name": str, "description": str | None}

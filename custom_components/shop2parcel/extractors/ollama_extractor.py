@@ -347,8 +347,8 @@ class OllamaExtractor:
             # IN-05: the isinstance check must run BEFORE fullmatch — re raises
             # TypeError on a non-str name (corrupt CONF_CUSTOM_FIELDS entry, e.g.
             # {"name": 3}) before the drop-with-WARNING branch could ever fire,
-            # aborting async_start_stage2 / entry setup instead of dropping the
-            # bad field gracefully.
+            # aborting async_setup_stage2_extractor / entry setup instead of
+            # dropping the bad field gracefully.
             if not isinstance(name, str) or not _FIELD_NAME_RE.fullmatch(name):
                 _LOGGER.warning(
                     "Custom Stage-2 field %r has invalid name "
