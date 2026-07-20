@@ -38,6 +38,7 @@ from custom_components.shop2parcel.const import (
 from custom_components.shop2parcel.coordinator import (
     PollStats,
     Shop2ParcelCoordinator,
+    Stage2Job,
     _extract_email_meta,
     _extract_imap_email_meta,
 )
@@ -6333,3 +6334,60 @@ async def test_imap_worker_publish_mid_poll_survives_poll_end(hass, mock_imap_co
         "worker-published shipment was clobbered by the poll's stale snapshot"
     )
     assert "worker_msg" in coord._pending_shipments
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 Plan 04 Task 3: stage2_queue_depth / email_processing_active
+# repointed at the hub's per-account in-flight count
+# ---------------------------------------------------------------------------
+
+
+async def test_stage2_queue_depth_and_email_processing_active_reflect_hub_inflight(
+    hass, mock_stage2_entry
+):
+    """WORK-01..03 regression: both properties are hub-derived (D-05 inflight_count).
+
+    stage2_queue_depth == N for N in-flight tns enqueued on the hub for this account;
+    email_processing_active is True while N > 0 and False once released (with no poll
+    in progress).
+    """
+    mock_stage2_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_stage2_entry)
+    entry_id = coord.config_entry.entry_id
+    shipment = _make_shipment()
+
+    assert coord._poll_in_progress is False
+    assert coord.stage2_queue_depth == 0
+    assert coord.email_processing_active is False
+
+    jobs = [
+        Stage2Job(
+            storage_key=f"1Z_{i}",
+            normalized_tn=f"1Z_{i}",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id=f"msg:{i}",
+            meta={"subject": "test", "from": "test@example.com"},
+            entry_id=entry_id,
+        )
+        for i in range(3)
+    ]
+    for job in jobs:
+        assert coord._hub.enqueue(job).name == "ENQUEUED"
+
+    assert coord.stage2_queue_depth == 3
+    assert coord.email_processing_active is True
+
+    for job in jobs:
+        coord._hub._release_inflight(job.entry_id, job.normalized_tn)
+
+    assert coord.stage2_queue_depth == 0
+    assert coord.email_processing_active is False
+
+
+async def test_stage2_queue_depth_zero_when_unattached():
+    """stage2_queue_depth returns 0 (no crash) when _hub or config_entry is None."""
+    coord = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    coord._hub = None
+    coord.config_entry = None
+    assert coord.stage2_queue_depth == 0

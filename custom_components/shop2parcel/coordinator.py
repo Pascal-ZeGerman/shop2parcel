@@ -917,10 +917,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
     @property
     def stage2_queue_depth(self) -> int:
-        """Current Stage-2 queue depth; 0 when stage2 is disabled."""
-        if self._stage2_queue is None:
+        """Per-account Stage-2 in-flight count (hub-tracked); 0 when unattached.
+
+        Phase 32 cutover: reads self._hub.inflight_count(entry_id) — the public
+        accessor for the hub's per-account in-flight set (D-05) — rather than the
+        retired per-entry _stage2_queue.qsize(). Returns 0 when self._hub or
+        self.config_entry is None (mirrors the old "queue is None" 0-default).
+        """
+        if self._hub is None or self.config_entry is None:
             return 0
-        return self._stage2_queue.qsize()
+        return self._hub.inflight_count(self.config_entry.entry_id)
 
     @property
     def stage2_consecutive_failures(self) -> int:

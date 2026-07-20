@@ -21,6 +21,7 @@ from custom_components.shop2parcel.const import (
     DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
+    STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
 )
 from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator, Stage2Job
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
@@ -686,7 +687,15 @@ async def test_coordinator_data_snapshot_pattern(hass, mock_stage2_config_entry)
 
 
 async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry):
-    """Pitfall 5 (success): _stage2_enqueued_keys loses the key AND dedup write happens."""
+    """Pitfall 5 (success): the dedup write happens on a successful POST.
+
+    Phase 32 cutover: _stage2_enqueued_keys moved to the shared hub and is now
+    released solely by the hub worker's finally block (Plan 32-03) — not by
+    _async_process_stage2_job itself, and not by the (still-idle, Wave-5-retired)
+    per-entry worker driving this test. The pre-seeded local
+    coord._stage2_enqueued_keys is vestigial; only the dedup-write assertion
+    reflects real, current behavior.
+    """
     from custom_components.shop2parcel.extractors.types import Stage2Result
 
     mock_stage2_config_entry.add_to_hass(hass)
@@ -716,7 +725,6 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
         await coord._async_load_store()
         await coord.async_start_stage2()
 
-        coord._stage2_enqueued_keys = {"1Z999"}
         shipment = _make_shipment()
         job = Stage2Job(
             storage_key="1Z999",
@@ -732,7 +740,6 @@ async def test_enqueued_key_discarded_on_success(hass, mock_stage2_config_entry)
         await asyncio.sleep(0)
         await hass.async_block_till_done()
 
-        assert "1Z999" not in coord._stage2_enqueued_keys
         assert coord._hub.is_submitted("1Z999")
 
 
@@ -1228,10 +1235,12 @@ async def test_job_without_raw_msg_id_quarantined_via_tn_skip_set(hass, mock_sta
                     message_id="imap:42",
                     meta={},
                 ), "sub-threshold job must still be enqueueable"
-                # Drain the re-enqueued job so the next loop iteration is clean.
-                coord._stage2_queue.get_nowait()
-                coord._stage2_queue.task_done()
-                coord._stage2_enqueued_keys.discard(tn)
+                # Drain the re-enqueued job from the shared hub queue and release its
+                # hub in-flight/dedup slot (Phase 32: mirrors what the real hub worker's
+                # finally block would do) so the next loop iteration is clean.
+                coord._hub._queue.get_nowait()
+                coord._hub._queue.task_done()
+                coord._hub._release_inflight(coord.config_entry.entry_id, tn)
 
         # At threshold: TN quarantined — the next poll's re-enqueue is skipped.
         assert tn in coord._stage2_quarantined_tns
@@ -2715,9 +2724,12 @@ async def test_stage2_queue_depth_returns_zero_when_queue_is_none(hass, mock_sta
 
 
 async def test_stage2_queue_depth_returns_qsize_when_queue_active(hass, mock_stage2_config_entry):
-    """DIAG-02: stage2_queue_depth returns qsize() when queue is active."""
-    import asyncio
+    """DIAG-02: stage2_queue_depth returns the hub's per-account in-flight count.
 
+    Phase 32 cutover: stage2_queue_depth is now hub-derived (hub.inflight_count) —
+    seed the account's hub in-flight set via hub.enqueue() instead of the retired
+    per-entry _stage2_queue.
+    """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -2733,8 +2745,6 @@ async def test_stage2_queue_depth_returns_qsize_when_queue_active(hass, mock_sta
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        # Manually assign queue with 3 items.
-        coord._stage2_queue = asyncio.Queue(maxsize=32)
         shipment = _make_shipment()
         for i in range(3):
             job = Stage2Job(
@@ -2746,7 +2756,7 @@ async def test_stage2_queue_depth_returns_qsize_when_queue_active(hass, mock_sta
                 meta={},
                 entry_id=coord.config_entry.entry_id,
             )
-            coord._stage2_queue.put_nowait(job)
+            coord._hub.enqueue(job)
         assert coord.stage2_queue_depth == 3
 
 
@@ -2813,11 +2823,13 @@ async def test_diag_02_stage2_enqueued_total_does_not_increment_on_dedup_skip(
 async def test_diag_02_stage2_dropped_backpressure_total_increments_on_queue_full(
     hass, mock_stage2_config_entry
 ):
-    """DIAG-02: stage2_dropped_backpressure_total increments when queue is full;
-    stage2_enqueued_total does NOT increment on the dropped item.
-    """
-    import asyncio
+    """DIAG-02: stage2_dropped_backpressure_total increments when the account's hub
+    in-flight cap is full; stage2_enqueued_total does NOT increment on the dropped item.
 
+    Phase 32 cutover: backpressure is now enforced by the shared hub's per-account
+    in-flight cap (STAGE2_PER_ACCOUNT_INFLIGHT_CAP=8) + global bound, not the retired
+    per-entry CONF_QUEUE_MAXLEN-sized queue.
+    """
     from homeassistant.components import persistent_notification
 
     mock_stage2_config_entry.add_to_hass(hass)
@@ -2836,16 +2848,20 @@ async def test_diag_02_stage2_dropped_backpressure_total_increments_on_queue_ful
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         coord = GmailCoordinator(hass, mock_stage2_config_entry)
-        coord._stage2_queue = asyncio.Queue(maxsize=1)
         shipment = _make_shipment()
-        # First enqueue fills the queue.
-        coord._enqueue_stage2("TN001", "key1", shipment, "<html/>", message_id="m1", meta={})
-        assert coord.diagnostics.stage2_enqueued_total == 1
-        # Second enqueue with distinct key hits QueueFull.
-        coord._enqueue_stage2("TN002", "key2", shipment, "<html/>", message_id="m2", meta={})
+        # Fill the per-account in-flight cap (8) with distinct tracking numbers.
+        for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+            coord._enqueue_stage2(
+                f"TN00{i}", f"key{i}", shipment, "<html/>", message_id=f"m{i}", meta={}
+            )
+        assert coord.diagnostics.stage2_enqueued_total == STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+        # One more (distinct key) hits DROPPED_BACKPRESSURE (cap full).
+        coord._enqueue_stage2(
+            "TN_OVERFLOW", "key_overflow", shipment, "<html/>", message_id="m9", meta={}
+        )
         assert coord.diagnostics.stage2_dropped_backpressure_total == 1
         # Dropped item does NOT count as enqueued.
-        assert coord.diagnostics.stage2_enqueued_total == 1
+        assert coord.diagnostics.stage2_enqueued_total == STAGE2_PER_ACCOUNT_INFLIGHT_CAP
 
 
 async def test_diag_02_stage2_failed_total_increments_on_each_ollama_failure(
@@ -3846,7 +3862,15 @@ async def test_skip_post_gate_emits_stage2_no_data_event(hass, mock_stage2_confi
 
 
 async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_entry):
-    """Phase 27 §3: skip-POST gate discards the in-flight key from _stage2_enqueued_keys."""
+    """Phase 27 §3: skip-POST gate is terminal — no POST is ever attempted.
+
+    Phase 32 cutover: _stage2_enqueued_keys moved to the shared hub and is released
+    solely by the hub worker's finally block (Plan 32-03), not by
+    _async_process_stage2_job itself or by the (still-idle, Wave-5-retired)
+    per-entry worker driving this test. The pre-seeded local
+    coord._stage2_enqueued_keys is vestigial; the no-POST assertion below is the
+    real, current behavior this test locks.
+    """
     mock_stage2_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -3884,15 +3908,13 @@ async def test_skip_post_gate_discards_enqueued_key(hass, mock_stage2_config_ent
             meta={"subject": "test", "from": "test@example.com"},
             entry_id=coord.config_entry.entry_id,
         )
-        # Pre-add the key to simulate the enqueue call
-        coord._stage2_enqueued_keys.add(normalized_tn)
         coord._stage2_queue.put_nowait(job)
 
         await asyncio.sleep(0)
         await hass.async_block_till_done()
 
-    # Key must be discarded after skip-POST gate fires
-    assert normalized_tn not in coord._stage2_enqueued_keys
+    # Skip-POST gate fires — no POST is ever attempted for a None tracking number.
+    mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
 
 
 async def test_non_none_tracking_number_still_posts(hass, mock_stage2_config_entry):
@@ -4179,7 +4201,6 @@ async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stag
 
         # tn already forwarded (e.g. by the pending-posts drain).
         coord._hub.check_and_mark("1Z999AA10123456784")
-        coord._stage2_enqueued_keys = {"1Z999AA10123456784"}
 
         job = Stage2Job(
             storage_key="1Z999AA10123456784",
@@ -4193,10 +4214,11 @@ async def test_worker_skips_post_when_tracking_already_submitted(hass, mock_stag
         )
         await coord._async_process_stage2_job(job)
 
-        # No duplicate POST, no extractor call, and the in-flight key is released.
+        # No duplicate POST, no extractor call. Phase 32: the hub's in-flight/dedup
+        # slot is released solely by the hub worker's finally block (Plan 32-03) — not
+        # by _async_process_stage2_job itself — so it is not asserted here.
         mock_parcel_cls.return_value.async_add_delivery.assert_not_awaited()
         mock_extractor_cls.return_value.async_extract.assert_not_called()
-        assert "1Z999AA10123456784" not in coord._stage2_enqueued_keys
 
         await coord.async_stop_stage2()
 
@@ -4261,8 +4283,8 @@ async def test_enqueue_returns_false_on_inflight_skip(hass, mock_stage2_config_e
 async def test_worker_rejects_malformed_tracking_no_post(hass, mock_stage2_config_entry):
     """WR-02 RED: _async_process_stage2_job with merged_shipment.tracking_number that fails
     validate_carrier_format must NOT call async_add_delivery, must increment
-    carrier_format_rejected_total by 1, and must converge terminally (key discarded,
-    no _pending_posts write).
+    carrier_format_rejected_total by 1, and must converge terminally (no
+    _pending_posts write).
 
     RED: fails because there is currently no carrier-format re-gate inside the worker
     before the POST — the malformed TN reaches async_add_delivery.
@@ -4313,9 +4335,6 @@ async def test_worker_rejects_malformed_tracking_no_post(hass, mock_stage2_confi
             prefetched_result=MagicMock(),  # skip Ollama re-extract path
         )
 
-        # Pre-seed the enqueued-keys set (mirrors what _enqueue_stage2 would do).
-        coord._stage2_enqueued_keys.add("NOTATRACKINGNUM")
-
         await coord._async_process_stage2_job(job)
 
     # (a) async_add_delivery must NEVER be called.
@@ -4331,8 +4350,9 @@ async def test_worker_rejects_malformed_tracking_no_post(hass, mock_stage2_confi
         f"{coord._diagnostics.last_carrier_format_rejected_reason!r}"
     )
 
-    # (c) terminal convergence: key discarded, no _pending_posts written.
-    assert "NOTATRACKINGNUM" not in coord._stage2_enqueued_keys
+    # (c) terminal convergence: no _pending_posts written (Phase 32: the hub's
+    # in-flight/dedup slot is released solely by the hub worker's finally block,
+    # Plan 32-03 — not by _async_process_stage2_job itself).
     assert len(coord._pending_posts) == 0
 
 

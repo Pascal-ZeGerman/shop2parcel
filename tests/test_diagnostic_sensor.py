@@ -449,14 +449,16 @@ async def test_stage2_sensor_native_value_zero_when_queue_is_none(hass, mock_con
 
 
 async def test_stage2_sensor_native_value_reads_qsize_when_queue_active(hass, mock_config_entry):
-    """DIAG-01: Stage2Sensor.native_value returns qsize() when queue is active."""
-    import asyncio
+    """DIAG-01: Stage2Sensor.native_value returns the hub's per-account in-flight count.
 
+    Phase 32 cutover: stage2_queue_depth (which native_value reads) is now hub-derived
+    (hub.inflight_count) — seed the account's hub in-flight set via hub.enqueue()
+    instead of the retired per-entry _stage2_queue.
+    """
     from custom_components.shop2parcel.coordinator import Stage2Job
     from custom_components.shop2parcel.diagnostic_sensor import Stage2Sensor
 
     coordinator = await _setup_integration(hass, mock_config_entry)
-    coordinator._stage2_queue = asyncio.Queue(maxsize=32)
     shipment = _make_shipment()
     for i in range(3):
         job = Stage2Job(
@@ -468,7 +470,7 @@ async def test_stage2_sensor_native_value_reads_qsize_when_queue_active(hass, mo
             meta={},
             entry_id=mock_config_entry.entry_id,
         )
-        coordinator._stage2_queue.put_nowait(job)
+        coordinator._hub.enqueue(job)
     sensor = Stage2Sensor(coordinator, mock_config_entry)
     assert sensor.native_value == 3
 
