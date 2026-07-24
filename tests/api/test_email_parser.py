@@ -23,8 +23,8 @@ from custom_components.shop2parcel.api.email_parser import (
     ShipmentData,
     _detect_dhl,
     _detect_fedex,
-    _detect_usps,
     _detect_ups,
+    _detect_usps,
     _parse_dhl,
 )
 
