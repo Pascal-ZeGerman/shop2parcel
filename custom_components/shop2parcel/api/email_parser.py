@@ -332,6 +332,41 @@ def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
     )
 
 
+def _extract_usps_shippers(html: str) -> list[str]:
+    """Structurally extract per-package shipper names from a USPS Informed
+    Delivery digest, in document order (spikes 022, 023 -- USPS-STRUCT-01).
+
+    USPS's own digest template pairs a shipper-name span
+    (id="pra-shipper-name-id", empty when no sender data upstream) with a
+    tracking-number span (id="pra-tracking-number-id") in the same package
+    block, one pair per physical package, in document order -- the same order
+    _parse_usps's own tracking_numbers findall already returns. Mirrors that
+    exact extraction (findall over get_text(), same dict.fromkeys dedup) so
+    the two counts always agree when USPS's real ids are present.
+
+    find_all(id="pra-shipper-name-id") returns exactly one span per physical
+    package -- unlike pra-tracking-number-id, it has no "-secondary" mobile-
+    view duplicate, so no dedup is needed here.
+
+    Guarded on an exact count match: if len(shippers) != len(tracking_numbers)
+    (real ids entirely absent, as in the synthetic pytest fixtures, or present
+    but mismatched), returns [] rather than guessing by partial index -- callers
+    must treat [] as "no structural pairing available" and leave order_summary
+    unset (today's behavior).
+    """
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
+    raw = _USPS_TRACKING_RE.findall(text)
+    tracking_numbers = list(dict.fromkeys(m for m in raw if _looks_like_tracking(m)))
+
+    shipper_spans = soup.find_all(id="pra-shipper-name-id")
+    shippers = [s.get_text(strip=True) for s in shipper_spans]
+
+    if len(shippers) != len(tracking_numbers):
+        return []
+    return shippers
+
+
 def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
     """Extract tracking number(s) from a USPS email.
 
@@ -341,21 +376,29 @@ def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
     matches go into ParseResult.extra_shipments. dict.fromkeys deduplicates
     while preserving order (same TN appearing twice in the HTML counts once).
     Href fallback runs only when the body text contains no valid tracking numbers.
+
+    When USPS's real pra-shipper-name-id/pra-tracking-number-id template ids
+    are present and their counts match the tracking numbers found here
+    (USPS-STRUCT-01, spikes 022/023), each sibling's order_summary is
+    populated from its paired shipper (empty span -> None). Otherwise
+    order_summary stays None, matching today's behavior.
     """
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text(separator=" ")
     raw = _USPS_TRACKING_RE.findall(text)
     tracking_numbers = list(dict.fromkeys(m for m in raw if _looks_like_tracking(m)))
     if tracking_numbers:
+        shippers = _extract_usps_shippers(html)
         shipments = [
             ShipmentData(
                 tracking_number=tn,
                 carrier_name="USPS",
                 order_name="",
+                order_summary=(shippers[idx] or None) if shippers else None,
                 message_id=message_id,
                 email_date=email_date,
             )
-            for tn in tracking_numbers
+            for idx, tn in enumerate(tracking_numbers)
         ]
         return ParseResult(
             shipment=shipments[0],
