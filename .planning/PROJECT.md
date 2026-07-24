@@ -105,11 +105,12 @@ Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local O
 - ✓ Stage-2 failure surface: ERROR log + `stage2_failed` activity event + persistent HA notification + skip-dedup-on-failure — v1.3 (Phase 21)
 - ✓ `Stage2Sensor` diagnostic entity + PollStats Stage-2 counters + user custom extraction fields as sensor attributes — v1.3 (Phase 21)
 - ✓ README "AI-based email analysis (v1.3)" section with Ollama networking guide and reachability sanity-check — v1.3 (Phase 22)
+- ✓ MRG-05 grounding gate: Stage-2 `order_name`/`order_summary` values discarded unless a content token is grounded in body-only prose (sender/subject headers never count); Stage-1 tracking-number recall broadened to `<div>`/`<span>` without the footer-boilerplate false positive — v1.5 (Phase 35, out-of-band spike-driven insert, not part of the original v1.5 requirement set)
+- ✓ Global shared parcelapp 20/day budget across all accounts (FCFS), persisted across restart — one hub-owned synchronous `try_consume()`/`refund_consume()` reserve, a single shared per-poll `MAX_STAGE2_POSTS_PER_POLL` cap, exactly 3 hub timers (no per-account storm), and conservative migration from per-account quota state (max-merge, no double-counting) — v1.5 (Phase 31, QUOTA-01..05)
+- ✓ Gmail↔IMAP feature parity: shared base-class inline Ollama fallback gatekeeper (`_run_inline_fallback()`) called identically by both coordinator types — same first-refresh skip, wall-clock budget, cap, and quarantine behavior; 17-test cross-parity module proves identical branch-matrix outcomes plus instance isolation — v1.5 (Phase 33, PAR-01/PAR-03/PAR-04)
 
 ### Active (v1.5 — Shared Pools & IMAP Parity)
 
-- [ ] Gmail↔IMAP feature parity: audit and close all Gmail-only divergences (startup inline-fallback deferral, per-poll wall-clock budget)
-- [ ] Global shared parcelapp 20/day budget across all accounts (FCFS), persisted across restart
 - [ ] Single shared Stage-2 LLM queue + long-lived Ollama worker for the whole HA instance
 - [ ] Global shared submitted-tracking-number dedup set across all accounts
 - [ ] Multi-account lifecycle: ~10 mixed Gmail/IMAP accounts; clean per-account add/remove; last account tears down shared singletons
@@ -201,4 +202,4 @@ Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local O
 5. Update Context with current state
 
 ---
-*Last updated: 2026-07-03 — started milestone v1.5 Shared Pools & IMAP Parity*
+*Last updated: 2026-07-20 — Phase 33 complete (IMAP Parity, PAR-01/03/04); Phase 32 (Shared Queue+Worker) also complete; Phase 35 (MRG-05 grounding gate) also complete, out-of-band; v1.5 Phase 34 (Multi-Account Lifecycle Tests + Global Sensors) remains*

@@ -2,39 +2,39 @@
 gsd_state_version: 1.0
 milestone: v1.5
 milestone_name: Shared Pools & IMAP Parity
-current_phase: 30
-current_phase_name: Shared Dedup
-status: verifying
-stopped_at: Phase 30 context gathered
-last_updated: "2026-07-09T20:11:44.243Z"
-last_activity: 2026-07-09
-last_activity_desc: Phase 29 complete, transitioned to Phase 30
+current_phase: 35
+current_phase_name: MRG-05 Grounding Gate + Stage-1 Scoping Fix
+status: executing
+stopped_at: Completed 34-05-PLAN.md
+last_updated: "2026-07-20T22:49:43.264Z"
+last_activity: 2026-07-20
+last_activity_desc: Phase 34 complete, transitioned to Phase 35
 progress:
-  total_phases: 10
-  completed_phases: 5
-  total_plans: 17
-  completed_plans: 17
-  percent: 50
+  total_phases: 11
+  completed_phases: 11
+  total_plans: 45
+  completed_plans: 45
+  percent: 100
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-03)
+See: .planning/PROJECT.md (updated 2026-07-20)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** Phase 29 — Hub Skeleton + Foundational Safety
+**Current focus:** Phase 34 — Multi-Account Lifecycle Tests + Global Sensors
 
 ## Current Position
 
-Phase: 30 — Shared Dedup
+Phase: 35 — MRG-05 Grounding Gate + Stage-1 Scoping Fix
 Plan: Not started
-Status: Phase complete — ready for verification
-Last activity: 2026-07-09 — Phase 29 complete, transitioned to Phase 30
+Status: Ready to execute
+Last activity: 2026-07-20 — Phase 34 complete, transitioned to Phase 35
 
 ```
-Progress: [          ] 0% (0/6 phases complete)
+[████████████████████] 68/68 plans (100%)
 ```
 
 ## Accumulated Context
@@ -47,6 +47,7 @@ Progress: [          ] 0% (0/6 phases complete)
 - Phase 28 added (v1.4, completed 2026-06-30): Carrier Format Pre-POST Validation + Full-Body Gmail Scan — validate_carrier_format() gate, DHL branch removal, full-body fallback, CarrierFormatRejectionsSensor (14th diagnostic).
 - v1.5 Phases 29–34 added (2026-07-03): Hub skeleton + foundational safety, shared dedup, shared budget, shared queue+worker, IMAP parity, lifecycle tests + global sensors.
 - Phase numbering is continuous: last v1.3/v1.4 phase was 28; v1.5 starts at 29.
+- Phase 35 added (2026-07-17): MRG-05 Grounding Gate + Stage-1 Scoping Fix — from spike findings (spikes 006-013), independent of the v1.5 hub work. Adds the validated Stage-2 order_name/order_summary grounding gate (merge.py) plus conservative Stage-1 tracking-number scoping broadening (email_parser.py). Not part of the original v1.5 requirement set.
 
 ### Decisions
 
@@ -94,6 +95,54 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 29-01: SHARED_STORAGE_VERSION=1 lives only in hub.py — separate version chain from coordinator.py's STORAGE_VERSION=3
 - [Phase ?]: Phase 29-01: hub worker stub tested via hub._queue.put_nowait() directly (D-02) — no coordinator wiring or test-only helper added
 - [Phase ?]: PAR-02: ImapCoordinator now sets _first_refresh_done=True on success path only, mirroring GmailCoordinator (gmail_coordinator.py:200)
+- [Phase ?]: Combined Task 1+Task 2 TDD cycles in 30-01 since seed_from_list reuses check_and_mark's shared FIFO trim helper
+- [Phase ?]: Hub check_and_mark/is_submitted perform zero normalization on tn -- verbatim store/compare (SPEC Prohibition 1, hub side); caller-canonical contract enforced in Plan 30-03
+- [Phase 30]: async_setup calls self.async_load() unconditionally after version-handling -- mocked store's async_load invoked twice per setup in tests, left as-is (no test asserts call count)
+- [Phase 30]: async_shutdown delegates to self.async_save() so version+submitted_tracking_numbers write path cannot drift between explicit save and shutdown flush
+- [Phase 30-03]: Deferred hub migration persist (hub.async_save + per-entry save) to the end of _async_load_store, after all state hydration completes, to avoid wiping persisted_shipments/pending_posts/counters with __init__ defaults (Rule 1 fix).
+- [Phase 30-03]: tests/conftest.py autouse fixture monkeypatches Shop2ParcelCoordinator.__init__ to auto-attach a shared, I/O-free per-hass test hub, avoiding ~250 individual coordinator-construction call-site edits while leaving hub._refcount and real async_setup_entry wiring untouched.
+- [Phase ?]: 35-01: 4-tuple return from merge_llm_authoritative_with_grounding (not the spike blueprint's 3-tuple) keeps grounding rejections in their own list, separate from MRG-04 carrier-format gate_rejections
+- [Phase 35]: 35-02: LABEL_TAGS=[p,td] stays unchanged; TRACKING_TAGS=[p,td,div,span] is the only broadened scope — order_name/carrier_name never scan div/span, closing the footer-boilerplate false-positive risk
+- [Phase 35]: 35-02: Div-recovered tracking numbers now return via html_template strategy before Tier-1 regex fallback runs, so order_name/carrier_name are lost when they lived outside p/td — deliberate, validated tradeoff per RESEARCH.md Pitfall 4
+- [Phase ?]: Phase 35-03: MRG-05 gate wired into coordinator.py's production merge call site — order_name/order_summary now gated via preprocess_html(job.html_body) recomputed prose + merge_llm_authoritative_with_grounding; grounding rejections routed to a new isolated PollStats.grounding_rejected_total counter (RESEARCH.md Pitfall 3)
+- [Phase ?]: 35-04: gmail_coordinator.py inline Stage-1-miss fallback (Pattern 3, no Stage-1 ShipmentData) gates order_name/order_summary via direct validate_grounding() calls at the fb_shipment construction site -- not the merge_llm_authoritative_with_grounding wrapper, which requires a real Stage-1 value
+- [Phase ?]: 35-04: both real order_name/order_summary promotion sites (worker merge path from 35-03 + inline gmail fallback from 35-04) are now grounding-gated on body-only prose -- SC-1/SC-2 hold everywhere order fields can be promoted
+- [Phase ?]: hub.py hoists _next_midnight_utc/_today_utc_str verbatim from coordinator.py (D-05); coordinator copies stay until 31-04 removes them
+- [Phase ?]: hub._maybe_reset_used_today() is in-memory-only (no persist) in 31-01 — D-07-gated end-of-poll save deferred to 31-04/31-05
+- [Phase ?]: HUB_STAGE2_POLL_WINDOW = timedelta(minutes=30) placed in const.py so 31-03 can pass it directly to async_track_time_interval
+- [Phase ?]: async_save persists the private _used_today backing attribute (not the used_today rollover property) so a save call has zero read-triggered side effects
+- [Phase ?]: quota_exhausted_until's corrupt-value load guard excludes bool (isinstance(int) and not isinstance(bool)), stricter than coordinator.py's existing isinstance(int) check it mirrors
+- [Phase ?]: seed_quota_from_account() never touches used_today (migration day starts conservatively at 0, QUOTA-05/R5) while quota_exhausted_until merges via max()
+- [Phase ?]: 31-03: hub timers arm unconditionally in async_setup (no coordinator-style enable-flag gate) — the hub always goes through async_setup, so no bare-construction test path needs gating
+- [Phase ?]: 31-03: test_midnight_tick_resets_used_today drives hub._on_midnight() directly rather than via async_fire_time_changed, mirroring test_coordinator.py's precedent — _maybe_reset_used_today reads the real wall-clock UTC date, which a simulated HA time-fire does not advance
+- [Phase ?]: 31-04: Deferred _next_midnight_utc removal to 31-05 -- gmail/imap coordinators still import it for their own untouched 429 branches
+- [Phase ?]: 31-04: Added TEMPORARY coordinator.py compatibility shim (_quota_exhausted_until property + no-op _arm_quota_expiry_timer) redirecting gmail/imap inline forward-path reads/writes onto the shared hub -- reduced test blast radius from 121 to 2 failures without touching gmail_coordinator.py/imap_coordinator.py; removed by 31-05
+- [Phase ?]: 31-05: left the 31-04 compatibility shim (_quota_exhausted_until property + no-op _arm_quota_expiry_timer) in coordinator.py in place -- 40 references remain across 4 test files this plan does not own (test_coordinator.py, test_store_migration.py, test_stage2_worker.py, test_binary_sensor.py); removing it is now a separately-scoped future cleanup
+- [Phase ?]: 31-05: both per-account stale-quota-clear blocks in gmail/imap coordinators removed entirely -- the shared hub's own always-armed quota-expiry timer (31-03) is now the sole owner of clearing quota_exhausted_until
+- [Phase ?]: EnqueueOutcome lives in const.py (not hub.py/coordinator.py) to avoid the hub<->coordinator circular import (D-02)
+- [Phase ?]: Stage2Job.entry_id inserted before defaulted fields (prefetched_result/raw_msg_id) per D-11 — frozen/slots dataclass constraint
+- [Phase ?]: Combined Task 1+Task 2 GREEN commit in 32-02 (attach/detach edits sit textually between the enqueue-path additions in hub.py) -- mirrors 30-01 precedent
+- [Phase ?]: Global-bound test in 32-02 fills the queue across 8 distinct entry_ids x 8 jobs (not one account) to prove the global bound independently of the per-account cap
+- [Phase ?]: 32-03: coord resolved once before the per-job try (not re-resolved per except branch); skip path uses if coord is not None guards inside try/except so the hub in-flight release + task_done stay in a single finally with no mypy type: ignore needed
+- [Phase ?]: 32-04: RESEARCH.md's 11-site discard census was stale (actual 12) after intervening Phase 32 plans shifted line numbers -- verified via grep + AST-scoped body check instead of trusting stale line numbers
+- [Phase ?]: 32-04: fixed 5 test files beyond declared files_modified (test_stage2_queue.py, test_stage2_worker.py, test_diagnostic_sensor.py) to keep the full suite green -- Wave 5 (32-05) assumes a green suite as its starting state
+- [Phase 32]: Phase 32-05: async_start_stage2 split into async_setup_stage2_extractor (extractor-build only); async_stop_stage2/_async_stage2_worker/_log_stage2_worker_crash deleted entirely (D-04)
+- [Phase 32]: Phase 32-05: CONF_QUEUE_MAXLEN retained but documented inert (superseded by fixed HUB_STAGE2_QUEUE_MAXLEN=64) — no user-facing migration
+- [Phase 32]: Phase 32-05: multi-account no-leak/teardown/cap-fairness/no-dedup-bypass proven via REAL two-account async_setup_entry integration tests driving the live shared hub worker (test_multi_account.py), not synthetic bare-MagicMock coordinators
+- [Phase ?]: Digest test uses one mocked Stage2Result per Assumption A2 -- inline fallback path is structurally single-shipment
+- [Phase ?]: Phase 33-02: _run_inline_fallback() inserted between _enqueue_stage2 and _async_drain_pending_posts in coordinator.py (coordinator.py:1232-1593) -- new method's enqueue decision routes through _enqueue_stage2
+- [Phase ?]: Phase 33-02: assert self._hub is not None added at the top of _run_inline_fallback (Rule 3 auto-fix) -- mirrors the existing pattern at other _hub call sites since the standalone method has no enclosing-function assert to inherit narrowing from
+- [Phase 33]: Only the full-poll integration test proved genuine RED for 33-03 — direct-call tests against coord._run_inline_fallback() exercise the already-existing 33-02 shared method and pass immediately
+- [Phase 33]: 33-03: schema-quarantine test loop mirrors the real poll's pre-loop seen/in-flight skip gate explicitly since _run_inline_fallback does not re-check that condition itself
+- [Phase 33]: 33-04: multi-shipment-digest parity test feeds a body with 3 TN-shaped strings but mocks the extractor to return exactly ONE Stage2Result (Assumption A2) -- fallback path is structurally single-shipment, not multi-shipment iteration
+- [Phase 33]: 33-04: instance-isolation test proves E2/D-05 structurally -- Gmail and Imap coordinators built with an identical string key hold distinct _seen_message_ids/_inflight_message_ids/_fallback_prefetch_cache/_stage2_inline_schema_failures dict objects, no key-namespacing code needed
+- [Phase 33-05]: fail_under ratcheted 85 -> 90 against measured 95.52% global coverage; combined _run_inline_fallback + both call sites measured 100.0% (78/78 lines, D-02/R6)
+- [Phase ?]: [Phase 34-01] test_phase32_hub_inflight_and_worker_present adapted to assert hub.enqueue() surface (not literal hub._stub_worker) — Phase 32-05 already deleted the stub attribute entirely (D-04) — Plan text anticipated this fallback explicitly
+- [Phase ?]: [Phase 34-01] R-01 characterization confirms HA EntityRegistry re-parents config_entry_id on cross-entry re-registration for the pinned HA version (Assumption A1 validated) — De-risks 34-05 re-home mechanism before it is built
+- [Phase 34]: 34-02: record_stage2_worker_success/detach() dismiss the consolidated hub notification unconditionally whenever the failing set empties (not gated on _hub_notification_active) -- relies on HA's async_dismiss being a safe no-op on an unknown/already-dismissed ID, same assumption already proven at coordinator.py:900-904
+- [Phase 34]: 34-02: hub.stage2_queue_depth/stage2_pending are the sole public read surface onto Phase 32's _inflight/_queue -- the 34-03+ global queue sensor never touches hub privates directly
+- [Phase 34]: 34-05: maybe_rehome_global_sensors picks survivors[0] as the new owner — SPEC only requires exactly-one-instance, not a specific tie-break rule
+- [Phase 34]: 34-05: hub.async_shutdown() resolves both global entities' entity_ids via entity_registry.async_get_entity_id('sensor', DOMAIN, unique_id) reading the classes' _unique_id_suffix (lazy-imported) rather than hardcoding literal unique_id strings
 
 ### Roadmap Evolution
 
@@ -115,7 +164,7 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-None — v1.5 roadmap created, 24/24 requirements mapped. Ready to run `/gsd:plan-phase 29`.
+None — Phase 33 (IMAP Parity) complete and verified (4/4 must-haves). Ready to plan Phase 34 (Multi-Account Lifecycle Tests + Global Sensors), the last phase of v1.5.
 
 ### Quick Tasks Completed
 
@@ -139,12 +188,13 @@ None — v1.5 roadmap created, 24/24 requirements mapped. Ready to run `/gsd:pla
 | 260701-l5r | Fix success-field gap in parcelapp async_add_delivery — honor documented API response contract by asserting `success is True` on 2xx and routing `success:false` to the ParcelAppAlreadyAddedError/ParcelAppInvalidTrackingError taxonomy | 2026-07-01 | a7f9382 | [260701-l5r-fix-the-success-field-gap-in-parcelapp-a](./quick/260701-l5r-fix-the-success-field-gap-in-parcelapp-a/) |
 | 260701-loh | parcelapp delivery `description` = order-email summary (merchant + contents, e.g. "Target — Coffee maker") via new locked Ollama field `order_summary` with bespoke composition prompt; precedence `order_summary or order_name or tracking_number` at all 4 POST sites; Stage-1/no-LLM fallback preserved; CR-01 fix restores order_summary across HA restart. --full: research + plan-check + code-review + verify (8/8 passed) | 2026-07-01 | eb58360 | [260701-loh-make-parcelapp-delivery-description-a-sh](./quick/260701-loh-make-parcelapp-delivery-description-a-sh/) |
 | 260703-mac | Fix startup LLM timeout: Gmail Ollama fallback gatekeeper ran inline LLM extraction during `async_config_entry_first_refresh` (inside HA's 300s bootstrap stage-2 window), so a Stage-1-miss backlog cancelled setup and downed the integration. Fix: (1) skip inline fallback on the first refresh via in-memory `_first_refresh_done` flag (skipped misses left un-marked → re-inspected next poll); (2) per-poll wall-clock budget `MAX_STAGE2_FALLBACK_INLINE_SECONDS=60.0` as defense-in-depth. Gmail-only; 10/poll cap unchanged. --full: research + plan-check + code-review (2 warnings fixed) + verify (5/5 passed). Verified. | 2026-07-03 | 9e7d8bc | [260703-mac-fix-startup-llm-problem-defer-inline-oll](./quick/260703-mac-fix-startup-llm-problem-defer-inline-oll/) |
+| 260720-mt8 | Fix reauth confirmation screen showing raw untranslated placeholder `[%key:common::config_flow::abort::reauth_successful%]` instead of "Re-authentication was successful". Root cause: custom/HACS integrations serve `translations/en.json` to the frontend at runtime, but HA core only resolves `[%key:...%]` common-string references at its own build time — never for custom integrations — so the placeholder rendered verbatim. Resolved all 6 unresolved `config.abort` references (reauth_successful + 5 OAuth aborts) to literal English text in both `strings.json` and `translations/en.json` (kept byte-identical); added 2 regression tests. TDD RED→GREEN; 17/17 tests pass. | 2026-07-20 | c7fb96f (shared w/ concurrent 34-02 commit — verified byte-identical diff, see 260720-mt8-SUMMARY.md) | [260720-mt8-i-got-the-following-text-when-i-reauthed](./quick/260720-mt8-i-got-the-following-text-when-i-reauthed/) |
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 61
+- Total plans completed: 84
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -172,6 +222,11 @@ None — v1.5 roadmap created, 24/24 requirements mapped. Ready to run `/gsd:pla
 | 21 | 3 | - | - |
 | 23 | 4 | - | - |
 | 29 | 2 | - | - |
+| 30 | 3 | - | - |
+| 35 | 4 | - | - |
+| 31 | 5 | - | - |
+| 33 | 5 | - | - |
+| 34 | 6 | - | - |
 
 **Recent Trend:**
 
@@ -192,6 +247,32 @@ None — v1.5 roadmap created, 24/24 requirements mapped. Ready to run `/gsd:pla
 | Phase 21 P03 | 8m | 2 tasks | 5 files |
 | Phase 29 P01 | 25min | 3 tasks | 3 files |
 | Phase 29 P02 | 15min | 2 tasks | 2 files |
+| Phase 30 P01 | 10min | 2 tasks | 2 files |
+| Phase 30 P02 | 15min | 2 tasks | 2 files |
+| Phase 30 P03 | 45min | 3 tasks | 14 files |
+| Phase 35 P01 | 20min | 2 tasks | 2 files |
+| Phase 35 P02 | 20min | 2 tasks | 2 files |
+| Phase 35 P03 | 20min | 2 tasks | 2 files |
+| Phase 35 P04 | 15min | 2 tasks | 2 files |
+| Phase 31 P01 | 15min | 2 tasks | 3 files |
+| Phase 31 P02 | 5min | 2 tasks | 2 files |
+| Phase 31 P03 | 15min | 2 tasks | 2 files |
+| Phase 31 P04 | 35min | 3 tasks | 7 files |
+| Phase 31 P05 | 25min | 2 tasks | 6 files |
+| Phase 32 P01 | 15min | 3 tasks | 7 files |
+| Phase 32 P02 | 25min | 2 tasks | 2 files |
+| Phase 32 P03 | 25min | 2 tasks | 2 files |
+| Phase 32 P04 | 35min | 3 tasks | 6 files |
+| Phase 32 P05 | 50min | 3 tasks | 14 files |
+| Phase 33 P01 | 10min | 2 tasks | 1 files |
+| Phase 33 P02 | 25min | 2 tasks | 2 files |
+| Phase 33 P03 | 20min | 2 tasks | 2 files |
+| Phase 33 P04 | 20min | 2 tasks | 1 files |
+| Phase 33-imap-parity P05 | 8min | 2 tasks | 1 files |
+| Phase 34 P01 | 10min | 2 tasks | 2 files |
+| Phase 34 P02 | 20min | 2 tasks | 2 files |
+| Phase 34 P05 | 30min | 3 tasks | 4 files |
+| Phase 34 P06 | 35min | 2 tasks | 2 files |
 
 ## Deferred Items
 
@@ -238,14 +319,14 @@ Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuin
 
 ## Session Continuity
 
-**Resume file:** .planning/phases/30-shared-dedup/30-CONTEXT.md
+**Resume file:** None
 
-Last session: 2026-07-09T19:59:34.813Z
-Stopped at: Phase 30 context gathered
-Next action: `/gsd:execute-phase 29` — execute the 2 planned Phase 29 plans (hub lifecycle + IMAP first-refresh fix).
+Last session: 2026-07-20T22:06:12.235Z
+Stopped at: Completed 34-05-PLAN.md
+Next action: `/gsd-discuss-phase 34` — gather context before planning (no CONTEXT.md exists yet for Phase 34). Alternatively skip straight to `/gsd-plan-phase 34`.
 
 ## Operator Next Steps
 
-- `/gsd:execute-phase 29` — execute Phase 29: Hub Skeleton + Foundational Safety (2 plans, both Wave 1)
-- After Phase 29 complete: proceed to Phase 30 (Shared Dedup)
-- Full sequence: 29 → 30 → 31 → 32 → 33 → 34
+- `/gsd-discuss-phase 34` — discuss Phase 34: Multi-Account Lifecycle Tests + Global Sensors before planning (recommended — no CONTEXT.md yet)
+- `/gsd-plan-phase 34` — skip discussion, plan Phase 34 directly
+- Full sequence: 29 ✓ → 30 ✓ → 31 ✓ → 32 ✓ → 33 ✓ → 34 (last phase of v1.5, not yet planned)

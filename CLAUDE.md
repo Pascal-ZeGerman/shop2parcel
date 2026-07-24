@@ -157,6 +157,10 @@ Architecture not yet mapped. Follow existing patterns found in the codebase.
 <!-- GSD:architecture-end -->
 
 <!-- GSD:workflow-start source:GSD defaults -->
+## Spike Findings
+
+- **Spike findings for Shop2Parcel** (implementation patterns, constraints, gotchas) → `Skill("spike-findings-shop2parcel")`
+
 ## GSD Workflow Enforcement
 
 Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
