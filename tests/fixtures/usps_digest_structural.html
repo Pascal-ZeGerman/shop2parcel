@@ -1,0 +1,31 @@
+<!-- Synthetic USPS Informed Delivery digest using USPS's REAL template ids -->
+<!-- (pra-shipper-name-id / pra-tracking-number-id), adapted from the real -->
+<!-- 2-package digest corpus at -->
+<!-- .planning/spikes/014-tracking-fp-root-cause/corpus/spike009_9361289691066362556322_usps.html -->
+<!-- Package 1: named shipper "PRIMARY KIDS INC" + a hidden -secondary mobile -->
+<!-- duplicate of the same tracking number (proves findall+dedup collapses it). -->
+<!-- Package 2: EMPTY shipper span (no sender data upstream) -->
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>USPS Informed Delivery: Your Daily Digest</title></head>
+<body>
+  <table>
+    <tr><td><img src="https://www.usps.com/images/logo.png" alt="USPS"></td></tr>
+    <tr><td>Hi, you have 2 inbound package(s) arriving soon.</td></tr>
+
+    <!-- Package 1: named shipper -->
+    <tr><td>
+      <p>FROM: <b><span id="pra-shipper-name-id">PRIMARY KIDS INC</span></b></p>
+      <p><a id="tracking-number-href-id" href="https://tools.usps.com/go/TrackConfirmAction?tLabels=9261290316868031775213"><span id="pra-tracking-number-id">9261290316868031775213</span></a></p>
+      <p class="tracking-number-mobile"><a id="tracking-number-href-id-secondary" href="https://tools.usps.com/go/TrackConfirmAction?tLabels=9261290316868031775213"><span id="pra-tracking-number-id-secondary">9261290316868031775213</span></a></p>
+    </td></tr>
+
+    <!-- Package 2: empty shipper span -->
+    <tr><td>
+      <p>FROM: <b><span id="pra-shipper-name-id"></span></b></p>
+      <p><a id="tracking-number-href-id" href="https://tools.usps.com/go/TrackConfirmAction?tLabels=9400111899223450094040"><span id="pra-tracking-number-id">9400111899223450094040</span></a></p>
+    </td></tr>
+
+  </table>
+</body>
+</html>

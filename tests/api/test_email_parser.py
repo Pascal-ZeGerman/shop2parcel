@@ -25,6 +25,7 @@ from custom_components.shop2parcel.api.email_parser import (
     _detect_fedex,
     _detect_ups,
     _detect_usps,
+    _extract_usps_shippers,
     _parse_dhl,
 )
 
@@ -303,6 +304,72 @@ def test_usps_digest_deduplicates_repeated_tracking_number() -> None:
     assert result.shipment is not None
     assert result.shipment.tracking_number == "9200190106460364169829"
     assert result.extra_shipments == []
+
+
+def test_extract_usps_shippers_pairs_named_and_empty() -> None:
+    """USPS-STRUCT-01: _extract_usps_shippers reads real pra-shipper-name-id spans
+    and returns them in document order, named shipper first, empty span second."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest_structural.html").read_text(
+        encoding="utf-8"
+    )
+    assert _extract_usps_shippers(html) == ["PRIMARY KIDS INC", ""]
+
+
+def test_usps_digest_structural_populates_order_summary() -> None:
+    """USPS-STRUCT-01: real-id digest populates order_summary from the paired
+    shipper span (named shipper -> name, empty shipper span -> None)."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest_structural.html").read_text(
+        encoding="utf-8"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "digest_struct", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "9261290316868031775213"
+    assert result.shipment.order_summary == "PRIMARY KIDS INC"
+    assert len(result.extra_shipments) == 1
+    assert result.extra_shipments[0].tracking_number == "9400111899223450094040"
+    assert result.extra_shipments[0].order_summary is None
+
+
+def test_usps_digest_secondary_span_deduplicated() -> None:
+    """USPS-STRUCT-01: the pra-tracking-number-id-secondary mobile duplicate does
+    NOT create a phantom third sibling."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest_structural.html").read_text(
+        encoding="utf-8"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "digest_struct", 1746000000)
+    assert result.shipment is not None
+    assert len([result.shipment, *result.extra_shipments]) == 2
+
+
+def test_extract_usps_shippers_count_mismatch_returns_empty() -> None:
+    """USPS-STRUCT-01: real ids present but shipper count != tracking count ->
+    guard trips, returns [], and no order_summary is guessed by partial index."""
+    html = (
+        Path(__file__).parent.parent / "fixtures" / "usps_digest_count_mismatch.html"
+    ).read_text(encoding="utf-8")
+    assert _extract_usps_shippers(html) == []
+    parser = EmailParser()
+    result = parser.parse(html, "digest_mismatch", 1746000000)
+    assert result.shipment is not None
+    for s in [result.shipment, *result.extra_shipments]:
+        assert s.order_summary is None
+
+
+def test_extract_usps_shippers_ids_absent_returns_empty() -> None:
+    """USPS-STRUCT-01: existing synthetic usps_digest.html has 0 shipper spans vs
+    3 tracking numbers -> guard trips, returns [] (regression proof for the
+    ids-absent branch)."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest.html").read_text(
+        encoding="utf-8"
+    )
+    assert _extract_usps_shippers(html) == []
+    parser = EmailParser()
+    result = parser.parse(html, "digest_msg1", 1746000000)
+    assert result.shipment is not None
+    for s in [result.shipment, *result.extra_shipments]:
+        assert s.order_summary is None
 
 
 def test_fedex_template_extracts_tracking(fedex_html: str) -> None:

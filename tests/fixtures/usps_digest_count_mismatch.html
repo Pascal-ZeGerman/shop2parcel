@@ -1,0 +1,27 @@
+<!-- Synthetic USPS Informed Delivery digest with USPS's REAL pra-shipper-name-id -->
+<!-- id present but a shipper/tracking COUNT MISMATCH: 1 shipper span vs 2 -->
+<!-- distinct tracking numbers. Proves the safe-fallback guard trips: -->
+<!-- _extract_usps_shippers() must return [] (no partial-index guessing) rather -->
+<!-- than mis-pairing the second tracking number to the first package's sender. -->
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>USPS Informed Delivery: Your Daily Digest</title></head>
+<body>
+  <table>
+    <tr><td><img src="https://www.usps.com/images/logo.png" alt="USPS"></td></tr>
+    <tr><td>Hi, you have 2 inbound package(s) arriving soon.</td></tr>
+
+    <!-- Package 1: named shipper (only shipper span in this digest) -->
+    <tr><td>
+      <p>FROM: <b><span id="pra-shipper-name-id">SOME SENDER</span></b></p>
+      <p><a id="tracking-number-href-id" href="https://tools.usps.com/go/TrackConfirmAction?tLabels=9261290316868031775213"><span id="pra-tracking-number-id">9261290316868031775213</span></a></p>
+    </td></tr>
+
+    <!-- Package 2: second tracking number with NO paired shipper span -->
+    <tr><td>
+      <p>9400111899223450094040</p>
+    </td></tr>
+
+  </table>
+</body>
+</html>
