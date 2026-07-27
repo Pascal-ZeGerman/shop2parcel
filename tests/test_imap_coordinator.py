@@ -14,12 +14,56 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.shop2parcel.const import DOMAIN
+from custom_components.shop2parcel.const import (
+    CONF_CUSTOM_FIELDS,
+    CONF_OLLAMA_MODEL,
+    CONF_OLLAMA_TIMEOUT,
+    CONF_OLLAMA_URL,
+    CONF_QUEUE_MAXLEN,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_TIMEOUT,
+    DEFAULT_QUEUE_MAXLEN,
+    DOMAIN,
+)
+from custom_components.shop2parcel.extractors.types import Stage2Result
 from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_imap_stage2_entry() -> MockConfigEntry:
+    """IMAP MockConfigEntry with Stage-2 (Ollama) ENABLED (CONF_OLLAMA_URL present).
+
+    Phase 33 Plan 03 (PAR-01/PAR-03): mirrors mock_imap_no_stage2_entry's IMAP
+    connection-method shape but adds the Ollama options block from Gmail's
+    mock_stage2_entry so stage2_enabled resolves True — there was previously no
+    IMAP fixture with CONF_OLLAMA_URL set (Research Open Question 2).
+    """
+    return MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "connection_type": "imap",
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "imap_username": "user@example.com",
+            "imap_password": "app-password-here",
+            "imap_tls": "ssl",
+            "api_key": "test-parcelapp-key",
+        },
+        options={
+            "imap_search": 'SUBJECT "shipped"',
+            "poll_interval": 30,
+            CONF_OLLAMA_URL: "http://localhost:11434",
+            CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+            CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+            CONF_CUSTOM_FIELDS: [],
+        },
+        unique_id="imap-stage2-test@example.com",
+    )
 
 
 @pytest.fixture
@@ -472,3 +516,550 @@ async def test_imap_storage_key_falls_back_to_bare_uid(hass, mock_imap_no_stage2
         data = await coord._async_update_data()
 
     assert "42" in data
+
+
+# ---------------------------------------------------------------------------
+# Phase 31-05 (QUOTA-02): IMAP inline forward path <-> shared hub daily budget
+# ---------------------------------------------------------------------------
+
+
+async def test_imap_inline_transient_error_refunds_reserved_slot(hass, mock_imap_no_stage2_entry):
+    """D-01: a transient inline POST failure refunds the daily-budget slot it reserved —
+    the shared hub's used_today returns to its pre-poll value (reserve then refund nets
+    to zero movement), and the message is left re-parseable (not dedup-marked).
+    """
+    from custom_components.shop2parcel.api.exceptions import ParcelAppTransientError
+
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    raw_msg = _make_imap_message(uid=7, tracking_number=tn)
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(tn)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppTransientError("parcelapp.net 502")
+        )
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+        assert coord._hub.used_today == 0  # pre-poll baseline (conftest's shared test hub)
+
+        await coord._async_update_data()
+
+    # Reserved (try_consume) then refunded on the transient error — nets back to 0.
+    assert coord._hub.used_today == 0, (
+        f"Expected used_today back to 0 after refund, got {coord._hub.used_today}"
+    )
+    # Not dedup-marked — the message stays re-fetchable for retry.
+    assert not coord._hub.is_submitted(tn)
+
+
+async def test_imap_inline_429_blocks_shared_hub(hass, mock_imap_no_stage2_entry):
+    """D-01/D-06: an inline 429 routes to hub.record_quota_exhausted (no refund) — the
+    shared hub's quota_is_exhausted flips True, blocking ALL accounts, not just this one.
+    """
+    from custom_components.shop2parcel.api.exceptions import ParcelAppQuotaError
+
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    raw_msg = _make_imap_message(uid=8, tracking_number=tn)
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(tn)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppQuotaError("quota exhausted", reset_at=9999999999)
+        )
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+        assert coord._hub.quota_is_exhausted is False
+
+        await coord._async_update_data()
+
+    assert coord._hub.quota_is_exhausted is True
+    assert coord._hub.quota_exhausted_until == 9999999999
+    # No refund on 429 (D-01) — the reserved slot stays consumed.
+    assert coord._hub.used_today == 1
+
+
+async def test_imap_inline_already_added_keeps_reserve(hass, mock_imap_no_stage2_entry):
+    """WR-01 (31-REVIEW.md / 31-VERIFICATION.md): the IMAP inline forward path's
+    AlreadyAdded/InvalidTracking except block must NOT refund the reserve it took
+    via hub.try_consume() immediately before the POST — the slot stays consumed
+    (D-01: it genuinely occupied a daily-budget slot from parcelapp's point of
+    view), mirroring the already-tested 429 (no-refund) and transient (refund)
+    branches above.
+    """
+    from custom_components.shop2parcel.api.exceptions import ParcelAppAlreadyAddedError
+
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+    tn = "1Z999AA10123456784"
+    raw_msg = _make_imap_message(uid=9, tracking_number=tn)
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(tn)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+        assert coord._hub.used_today == 0  # pre-poll baseline (conftest's shared test hub)
+
+        await coord._async_update_data()
+
+    # Reserved (try_consume) then NOT refunded on AlreadyAdded (D-01) — used_today
+    # stays at 1, not back at 0.
+    assert coord._hub.used_today == 1, (
+        f"Expected used_today to stay at 1 (no refund on AlreadyAdded), got {coord._hub.used_today}"
+    )
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase 33 Plan 03 (PAR-01/PAR-03): IMAP inline Ollama fallback branch matrix.
+#
+# ImapCoordinator has zero fallback behavior today — a Stage-1 miss always
+# marks the message seen (imap_coordinator.py:399-406, stage2-disabled or not).
+# These tests exercise Shop2ParcelCoordinator._run_inline_fallback() (built in
+# Plan 33-02) directly against ImapCoordinator instances. Every test in this
+# section MUST FAIL until Plan 33-03 Task 2 wires the IMAP Stage-1-miss site
+# to `await self._run_inline_fallback(...)` (RED state for this task).
+# ---------------------------------------------------------------------------
+
+
+def _valid_stage2_result(tn: str = "1Z999AA10123456784") -> Stage2Result:
+    """Build a Stage2Result carrying a valid, not-yet-submitted carrier-format TN."""
+    return Stage2Result(
+        locked={
+            "tracking_number": tn,
+            "carrier_name": "UPS",
+            "order_name": "#imap-fb-1001",
+        },
+        custom={},
+        passes_used=1,
+        latency_ms=10.0,
+    )
+
+
+async def test_imap_fallback_valid_tracking_enqueues_stage2_job(hass, mock_imap_stage2_entry):
+    """AC-2 (full-poll integration): an IMAP Stage-1 miss (stage2-enabled, not debug,
+    _first_refresh_done True, live mocked extractor) that extracts a valid
+    not-yet-submitted carrier-format TN results in exactly one _enqueue_stage2 call
+    with that TN, and _mark_message_seen is NOT called for this message (PAR-01/PAR-03).
+    """
+    from custom_components.shop2parcel.api.email_parser import ParseResult  # noqa: PLC0415
+
+    mock_imap_stage2_entry.add_to_hass(hass)
+    raw_msg = _make_imap_message(uid=100, tracking_number="unused")
+    no_match = ParseResult(
+        shipment=None,
+        skip_reason="no_tracking_pattern",
+        strategy_used=None,
+        keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+    )
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(return_value=_valid_stage2_result())
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch.object(ImapCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue,
+        patch.object(ImapCoordinator, "_mark_message_seen") as mock_mark_seen,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = no_match
+
+        coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+        await coord._async_load_store()
+        coord._diagnostics.stage2_enabled = True
+        coord._extractor = mock_extractor
+        coord._first_refresh_done = True
+
+        await coord._async_update_data()
+
+    mock_extractor.async_extract.assert_awaited_once()
+    mock_enqueue.assert_called_once()
+    assert mock_enqueue.call_args.args[0] == "1Z999AA10123456784", (
+        f"Expected _enqueue_stage2 called with the extracted TN, "
+        f"got args={mock_enqueue.call_args.args}"
+    )
+    mock_mark_seen.assert_not_called()
+
+
+async def test_imap_fallback_enqueue_marks_inflight_not_seen(hass, mock_imap_stage2_entry):
+    """No premature mark-seen: the enqueuing miss leaves uid_key un-marked in the
+    persisted seen cache (re-inspectable next poll) but pins it in the in-memory
+    in-flight set so the gatekeeper does not re-run Ollama on it every poll (PAR-03).
+    """
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "201"
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(return_value=_valid_stage2_result())
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = mock_extractor
+    coord._first_refresh_done = True
+    coord._reset_stage2_poll_counters()
+
+    with patch.object(ImapCoordinator, "_enqueue_stage2", return_value=True) as mock_enqueue:
+        await coord._run_inline_fallback(
+            msg_key=uid_key,
+            prefix="imap:",
+            html="<html>shipping body</html>",
+            meta={"subject": "", "from": ""},
+            email_date=0,
+            candidate_tokens=[],
+            debug_mode=False,
+        )
+
+    mock_enqueue.assert_called_once()
+    assert uid_key in coord._inflight_message_ids, (
+        "An enqueuing IMAP fallback must pin the uid_key in the in-flight set"
+    )
+    assert uid_key not in coord._seen_message_ids, (
+        "An enqueuing IMAP fallback must NOT mark uid_key in the persisted seen cache"
+    )
+
+
+async def test_imap_fallback_first_refresh_skip(hass, mock_imap_stage2_entry):
+    """First-refresh skip is active for IMAP: a Stage-1 miss on the first poll
+    (_first_refresh_done False) makes ZERO extractor calls and leaves the message
+    un-marked (bootstrap-window guard, P3)."""
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "202"
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(return_value=_valid_stage2_result())
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = mock_extractor
+    assert coord._first_refresh_done is False
+    coord._reset_stage2_poll_counters()
+
+    await coord._run_inline_fallback(
+        msg_key=uid_key,
+        prefix="imap:",
+        html="<html>shipping body</html>",
+        meta={"subject": "", "from": ""},
+        email_date=0,
+        candidate_tokens=[],
+        debug_mode=False,
+    )
+
+    mock_extractor.async_extract.assert_not_awaited()
+    assert uid_key not in coord._seen_message_ids
+    assert uid_key not in coord._inflight_message_ids
+
+
+async def test_imap_fallback_stage2_disabled_marks_seen(hass, mock_imap_stage2_entry):
+    """Stage2-disabled preserved behavior: with stage2_enabled False, an IMAP
+    Stage-1 miss still marks the message seen (current behavior preserved)."""
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "203"
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = False
+    coord._first_refresh_done = True
+    coord._reset_stage2_poll_counters()
+
+    await coord._run_inline_fallback(
+        msg_key=uid_key,
+        prefix="imap:",
+        html="<html>shipping body</html>",
+        meta={"subject": "", "from": ""},
+        email_date=0,
+        candidate_tokens=[],
+        debug_mode=False,
+    )
+
+    assert uid_key in coord._seen_message_ids, (
+        "Stage2-disabled IMAP Stage-1 miss must still mark the message seen"
+    )
+
+
+async def test_imap_fallback_debug_mode_never_marks_seen(hass, mock_imap_stage2_entry):
+    """Debug mode: an IMAP Stage-1 miss in debug_mode never marks the message
+    seen (no persisted-cache poison)."""
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "204"
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(return_value=_valid_stage2_result())
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = mock_extractor
+    coord._first_refresh_done = True
+    coord._reset_stage2_poll_counters()
+
+    await coord._run_inline_fallback(
+        msg_key=uid_key,
+        prefix="imap:",
+        html="<html>shipping body</html>",
+        meta={"subject": "", "from": ""},
+        email_date=0,
+        candidate_tokens=[],
+        debug_mode=True,
+    )
+
+    assert uid_key not in coord._seen_message_ids, (
+        "IMAP Stage-1 miss in debug_mode must never mark the message seen"
+    )
+
+
+async def test_imap_fallback_extractor_none_not_marked_seen(hass, mock_imap_stage2_entry):
+    """Extractor-unavailable: when _extractor is None, IMAP leaves the message
+    un-marked/re-inspectable (identical extractor-unavailable branch)."""
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "205"
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = None
+    coord._first_refresh_done = True
+    coord._reset_stage2_poll_counters()
+
+    await coord._run_inline_fallback(
+        msg_key=uid_key,
+        prefix="imap:",
+        html="<html>shipping body</html>",
+        meta={"subject": "", "from": ""},
+        email_date=0,
+        candidate_tokens=[],
+        debug_mode=False,
+    )
+
+    assert uid_key not in coord._seen_message_ids
+    assert uid_key not in coord._inflight_message_ids
+
+
+async def test_imap_fallback_per_poll_cap_boundary(hass, mock_imap_stage2_entry):
+    """Cap boundary: with _stage2_fallback_extractions_this_poll already at MAX,
+    the miss skips extraction and is left un-marked (P5)."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
+    )
+
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "206"
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(return_value=_valid_stage2_result())
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = mock_extractor
+    coord._first_refresh_done = True
+    coord._reset_stage2_poll_counters()
+    coord._stage2_fallback_extractions_this_poll = MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL
+
+    await coord._run_inline_fallback(
+        msg_key=uid_key,
+        prefix="imap:",
+        html="<html>shipping body</html>",
+        meta={"subject": "", "from": ""},
+        email_date=0,
+        candidate_tokens=[],
+        debug_mode=False,
+    )
+
+    mock_extractor.async_extract.assert_not_awaited()
+    assert uid_key not in coord._seen_message_ids
+    assert uid_key not in coord._inflight_message_ids
+
+
+async def test_imap_fallback_wall_clock_budget_boundary(hass, mock_imap_stage2_entry):
+    """Budget boundary: with _stage2_fallback_inline_deadline already reached,
+    the miss defers and is left un-marked (P5)."""
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "207"
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(return_value=_valid_stage2_result())
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = mock_extractor
+    coord._first_refresh_done = True
+    coord._reset_stage2_poll_counters()
+    coord._stage2_fallback_inline_deadline = 0.0  # always-past deadline
+
+    await coord._run_inline_fallback(
+        msg_key=uid_key,
+        prefix="imap:",
+        html="<html>shipping body</html>",
+        meta={"subject": "", "from": ""},
+        email_date=0,
+        candidate_tokens=[],
+        debug_mode=False,
+    )
+
+    mock_extractor.async_extract.assert_not_awaited()
+    assert uid_key not in coord._seen_message_ids
+    assert uid_key not in coord._inflight_message_ids
+
+
+async def test_imap_fallback_schema_quarantine_threshold(hass, mock_imap_stage2_entry):
+    """Schema-quarantine boundary: driving _run_inline_fallback schema failures for
+    ONE IMAP uid_key up to STAGE2_MSG_QUARANTINE_THRESHOLD triggers quarantine at
+    exactly the boundary — the uid_key is marked seen once the threshold is reached
+    (mirrors Gmail's test_inline_schema_error_quarantines_after_threshold; Edge E3).
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaSchemaError  # noqa: PLC0415
+    from custom_components.shop2parcel.const import STAGE2_MSG_QUARANTINE_THRESHOLD  # noqa: PLC0415
+
+    mock_imap_stage2_entry.add_to_hass(hass)
+    threshold = STAGE2_MSG_QUARANTINE_THRESHOLD
+    uid_key = "208"
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(
+        side_effect=OllamaSchemaError("No JSON object found in LLM response (len=100)")
+    )
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = mock_extractor
+    coord._first_refresh_done = True
+
+    for _ in range(threshold + 3):
+        # Mirror the real poll loop's pre-loop seen/in-flight skip gate — once
+        # quarantined, the caller never invokes _run_inline_fallback again for
+        # this uid_key (the method itself does not re-check this condition).
+        if uid_key in coord._seen_message_ids or uid_key in coord._inflight_message_ids:
+            break
+        coord._reset_stage2_poll_counters()
+        await coord._run_inline_fallback(
+            msg_key=uid_key,
+            prefix="imap:",
+            html="<html>unparseable digest body</html>",
+            meta={"subject": "", "from": ""},
+            email_date=0,
+            candidate_tokens=[],
+            debug_mode=False,
+        )
+
+    assert mock_extractor.async_extract.await_count == threshold, (
+        f"Expected exactly {threshold} inference attempts before quarantine, "
+        f"got {mock_extractor.async_extract.await_count} (infinite-loop regression?)"
+    )
+    assert uid_key in coord._seen_message_ids, (
+        "A quarantined schema-failing IMAP email must be marked seen so it stops being re-fetched"
+    )
+
+
+async def test_imap_fallback_carrier_reject_marks_seen(hass, mock_imap_stage2_entry):
+    """Carrier-reject: extractor returns a non-carrier string => no enqueue,
+    message marked seen (terminal reject)."""
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "209"
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(return_value=_valid_stage2_result(tn="ORDER-12345"))
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = mock_extractor
+    coord._first_refresh_done = True
+    coord._reset_stage2_poll_counters()
+
+    with patch.object(ImapCoordinator, "_enqueue_stage2") as mock_enqueue:
+        await coord._run_inline_fallback(
+            msg_key=uid_key,
+            prefix="imap:",
+            html="<html>order confirm body</html>",
+            meta={"subject": "", "from": ""},
+            email_date=0,
+            candidate_tokens=[],
+            debug_mode=False,
+        )
+
+    mock_enqueue.assert_not_called()
+    assert uid_key in coord._seen_message_ids
+    assert coord._diagnostics.carrier_format_rejected_total == 1
+
+
+async def test_imap_fallback_dedup_hit_marks_seen(hass, mock_imap_stage2_entry):
+    """Dedup-hit: extractor returns a TN already in the shared hub dedup set =>
+    no enqueue, message marked seen."""
+    mock_imap_stage2_entry.add_to_hass(hass)
+    uid_key = "210"
+    tn = "1Z999AA10123456784"
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(return_value=_valid_stage2_result(tn=tn))
+
+    coord = ImapCoordinator(hass, mock_imap_stage2_entry)
+    await coord._async_load_store()
+    coord._diagnostics.stage2_enabled = True
+    coord._extractor = mock_extractor
+    coord._first_refresh_done = True
+    coord._reset_stage2_poll_counters()
+    coord._hub.check_and_mark(tn)  # pre-seed the shared hub dedup set
+
+    with patch.object(ImapCoordinator, "_enqueue_stage2") as mock_enqueue:
+        await coord._run_inline_fallback(
+            msg_key=uid_key,
+            prefix="imap:",
+            html="<html>shipping body</html>",
+            meta={"subject": "", "from": ""},
+            email_date=0,
+            candidate_tokens=[],
+            debug_mode=False,
+        )
+
+    mock_enqueue.assert_not_called()
+    assert uid_key in coord._seen_message_ids

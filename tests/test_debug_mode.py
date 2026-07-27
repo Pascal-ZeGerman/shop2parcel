@@ -375,98 +375,17 @@ async def test_dbg03_imap_dedup_bypass(hass, mock_imap_config_entry):
 
 
 # ---------------------------------------------------------------------------
-# W17/P14-WR-02: stale-quota NOT cleared in debug mode
+# W17/P14-WR-02 (Phase 31-05): the per-account stale-quota-clear block these two
+# tests exercised (test_debug_mode_does_not_clear_stale_quota_gmail/imap) was
+# REMOVED from gmail_coordinator.py/imap_coordinator.py entirely — not merely
+# debug-gated — because the shared hub's own always-armed quota-expiry timer
+# (31-03, tests/test_hub.py::test_quota_expiry_timer_clears_block) now owns
+# clearing quota_exhausted_until for every account at once. There is no longer
+# an inline "clear vs. skip-in-debug-mode" branch to assert on, so both tests
+# were deleted rather than kept asserting a now-permanently-true tautology.
+# The debug-mode zero-hub-writes contract those tests also touched is now
+# covered by test_p1_quota_zero_writes_hub_store below (P1).
 # ---------------------------------------------------------------------------
-
-
-async def test_debug_mode_does_not_clear_stale_quota_gmail(hass, mock_config_entry):
-    """W17/P14-WR-02 Gmail: stale _quota_exhausted_until is NOT cleared in debug mode."""
-    import time as _time_mod
-
-    mock_config_entry.add_to_hass(hass)
-    hass.config_entries.async_update_entry(
-        mock_config_entry,
-        options={CONF_DEBUG_MODE: True},
-    )
-    past_epoch = int(_time_mod.time()) - 3600  # 1 hour in the past
-
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
-        ) as mock_oauth,
-        patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
-    ):
-        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
-        mock_oauth.OAuth2Session.return_value.token = {
-            "access_token": "fake-token",
-            "refresh_token": "fake-refresh-token",
-            "expires_at": 9999999999.0,
-        }
-        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        delay_save_mock = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save_mock
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:X"))
-
-        coord = GmailCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
-        coord._quota_exhausted_until = past_epoch
-        await coord._async_update_data()
-
-    # Quota timestamp must be UNCHANGED in debug mode
-    assert coord._quota_exhausted_until == past_epoch, (
-        f"Expected quota_exhausted_until unchanged ({past_epoch}), got {coord._quota_exhausted_until}"
-    )
-    # Store must NOT be written in debug mode
-    assert delay_save_mock.call_count == 0, (
-        f"Expected async_delay_save call_count=0 in debug mode, got {delay_save_mock.call_count}"
-    )
-
-
-async def test_debug_mode_does_not_clear_stale_quota_imap(hass, mock_imap_config_entry):
-    """W17/P14-WR-02 IMAP: stale _quota_exhausted_until is NOT cleared in debug mode."""
-    import time as _time_mod
-
-    mock_imap_config_entry.add_to_hass(hass)
-    hass.config_entries.async_update_entry(
-        mock_imap_config_entry,
-        options={
-            "imap_search": 'SUBJECT "shipped"',
-            "poll_interval": 30,
-            CONF_DEBUG_MODE: True,
-        },
-    )
-    past_epoch = int(_time_mod.time()) - 3600  # 1 hour in the past
-
-    with (
-        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
-        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.imap_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch("custom_components.shop2parcel.imap_coordinator.persistent_notification"),
-    ):
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        delay_save_mock = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save_mock
-        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[])
-
-        coord = ImapCoordinator(hass, mock_imap_config_entry)
-        await coord._async_load_store()
-        coord._quota_exhausted_until = past_epoch
-        await coord._async_update_data()
-
-    # Quota timestamp must be UNCHANGED in debug mode
-    assert coord._quota_exhausted_until == past_epoch, (
-        f"Expected quota_exhausted_until unchanged ({past_epoch}), got {coord._quota_exhausted_until}"
-    )
-    # Store must NOT be written in debug mode
-    assert delay_save_mock.call_count == 0, (
-        f"Expected async_delay_save call_count=0 in debug mode, got {delay_save_mock.call_count}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -897,45 +816,84 @@ async def _make_debug_coordinator(hass, mock_config_entry, mock_store_cls):
     return coord
 
 
-async def test_dbg03_used_today_rollover_no_store_write_in_debug(hass, mock_config_entry):
-    """CR-02/DBG-03: the used_today rollover persist is skipped in debug mode;
-    the in-memory reset still happens."""
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        delay_save = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save
-        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
-        coord._used_today = 5
-        coord._used_today_date = "2000-01-01"
-        coord._maybe_reset_used_today()
-    assert coord._used_today == 0, "in-memory rollover reset must still happen in debug mode"
-    assert delay_save.call_count == 0, "DBG-03: no store write on rollover in debug mode"
+# Phase 31 (D-08): test_dbg03_used_today_rollover_no_store_write_in_debug and
+# test_dbg03_quota_expiry_no_store_write_in_debug are removed. Both drove the now-removed
+# coordinator methods _maybe_reset_used_today/_on_quota_expiry (moved to the hub in
+# 31-01/31-03). The hub's own D-07 debug-mode gate around its end-of-poll async_save()
+# is 31-05's scope (it wraps gmail_coordinator.py's/imap_coordinator.py's own end-of-poll
+# save call, not a coordinator-level timer persist) — this coordinator no longer has any
+# timer-driven persist path for quota state to guard here.
 
 
-async def test_dbg03_quota_expiry_no_store_write_in_debug(hass, mock_config_entry):
-    """CR-02/DBG-03: the quota-expiry timer persist is skipped in debug mode;
-    the in-memory clear still happens."""
-    from datetime import UTC, datetime
-
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        delay_save = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save
-        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
-        coord._quota_exhausted_until = int(time.time()) - 10
-        coord._on_quota_expiry(datetime.now(UTC))
-    assert coord._quota_exhausted_until is None, "in-memory quota clear must still happen"
-    assert delay_save.call_count == 0, "DBG-03: no store write on quota expiry in debug mode"
+# Phase 32 (D-04): test_dbg03_stop_stage2_no_store_write_in_debug is removed.
+# It drove the now-retired async_stop_stage2's teardown store save (CR-02/DBG-03
+# gate). async_stop_stage2 no longer exists — the per-entry queue/worker it
+# tore down are retired in favor of the shared hub queue+worker (hub.py), and
+# with it went the teardown save this test guarded. No replacement store-save
+# call site exists on the coordinator for this scenario.
 
 
-async def test_dbg03_stop_stage2_no_store_write_in_debug(hass, mock_config_entry):
-    """CR-02/DBG-03: the async_stop_stage2 teardown save is skipped in debug mode."""
-    import asyncio
+# ---------------------------------------------------------------------------
+# P1 (Phase 31-05, D-07): a debug-mode poll must write ZERO times to the
+# SHARED hub store — tightening Phase 30's unconditional end-of-poll
+# hub.async_save() to a debug-mode-gated call.
+# ---------------------------------------------------------------------------
 
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        delay_save = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save
+
+async def test_p1_quota_zero_writes_hub_store(hass, mock_config_entry):
+    """P1: a single-account debug-mode Gmail poll writes zero times to the shared
+    hub store (shop2parcel.__shared__), proven by spying coordinator._hub.async_save
+    directly — the HUB's own async_save, NOT the per-entry Shop2ParcelStore the
+    DBG-04 tests above mock (RESEARCH Pitfall 5: those are two independent stores).
+
+    The debug account's dry-run branch short-circuits before any hub mutation
+    (no try_consume/record_forward/record_quota_exhausted/check_and_mark this
+    poll), and the D-07 gate at the end of _async_update_data suppresses the
+    end-of-poll hub.async_save() call entirely when debug mode is active.
+    """
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={CONF_DEBUG_MODE: True},
+    )
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.OAuth2Session.return_value.token = {
+            "access_token": "fake-token",
+            "refresh_token": "fake-refresh-token",
+            "expires_at": 9999999999.0,
+        }
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
-        coord = await _make_debug_coordinator(hass, mock_config_entry, mock_store_cls)
-        coord._stage2_queue = asyncio.Queue(maxsize=8)
-        await coord.async_stop_stage2()
-    assert delay_save.call_count == 0, "DBG-03: no store write on stage2 stop in debug mode"
-    assert mock_store_cls.return_value.async_save.call_count == 0
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            return_value=([{"id": "msg1"}], "q after:X")
+        )
+        mock_gmail_cls.return_value.async_get_message = AsyncMock(
+            return_value={"internalDate": "1700000000000", "payload": {}}
+        )
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result(_make_shipment("msg1"))
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+        # Spy the HUB's own async_save (conftest's shared, I/O-free test hub) —
+        # NOT the per-entry Shop2ParcelStore mocked above.
+        coord._hub.async_save = AsyncMock(wraps=coord._hub.async_save)
+        await coord._async_update_data()
+
+    coord._hub.async_save.assert_not_called()

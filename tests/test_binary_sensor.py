@@ -8,7 +8,6 @@ Coverage:
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 from homeassistant.helpers import entity_registry as er
@@ -17,6 +16,7 @@ from homeassistant.helpers.entity import EntityCategory
 from custom_components.shop2parcel.api.email_parser import ShipmentData
 from custom_components.shop2parcel.binary_sensor import EmailProcessingActiveBinarySensor
 from custom_components.shop2parcel.const import DOMAIN, STAGE2_NOTIFY_THRESHOLD
+from custom_components.shop2parcel.coordinator import Stage2Job
 from tests.conftest import setup_coordinator_with_data as _setup_with_data
 
 
@@ -159,9 +159,16 @@ async def test_email_processing_sensor_registered_and_off_at_rest(hass, mock_con
 
 
 async def test_email_processing_sensor_on_when_active(hass, mock_config_entry):
-    """M6A-01: EmailProcessingActiveBinarySensor.is_on tracks coordinator.email_processing_active."""
+    """M6A-01: EmailProcessingActiveBinarySensor.is_on tracks coordinator.email_processing_active.
+
+    Phase 32 cutover: stage2_queue_depth (and email_processing_active through it) now
+    reads the hub's per-account in-flight count (hub.inflight_count) instead of the
+    retired per-entry _stage2_queue.qsize() — drive it via a real hub.enqueue()/
+    _release_inflight() round trip rather than seeding a local asyncio.Queue.
+    """
     coordinator = await _setup_with_data(hass, mock_config_entry, {})
     sensor = EmailProcessingActiveBinarySensor(coordinator, mock_config_entry)
+    entry_id = mock_config_entry.entry_id
 
     # At rest: both sources off
     assert coordinator._poll_in_progress is False
@@ -172,17 +179,23 @@ async def test_email_processing_sensor_on_when_active(hass, mock_config_entry):
     coordinator._poll_in_progress = True
     assert sensor.is_on is True
 
-    # Reset flag but seed Stage-2 queue → sensor stays on
+    # Reset flag but seed the hub's per-account in-flight count → sensor stays on
     coordinator._poll_in_progress = False
-    coordinator._stage2_queue = asyncio.Queue(maxsize=16)
-    coordinator._stage2_queue.put_nowait.__func__  # just touch queue so it's non-empty
-    # Put a sentinel item on the queue directly
-    await coordinator._stage2_queue.put("sentinel")
+    job = Stage2Job(
+        storage_key="sentinel",
+        normalized_tn="sentinel",
+        shipment=_make_shipment("sentinel-msg", "sentinel"),
+        html_body="<html/>",
+        message_id="sentinel-msg",
+        meta={"subject": "sentinel", "from": "sentinel@example.com"},
+        entry_id=entry_id,
+    )
+    coordinator._hub.enqueue(job)
     assert coordinator.stage2_queue_depth == 1
     assert sensor.is_on is True
 
-    # Drain queue and reset flag → sensor off
-    coordinator._stage2_queue.get_nowait()
+    # Release the in-flight slot and reset flag → sensor off
+    coordinator._hub._release_inflight(entry_id, "sentinel")
     assert coordinator.stage2_queue_depth == 0
     assert sensor.is_on is False
 

@@ -516,7 +516,8 @@ def test_invalid_field_name_warning_escapes_control_chars(mock_client, caplog):
 def test_non_str_field_name_dropped_with_warning(mock_client, caplog):
     """IN-05: a non-str field name (corrupt CONF_CUSTOM_FIELDS entry, e.g.
     {'name': 3}) must be dropped with a WARNING — not raise TypeError from
-    _FIELD_NAME_RE.fullmatch and abort async_start_stage2 / entry setup."""
+    _FIELD_NAME_RE.fullmatch and abort async_setup_stage2_extractor / entry
+    setup."""
     with caplog.at_level(logging.WARNING):
         extractor = OllamaExtractor(
             client=mock_client,

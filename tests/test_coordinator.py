@@ -38,11 +38,12 @@ from custom_components.shop2parcel.const import (
 from custom_components.shop2parcel.coordinator import (
     PollStats,
     Shop2ParcelCoordinator,
+    Stage2Job,
     _extract_email_meta,
     _extract_imap_email_meta,
-    _next_midnight_utc,
 )
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
+from custom_components.shop2parcel.hub import _next_midnight_utc
 from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
 
 
@@ -440,7 +441,15 @@ async def test_quota_exhaustion(hass, mock_config_entry):
 
 
 async def test_quota_exhausted_until_midnight(hass, mock_config_entry):
-    """FWRD-04 / D-06: quota_exhausted_until = next midnight UTC when reset_at is None."""
+    """FWRD-04 / D-06: quota_exhausted_until = next midnight UTC when reset_at is None.
+
+    WR-04: coordinator.py's own copy of _next_midnight_utc() was removed as
+    dead code (31-05 finished rewiring both its call sites onto
+    hub.record_quota_exhausted(), which owns the None-fallback internally via
+    hub's own hoisted copy). This test now imports hub._next_midnight_utc
+    directly to compute the expected value, since it is exercising the real
+    hub-owned midnight-rollover fallback that record_quota_exhausted() uses.
+    """
     mock_config_entry.add_to_hass(hass)
     expected = _next_midnight_utc()  # call before any monkeypatching
     with (
@@ -572,9 +581,16 @@ async def test_gmail_polling_continues_during_quota(hass, mock_config_entry):
 
 
 async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
-    """FWRD-04 / Phase 6 D-01 gap fill: when _quota_exhausted_until is in the past,
-    POST resumes on the next poll AND _quota_exhausted_until is cleared to None
-    (coordinator.py lines 242-248).
+    """FWRD-04 / Phase 6 D-01 gap fill: when quota_exhausted_until is in the past,
+    POST resumes on the next poll because hub.quota_is_exhausted reads False once the
+    window has passed.
+
+    Phase 31-05 (D-08): the per-account stale-quota-clear block that used to eagerly
+    null out quota_exhausted_until on the next poll was removed entirely — the raw
+    timestamp is no longer cleared inline (only the shared hub's own always-armed
+    quota-expiry timer, 31-03, clears it). POST resumption is what matters here, so
+    this test now asserts hub.quota_is_exhausted is False post-poll instead of the
+    raw timestamp being None.
 
     The existing test_gmail_polling_continues_during_quota exercises the BLOCKED state
     (quota_exhausted_until in the future). This test exercises the EXIT state.
@@ -626,8 +642,10 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         # New shipment is in returned data; tracking number is in submitted set.
         assert "msg_recover" in data
         assert coord._hub.is_submitted("1Z999AA10123456784")
-        # Quota window was cleared
-        assert coord._quota_exhausted_until is None
+        # Quota gate no longer blocks (window has passed) — the raw timestamp itself
+        # is not eagerly cleared inline anymore (only the hub's own expiry timer does
+        # that, 31-03/D-08), so we assert on the derived gate, not the raw value.
+        assert coord._hub.quota_is_exhausted is False
         # Debounced save was scheduled at least once after recovery
         assert save_mock.call_count >= 1
 
@@ -4042,40 +4060,10 @@ def test_extract_imap_email_meta_returns_defaults_on_parse_error():
 
 
 # -------- Phase 26: counter state helpers --------------------------------
-
-
-async def test_used_today_resets_on_date_rollover(hass, mock_config_entry):
-    """P26-CNT-03: _maybe_reset_used_today resets _used_today=0 on stale date; no-op same day.
-
-    Wave 0 RED: fails until _maybe_reset_used_today and _used_today_date are added to coordinator.
-    """
-    mock_config_entry.add_to_hass(hass)
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_delay_save = MagicMock()
-        coord = GmailCoordinator(hass, mock_config_entry)
-
-    # Seed stale values
-    coord._used_today = 5
-    coord._used_today_date = "2000-01-01"  # stale date — guaranteed to differ from today
-
-    coord._maybe_reset_used_today()
-
-    assert coord._used_today == 0, "used_today must reset to 0 on stale date"
-    # _used_today_date must now match today's UTC date
-    from datetime import UTC
-    from datetime import datetime as _dt
-
-    assert coord._used_today_date == _dt.now(UTC).strftime("%Y-%m-%d"), (
-        "_used_today_date must be updated to today's UTC date after reset"
-    )
-
-    # Second call same day — must NOT reset (stays at current value)
-    coord._used_today = 2
-    coord._maybe_reset_used_today()
-    assert coord._used_today == 2, (
-        "_maybe_reset_used_today must be no-op when date has not rolled over"
-    )
+# Phase 31 (D-08): test_used_today_resets_on_date_rollover is removed — used_today's
+# rollover-on-read now lives entirely on the hub (test_hub.py's
+# test_midnight_tick_resets_used_today, 31-03, and the used_today property's own
+# rollover-on-read, 31-01/31-02).
 
 
 async def test_record_forward_skips_already_added(hass, mock_config_entry):
@@ -4197,10 +4185,12 @@ async def test_total_forwarded_increments_on_gmail_post(hass, mock_config_entry)
         )
         coord2 = GmailCoordinator(hass, mock_config_entry)
         await coord2._async_load_store()
-        # Copy counter state to new coordinator instance AFTER load (load resets to 0)
+        # Copy counter state to new coordinator instance AFTER load (load resets to 0).
+        # Phase 31 (D-08): used_today/used_today_date now live on the shared hub, not
+        # the coordinator — coord2._hub IS coord._hub (same per-hass test hub from
+        # conftest's _auto_attach_test_hub fixture), so used_today is already shared
+        # with no copy needed.
         coord2._total_forwarded = coord._total_forwarded
-        coord2._used_today = coord._used_today
-        coord2._used_today_date = coord._used_today_date
         coord2._last_forwarded_ts = coord._last_forwarded_ts
         await coord2._async_update_data()
 
@@ -4274,10 +4264,12 @@ async def test_total_forwarded_increments_on_imap_post(hass, mock_imap_config_en
 
         coord2 = ImapCoordinator(hass, mock_imap_config_entry)
         await coord2._async_load_store()
-        # Copy counter state to new coordinator AFTER load (load resets to 0)
+        # Copy counter state to new coordinator AFTER load (load resets to 0).
+        # Phase 31 (D-08): used_today/used_today_date now live on the shared hub, not
+        # the coordinator — coord2._hub IS coord._hub (same per-hass test hub from
+        # conftest's _auto_attach_test_hub fixture), so used_today is already shared
+        # with no copy needed.
         coord2._total_forwarded = coord._total_forwarded
-        coord2._used_today = coord._used_today
-        coord2._used_today_date = coord._used_today_date
         coord2._last_forwarded_ts = coord._last_forwarded_ts
         await coord2._async_update_data()
 
@@ -4321,7 +4313,6 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry)
             email_date=1700000001,
         )
         coord._pending_posts = {"drain_key_1": drain_shipment}
-        coord._quota_exhausted_until = None
         mock_parcel_cls.return_value.async_add_delivery = AsyncMock()  # 2xx
 
         await coord._async_drain_pending_posts()
@@ -4348,10 +4339,10 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry)
 
         coord3 = GmailCoordinator(hass, mock_config_entry)
         await coord3._async_load_store()
-        # Copy counter state AFTER load (load resets to 0)
+        # Copy counter state AFTER load (load resets to 0). used_today lives on the
+        # shared hub now (Phase 31 D-08) — coord3 shares the SAME per-hass test hub
+        # as coord (conftest _auto_attach_test_hub), so no copy is needed there.
         coord3._total_forwarded = coord._total_forwarded
-        coord3._used_today = coord._used_today
-        coord3._used_today_date = coord._used_today_date
         coord3._last_forwarded_ts = coord._last_forwarded_ts
 
         already_added_drain = ShipmentData(
@@ -4362,7 +4353,6 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry)
             email_date=1700000002,
         )
         coord3._pending_posts = {"drain_key_2": already_added_drain}
-        coord3._quota_exhausted_until = None
         mock_parcel_cls2.return_value.async_add_delivery = AsyncMock(
             side_effect=ParcelAppAlreadyAddedError("already added")
         )
@@ -4375,22 +4365,23 @@ async def test_total_forwarded_increments_on_drain_post(hass, mock_config_entry)
 
 
 async def test_load_store_rejects_corrupt_operational_counters(hass, mock_config_entry, caplog):
-    """Finding 4: hydration guard must reject negative/bool counters and warn on a
+    """Finding 4: hydration guard must reject negative counters and warn on a
     corrupt last_forwarded_ts.
 
     The guard claims to prevent 'counter inflation from corrupt or hand-edited store
     data' (T-26-01) but isinstance(x, int) accepts negatives AND bool (an int
-    subclass). A negative used_today made ParcelAppQuotaSensor advertise MORE than the
-    daily limit. last_forwarded_ts silently coerced bad data to None with no warning.
+    subclass). last_forwarded_ts silently coerced bad data to None with no warning.
+
+    Phase 31 (D-08): used_today/used_today_date are no longer hydrated into the
+    coordinator at all — that corrupt-value guard now lives on the hub (test_hub.py's
+    test_async_load_corrupt_quota_values_load_defaults, 31-02) — so this test only
+    covers the coordinator-owned counters (total_forwarded/last_forwarded_ts).
     """
     mock_config_entry.add_to_hass(hass)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
         mock_store_cls.return_value.async_load = AsyncMock(
             return_value={
                 "total_forwarded": -5,
-                "used_today": -3,
-                "used_today_date": today,  # avoid the property's rollover reset masking the guard
                 "last_forwarded_ts": "not-an-int",
             }
         )
@@ -4401,7 +4392,6 @@ async def test_load_store_rejects_corrupt_operational_counters(hass, mock_config
 
     # Negative counters rejected → reset to 0 (not persisted as negatives).
     assert coord._total_forwarded == 0, "negative total_forwarded must reset to 0"
-    assert coord._used_today == 0, "negative used_today must reset to 0"
     # Corrupt timestamp rejected → None, WITH a warning (symmetric with the counters).
     assert coord._last_forwarded_ts is None
     assert "last_forwarded_ts" in caplog.text, (
@@ -4410,15 +4400,16 @@ async def test_load_store_rejects_corrupt_operational_counters(hass, mock_config
 
 
 async def test_load_store_rejects_bool_counters(hass, mock_config_entry):
-    """Finding 4: bool is an int subclass — True must not slip through as used_today=1."""
+    """Finding 4: bool is an int subclass — True must not slip through as a counter.
+
+    Phase 31 (D-08): used_today no longer hydrates on the coordinator (see the
+    corrupt-operational-counters test above for the equivalent hub-side coverage).
+    """
     mock_config_entry.add_to_hass(hass)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
         mock_store_cls.return_value.async_load = AsyncMock(
             return_value={
                 "total_forwarded": True,
-                "used_today": True,
-                "used_today_date": today,
                 "last_forwarded_ts": False,
             }
         )
@@ -4427,20 +4418,19 @@ async def test_load_store_rejects_bool_counters(hass, mock_config_entry):
         await coord._async_load_store()
 
     assert coord._total_forwarded == 0
-    assert coord._used_today == 0
     assert coord._last_forwarded_ts is None
 
 
 async def test_load_store_accepts_valid_counters(hass, mock_config_entry):
-    """Finding 4: legitimate non-negative ints still hydrate unchanged."""
+    """Finding 4: legitimate non-negative ints still hydrate unchanged.
+
+    Phase 31 (D-08): used_today no longer hydrates on the coordinator.
+    """
     mock_config_entry.add_to_hass(hass)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
         mock_store_cls.return_value.async_load = AsyncMock(
             return_value={
                 "total_forwarded": 42,
-                "used_today": 7,
-                "used_today_date": today,
                 "last_forwarded_ts": 1700000000,
             }
         )
@@ -4449,56 +4439,17 @@ async def test_load_store_accepts_valid_counters(hass, mock_config_entry):
         await coord._async_load_store()
 
     assert coord._total_forwarded == 42
-    assert coord._used_today == 7
     assert coord._last_forwarded_ts == 1700000000
 
 
-async def test_used_today_rollover_persists_to_store(hass, mock_config_entry):
-    """Finding 5: a UTC date-rollover reset of used_today must be persisted.
-
-    _maybe_reset_used_today zeroed used_today/used_today_date in memory on rollover but
-    never scheduled a save. An HA restart after midnight UTC but before the first
-    forward restored yesterday's count, so the ParcelApp Quota sensor briefly
-    under-reported remaining quota. The reset must schedule a debounced persist.
-    """
-    mock_config_entry.add_to_hass(hass)
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_delay_save = MagicMock()
-        coord = GmailCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
-
-        # Seed yesterday's state, then clear the save spy.
-        coord._used_today = 7
-        coord._used_today_date = "2000-01-01"  # definitely not today (UTC)
-        coord._store.async_delay_save.reset_mock()
-
-        # Reading the property triggers the UTC rollover reset.
-        assert coord.used_today == 0
-        assert coord._used_today_date == datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        assert coord._store.async_delay_save.called, (
-            "used_today rollover reset must schedule a store save so it survives restart"
-        )
-
-
-async def test_used_today_no_rollover_does_not_persist(hass, mock_config_entry):
-    """Finding 5: reads WITHOUT a rollover must not schedule redundant saves."""
-    mock_config_entry.add_to_hass(hass)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_delay_save = MagicMock()
-        coord = GmailCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
-
-        coord._used_today = 3
-        coord._used_today_date = today
-        coord._store.async_delay_save.reset_mock()
-
-        assert coord.used_today == 3
-        assert not coord._store.async_delay_save.called, (
-            "a same-day used_today read must not schedule a save (no rollover happened)"
-        )
+# Phase 31 (D-08): test_used_today_rollover_persists_to_store and
+# test_used_today_no_rollover_does_not_persist are removed — reading
+# coordinator.used_today is now a pure delegating read with zero store-write side
+# effects (it forwards to the hub's own used_today property). The old "Finding 5"
+# contract (a coordinator property read schedules a debounced per-entry store save
+# on rollover) no longer applies: quota state persistence is now the shared hub's
+# own concern, saved via the D-07-gated end-of-poll hub.async_save() call (31-05),
+# not a per-entry Store write triggered by a property read.
 
 
 # ---------------------------------------------------------------------------
@@ -4620,104 +4571,12 @@ async def test_imap_poll_dispatches_off_on_failure(hass, mock_imap_config_entry)
 
 # ---------------------------------------------------------------------------
 # Finding 3: time-boundary refresh timers
+# Phase 31 (D-08): the per-account timer tests that lived here (arm-gated-by-enable,
+# expiry-fires-and-refreshes, midnight-refresh-resets-used-today) are removed — the
+# hub now owns the single shared set of 3 timers; the equivalent behavior is covered
+# by test_hub.py's timer tests (31-03: test_single_midnight_timer_after_two_accounts,
+# test_midnight_tick_resets_used_today, test_quota_expiry_timer_clears_block).
 # ---------------------------------------------------------------------------
-
-
-async def test_arm_quota_expiry_timer_gated_by_enable(hass, mock_config_entry):
-    """Finding 3: arming is a no-op until enable_operational_timers().
-
-    This gate is what keeps the many bare-coordinator tests that assign
-    _quota_exhausted_until directly from leaking real (lingering) timers.
-    """
-    mock_config_entry.add_to_hass(hass)
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_delay_save = MagicMock()
-        coord = GmailCoordinator(hass, mock_config_entry)
-
-        # Disabled (bare coordinator): arming does nothing even with a future window.
-        coord._quota_exhausted_until = int(time_module.time()) + 3600
-        coord._arm_quota_expiry_timer()
-        assert coord._quota_expiry_unsub is None
-
-        # Enabled: a future window schedules a timer; clearing the window cancels it.
-        coord.enable_operational_timers()
-        coord._quota_exhausted_until = int(time_module.time()) + 3600
-        coord._arm_quota_expiry_timer()
-        assert coord._quota_expiry_unsub is not None
-        coord._quota_exhausted_until = None
-        coord._arm_quota_expiry_timer()
-        assert coord._quota_expiry_unsub is None
-
-        coord._cancel_operational_timers()
-
-
-async def test_quota_expiry_timer_fires_and_refreshes(hass, mock_config_entry):
-    """Finding 3: when the quota window elapses, the timer clears the stale block and
-    dispatches to listeners so ProblemBinarySensor / ParcelAppQuotaSensor refresh
-    without waiting for the next poll.
-    """
-    import homeassistant.util.dt as dt_util
-    from pytest_homeassistant_custom_component.common import async_fire_time_changed
-
-    mock_config_entry.add_to_hass(hass)
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_delay_save = MagicMock()
-        coord = GmailCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
-        coord.enable_operational_timers()
-
-        coord._quota_exhausted_until = int(time_module.time()) + 30
-        coord._arm_quota_expiry_timer()
-        assert coord.quota_is_exhausted is True
-        assert coord._quota_expiry_unsub is not None
-
-        notified = []
-        with patch.object(coord, "async_update_listeners", side_effect=lambda: notified.append(1)):
-            async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
-            await hass.async_block_till_done()
-
-        assert coord._quota_exhausted_until is None, "expiry timer must clear the stale window"
-        assert coord.quota_is_exhausted is False
-        assert notified, "expiry timer must dispatch so the Problem/Quota entities refresh"
-
-        coord._cancel_operational_timers()
-
-
-async def test_midnight_refresh_resets_used_today(hass, mock_config_entry):
-    """Finding 3: the UTC-midnight timer forces the used_today rollover reset and
-    dispatches to listeners, then reschedules itself for the next midnight.
-    """
-    import homeassistant.util.dt as dt_util
-
-    mock_config_entry.add_to_hass(hass)
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_delay_save = MagicMock()
-        coord = GmailCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
-        coord.enable_operational_timers()
-        assert coord._midnight_unsub is not None, "enable must schedule the midnight timer"
-        # enable scheduled a real next-midnight timer. We drive _on_midnight directly below
-        # (not via an actual HA fire, which would fire+remove the timer first), so cancel the
-        # scheduled one now — otherwise _on_midnight nulls _midnight_unsub before rescheduling
-        # and the original timer leaks past teardown.
-        coord._cancel_operational_timers()
-
-        coord._used_today = 9
-        coord._used_today_date = "2000-01-01"  # stale prior day
-
-        notified = []
-        with patch.object(coord, "async_update_listeners", side_effect=lambda: notified.append(1)):
-            coord._on_midnight(dt_util.utcnow())  # direct call avoids the self-reschedule fire loop
-
-        assert coord._used_today == 0, "midnight refresh must reset used_today"
-        assert coord._used_today_date == datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        assert notified, "midnight refresh must dispatch so the Quota sensor updates"
-        assert coord._midnight_unsub is not None, "midnight timer must reschedule itself"
-
-        coord._cancel_operational_timers()
 
 
 async def test_forward_counter_persisted_immediately(hass, mock_config_entry):
@@ -4766,8 +4625,12 @@ async def test_forward_counter_persisted_immediately(hass, mock_config_entry):
         await coord._async_update_data()
 
     assert captured.get("total_forwarded") == 1, "immediate save must carry total_forwarded"
-    assert captured.get("used_today") == 1, "immediate save must carry used_today"
     assert captured.get("last_forwarded_ts") is not None, "immediate save must carry the timestamp"
+    # Phase 31 (D-08): used_today is no longer in the per-entry snapshot at all — it
+    # lives only in the shared hub's shop2parcel.__shared__ store (31-02).
+    assert "used_today" not in captured, (
+        "used_today must NOT be in the per-entry snapshot — it lives only in the hub store"
+    )
 
 
 async def test_gmail_poll_start_notify_failure_resets_flag(hass, mock_config_entry):
@@ -5619,10 +5482,9 @@ async def test_fallback_enqueue_marks_inflight_not_seen(hass, mock_stage2_entry)
         coord._extractor = mock_extractor
         # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
         coord._first_refresh_done = True
-        # Provide a real queue so the real _enqueue_stage2 can put_nowait.
-        import asyncio as _asyncio
-
-        coord._stage2_queue = _asyncio.Queue(maxsize=100)
+        # The _auto_attach_test_hub autouse fixture (conftest.py) already attaches a
+        # real (I/O-free) test hub to this coordinator, so the real _enqueue_stage2
+        # -> hub.enqueue(job) path has somewhere to go with no additional setup.
         await coord._async_update_data()
 
     assert "msg_fb_inflight" not in coord._seen_message_ids
@@ -6053,7 +5915,7 @@ async def test_worker_merge_path_carrier_gate_rejects_order_number(hass, mock_st
 
         coord = GmailCoordinator(hass, mock_stage2_entry)
         await coord._async_load_store()
-        await coord.async_start_stage2()
+        await coord.async_setup_stage2_extractor()
 
         # Stage-1 tracking_number=None triggers the promotion path.
         # After GREEN: the I6 assert is replaced by MRG-04 strict gate logic.
@@ -6071,6 +5933,7 @@ async def test_worker_merge_path_carrier_gate_rejects_order_number(hass, mock_st
             html_body="<html/>",
             message_id="test-gate-msg",
             meta={"subject": "Your order", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
         )
 
         with caplog.at_level(logging.INFO):
@@ -6095,6 +5958,167 @@ async def test_worker_merge_path_carrier_gate_rejects_order_number(hass, mock_st
     assert not any(rejected_clean in r.getMessage() for r in info_plus_records), (
         f"Rejected value '{rejected_clean}' must not appear in INFO+ logs (DEBUG only)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 31 Plan 04: D-01 gate order — Stage-2 worker POST path reserve/refund (QUOTA-01/QUOTA-02)
+# ---------------------------------------------------------------------------
+
+
+async def test_stage2_worker_transient_refunds_reserve(hass, mock_config_entry):
+    """31-VALIDATION.md R2: a transient POST failure refunds the shared daily-budget
+    reserve taken immediately before the POST (D-01 gate order), so used_today ends up
+    unchanged from its pre-job value — proving the reserve was taken then fully refunded.
+    """
+    from custom_components.shop2parcel.coordinator import Stage2Job
+
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppTransientError("upstream 502")
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        # Pre-seed the shared hub via genuine try_consume() reserves (no private-attribute
+        # poke) so used_today starts at a known, boundary-adjacent value (R2).
+        for _ in range(19):
+            assert coord._hub.try_consume() is True
+        used_today_before_job = coord._hub.used_today
+        assert used_today_before_job == 19
+
+        shipment = ShipmentData(
+            tracking_number="1Z999AA10123456784",
+            carrier_name="UPS",
+            order_name="#1",
+            message_id="msg-transient-refund",
+            email_date=1700000000,
+        )
+        job = Stage2Job(
+            storage_key="ups-transient-key",
+            normalized_tn="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="msg-transient-refund",
+            meta={"subject": "Your order", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
+        )
+
+        await coord._async_process_stage2_job(job)
+
+    # The job's own try_consume() reserve (19 -> 20) must be fully refunded by
+    # refund_consume() in the transient branch (20 -> 19) — net-zero change.
+    assert coord._hub.used_today == used_today_before_job, (
+        "a transient POST failure must refund the reserve taken immediately before it"
+    )
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+
+
+async def test_stage2_worker_already_added_keeps_reserve(hass, mock_config_entry):
+    """31-VALIDATION.md R2: an AlreadyAdded outcome does NOT refund the reserve — the
+    slot stays consumed (D-01: it genuinely occupied a daily-budget slot from
+    parcelapp's point of view), leaving used_today at its post-reserve value.
+    """
+    from custom_components.shop2parcel.coordinator import Stage2Job
+
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        for _ in range(5):
+            assert coord._hub.try_consume() is True
+        used_today_before_job = coord._hub.used_today
+        assert used_today_before_job == 5
+
+        shipment = ShipmentData(
+            tracking_number="1Z999AA10123456784",
+            carrier_name="UPS",
+            order_name="#1",
+            message_id="msg-already-added",
+            email_date=1700000000,
+        )
+        job = Stage2Job(
+            storage_key="ups-already-added-key",
+            normalized_tn="1Z999AA10123456784",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="msg-already-added",
+            meta={"subject": "Your order", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
+        )
+
+        await coord._async_process_stage2_job(job)
+
+    # The reserve (5 -> 6) is NOT refunded on AlreadyAdded — used_today stays at 6.
+    assert coord._hub.used_today == used_today_before_job + 1, (
+        "AlreadyAdded must leave the reserve consumed — no refund"
+    )
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+
+
+async def test_drain_already_added_keeps_reserve(hass, mock_config_entry):
+    """WR-01 (31-REVIEW.md / 31-VERIFICATION.md): the drain loop's own AlreadyAdded/
+    InvalidTracking except block (coordinator.py:1512-1521) must NOT refund the
+    reserve it took via hub.try_consume() immediately before the POST — the slot
+    stays consumed (D-01: it genuinely occupied a daily-budget slot from
+    parcelapp's point of view). Mirrors test_stage2_worker_already_added_keeps_reserve,
+    which only covers the Stage-2 worker path; this covers the drain path.
+    """
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock(
+            side_effect=ParcelAppAlreadyAddedError("already added")
+        )
+
+        coord = GmailCoordinator(hass, mock_config_entry)
+        await coord._async_load_store()
+
+        for _ in range(5):
+            assert coord._hub.try_consume() is True
+        used_today_before_drain = coord._hub.used_today
+        assert used_today_before_drain == 5
+
+        drain_shipment = ShipmentData(
+            tracking_number="1Z999AA10123456784",  # real UPS format — passes validate_carrier_format
+            carrier_name="UPS",
+            order_name="#9001",
+            message_id="msg-drain-already-added",
+            email_date=1700000003,
+        )
+        coord._pending_posts = {"drain_key_already_added": drain_shipment}
+
+        await coord._async_drain_pending_posts()
+
+    # The drain's own try_consume() reserve (5 -> 6) is NOT refunded on AlreadyAdded —
+    # used_today stays at 6.
+    assert coord._hub.used_today == used_today_before_drain + 1, (
+        "drain AlreadyAdded must leave the reserve consumed — no refund"
+    )
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
 
 
 async def test_drain_defensive_regate_drops_gate_failing_item(hass, mock_stage2_entry, caplog):
@@ -6310,3 +6334,60 @@ async def test_imap_worker_publish_mid_poll_survives_poll_end(hass, mock_imap_co
         "worker-published shipment was clobbered by the poll's stale snapshot"
     )
     assert "worker_msg" in coord._pending_shipments
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 Plan 04 Task 3: stage2_queue_depth / email_processing_active
+# repointed at the hub's per-account in-flight count
+# ---------------------------------------------------------------------------
+
+
+async def test_stage2_queue_depth_and_email_processing_active_reflect_hub_inflight(
+    hass, mock_stage2_entry
+):
+    """WORK-01..03 regression: both properties are hub-derived (D-05 inflight_count).
+
+    stage2_queue_depth == N for N in-flight tns enqueued on the hub for this account;
+    email_processing_active is True while N > 0 and False once released (with no poll
+    in progress).
+    """
+    mock_stage2_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_stage2_entry)
+    entry_id = coord.config_entry.entry_id
+    shipment = _make_shipment()
+
+    assert coord._poll_in_progress is False
+    assert coord.stage2_queue_depth == 0
+    assert coord.email_processing_active is False
+
+    jobs = [
+        Stage2Job(
+            storage_key=f"1Z_{i}",
+            normalized_tn=f"1Z_{i}",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id=f"msg:{i}",
+            meta={"subject": "test", "from": "test@example.com"},
+            entry_id=entry_id,
+        )
+        for i in range(3)
+    ]
+    for job in jobs:
+        assert coord._hub.enqueue(job).name == "ENQUEUED"
+
+    assert coord.stage2_queue_depth == 3
+    assert coord.email_processing_active is True
+
+    for job in jobs:
+        coord._hub._release_inflight(job.entry_id, job.normalized_tn)
+
+    assert coord.stage2_queue_depth == 0
+    assert coord.email_processing_active is False
+
+
+async def test_stage2_queue_depth_zero_when_unattached():
+    """stage2_queue_depth returns 0 (no crash) when _hub or config_entry is None."""
+    coord = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    coord._hub = None
+    coord.config_entry = None
+    assert coord.stage2_queue_depth == 0

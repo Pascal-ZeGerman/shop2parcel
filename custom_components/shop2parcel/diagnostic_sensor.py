@@ -25,7 +25,7 @@ which avoids false statistics anomalies on restart (RESEARCH.md Open Questions �
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
@@ -33,8 +33,15 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, HUB_STAGE2_QUEUE_MAXLEN
 from .coordinator import Shop2ParcelCoordinator
+
+if TYPE_CHECKING:
+    # Phase 34-03: hub.py imports coordinator.py, so a module-level runtime
+    # import here would create a circular import. TYPE_CHECKING-only import
+    # lets GlobalQueueSensor's hub param be typed without one (mirrors
+    # coordinator.py's identical TYPE_CHECKING guard for self._hub).
+    from .hub import Shop2ParcelHub
 
 
 def _r1(v: float | None) -> float | None:
@@ -240,6 +247,72 @@ class Stage2Sensor(DiagnosticSensor):
             "dropped_backpressure_total": d.stage2_dropped_backpressure_total,
             "schema_error_total": d.stage2_schema_error_total,
             "conflict_total": d.stage2_conflict_total,
+        }
+
+
+class GlobalQueueSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
+    """Hub-owned global Stage-2 queue-depth sensor (DIAG-02, D-01/D-02/D-04).
+
+    Additive to Stage2Sensor (D-01) — the per-account queue sensor is kept
+    as-is, unmodified. This entity is the hub-level sibling: total Stage-2
+    work outstanding across EVERY attached account (pending-in-queue PLUS
+    currently-processing), derived from Phase 32's ``hub._inflight`` dict
+    via the public ``hub.stage2_queue_depth`` accessor — no new bookkeeping
+    (Don't Hand-Roll, D-04).
+
+    Deliberately does NOT subclass ``DiagnosticSensor`` (that base derives a
+    per-account device/uid from ``entry``) — built with the hub-scoped
+    device/uid instead (mirrors GlobalQuotaSensor), while still carrying
+    ``EntityCategory.DIAGNOSTIC`` + ``SensorStateClass.MEASUREMENT`` so it
+    is diagnostic-categorized like ``Stage2Sensor`` (open-Q #3).
+
+    Registered under a hub-scoped identifier (not entry_id-scoped, D-02) so
+    exactly one instance exists regardless of which/how many accounts are
+    attached. Registration in async_setup_entry is deferred to 34-05 (R-01)
+    — this class only defines the value/attribute/identity surface,
+    unit-tested by driving hub state directly.
+
+    Reads ONLY public hub accessors (stage2_queue_depth, stage2_pending) —
+    never the private _inflight/_queue directly (T-34-06).
+    """
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_name = "Hub Stage-2 Queue"
+    _unique_id_suffix = "hub_stage2_queue"  # hub-scoped — never entry_id-scoped (D-02)
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        hub: Shop2ParcelHub,
+    ) -> None:
+        super().__init__(coordinator)
+        self._hub = hub
+        self._attr_unique_id = f"{DOMAIN}___shared___{self._unique_id_suffix}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, "__shared__")},
+            name="Shop2Parcel Hub",
+        )
+
+    @property
+    def native_value(self) -> int:
+        """Total Stage-2 jobs outstanding instance-wide (pending + in-flight)."""
+        return self._hub.stage2_queue_depth
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """pending (queued only), processing (dequeued but not complete), queue_maxlen."""
+        pending = self._hub.stage2_pending
+        return {
+            "description": (
+                "Total Stage-2 (LLM) work outstanding across every attached account. "
+                "Zero is normal at rest. See pending/processing for the breakdown."
+            ),
+            "pending": pending,
+            "processing": self.native_value - pending,
+            "queue_maxlen": HUB_STAGE2_QUEUE_MAXLEN,
         }
 
 

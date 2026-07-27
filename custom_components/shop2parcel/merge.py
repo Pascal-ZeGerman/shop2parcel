@@ -40,6 +40,7 @@ the ``gmail_coordinator.py`` Stage-1-miss inline fallback.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from .api.email_parser import ShipmentData, validate_carrier_format
@@ -170,3 +171,139 @@ def merge_llm_authoritative(
     # Stage2Result.custom is always a dict per Phase 16 extractor contract — empty-over-empty is harmless.
     merged = replace(merged, custom_attributes=result.custom)
     return merged, conflicts, gate_rejections
+
+
+# ---------------------------------------------------------------------------
+# MRG-05: Stage-2 order_name/order_summary grounding gate
+# ---------------------------------------------------------------------------
+#
+# Closes the confirmed Stage-2 fabrication vector for `order_name`/`order_summary`
+# on the Stage-1-blank promotion path — the risk MRG-04's carrier-format gate
+# covers for `tracking_number` but which had no equivalent for the two order
+# fields until this phase. Validated by 40+ live Ollama samples across spikes
+# 003/004/006/007/008/010/011/012 (see
+# `.claude/skills/spike-findings-shop2parcel/references/mrg-05-grounding-gate.md`).
+
+_STOPWORDS = {
+    "order",
+    "orders",
+    "your",
+    "shipped",
+    "shipping",
+    "package",
+    "tracking",
+    "email",
+    "subject",
+    "from",
+    "the",
+    "and",
+    "has",
+    "been",
+    "is",
+    "on",
+    "its",
+    "way",
+    "to",
+    "you",
+    "team",
+    "no",
+    "reply",
+    "hi",
+    "there",
+}
+# Evidence-scoped, not exhaustive -- see the module docstring above / spike 008
+# for why this denylist is a secondary defense, not the primary one (the
+# primary defense is that `source_text` MUST always be body-only prose).
+_BOILERPLATE_DENYLIST = {"shopify", "notifications"}
+
+
+def _content_tokens(value: str) -> set[str]:
+    """Alphabetic tokens (len >= 3) minus stopwords/denylist. Numbers excluded --
+    an order number alone is never merchant identity on its own."""
+    tokens = re.findall(r"[a-zA-Z]{3,}", value.lower())
+    return {t for t in tokens if t not in _STOPWORDS and t not in _BOILERPLATE_DENYLIST}
+
+
+def validate_grounding(value: str | None, source_text: str) -> tuple[str | None, bool, str | None]:
+    """MRG-05 gate: does `value` have at least one merchant-specific content
+    token that actually appears in `source_text`? Mirrors validate_carrier_format's
+    (value, ok, reason) shape.
+
+    ``source_text`` MUST always be body-only prose (e.g. ``preprocess_html()``
+    output) -- NEVER an enriched string containing Subject/From header context,
+    even if the Stage-2 prompt itself is ever enriched with envelope context
+    (it is not today). Sender/subject header tokens must never count as
+    grounding evidence (SC-2) -- this is a structural guarantee enforced by
+    what the caller passes as ``source_text``, not by this function's logic.
+
+    CR-01: matching is WORD-BOUNDARY-exact (regex-tokenized set intersection),
+    NOT substring containment. Plain ``token in source_text.lower()`` let a
+    short content token "ground" a claim merely by being a substring of an
+    unrelated, longer word in the prose (e.g. ``"rack"`` is a substring of
+    ``"tracking"``) -- since "tracking"/"shipped"/"package" etc. are this
+    integration's own domain vocabulary and appear in virtually every email,
+    that bypass defeated the anti-fabrication gate in the common case, not an
+    edge case. ``source_text`` is tokenized the same way ``_content_tokens()``
+    tokenizes ``value`` (alphabetic runs, len >= 3) so only whole-word matches
+    count.
+    """
+    if value is None or not value.strip():
+        return value, True, None  # nothing to gate
+    tokens = _content_tokens(value)
+    if not tokens:
+        return value, False, "no_content_tokens"
+    source_tokens = set(re.findall(r"[a-zA-Z]{3,}", source_text.lower()))
+    grounded = tokens & source_tokens
+    if grounded:
+        return value, True, None
+    return value, False, "ungrounded"
+
+
+GROUNDED_FIELDS = ("order_name", "order_summary")
+
+
+def merge_llm_authoritative_with_grounding(
+    stage1: ShipmentData,
+    result: Stage2Result,
+    source_text: str,
+) -> tuple[ShipmentData, list[dict], list[dict], list[dict]]:
+    """Thin post-check wrapper around ``merge_llm_authoritative`` (MRG-05).
+
+    Calls the unmodified ``merge_llm_authoritative()`` first, then re-examines
+    ONLY ``GROUNDED_FIELDS`` (``order_name``, ``order_summary``) on the
+    Stage-1-blank promotion path. Any promoted value with no content token
+    grounded in ``source_text`` is discarded back to the Stage-1 sentinel --
+    discard-not-conflict semantics, mirroring MRG-04's carrier-format gate.
+
+    ``source_text`` MUST be body-only prose (never enriched Subject/From
+    context) per SC-2 -- see ``validate_grounding``'s docstring.
+
+    DEVIATION from the spike blueprint (documented, deliberate): the blueprint
+    returns a 3-tuple and appends grounding rejections onto the existing
+    ``gate_rejections`` list. Per the RESOLVED phase decision (RESEARCH.md
+    Pitfall 3), this returns a 4-tuple with grounding rejections in their own
+    ``grounding_rejections`` list -- keeps the grounding metric distinct from
+    the carrier-format metric.
+
+    Returns:
+        A ``(merged, conflicts, gate_rejections, grounding_rejections)`` tuple.
+        ``grounding_rejections`` is a ``list[dict]`` of
+        ``{"field": str, "clean": str, "reason": str}`` entries -- empty when
+        no MRG-05 gate fired.
+    """
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
+    overrides: dict[str, str | None] = {}
+    grounding_rejections: list[dict] = []
+    for field_name in GROUNDED_FIELDS:
+        s1_raw: str | None = getattr(stage1, field_name, None)
+        s2_val: str | None = result.locked.get(field_name)
+        if _stage1_missing(field_name, s1_raw) and s2_val is not None:
+            _val, ok, reason = validate_grounding(s2_val, source_text)
+            if not ok:
+                overrides[field_name] = s1_raw  # discard fabrication, restore stage1 sentinel
+                grounding_rejections.append(
+                    {"field": field_name, "clean": s2_val, "reason": reason}
+                )
+    if overrides:
+        merged = replace(merged, **overrides)  # type: ignore[arg-type]
+    return merged, conflicts, gate_rejections, grounding_rejections

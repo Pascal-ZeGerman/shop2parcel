@@ -125,6 +125,83 @@ async def test_setup_entry_gmail_auth_failure_sets_setup_error(hass, mock_config
     assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
 
 
+async def test_setup_entry_auth_failure_leaves_no_lingering_hub_timers(hass, mock_config_entry):
+    """Regression (hub-lingering-timer-teardown, 2026-07-27): async_setup_entry
+    creates+attaches the shared Shop2ParcelHub (arming all 3 hub-owned timers
+    plus the worker task) BEFORE coordinator.async_config_entry_first_refresh()
+    runs. When first_refresh raises ConfigEntryAuthFailed, HA's core config-
+    entry setup runner does NOT call this integration's async_unload_entry (it
+    only fires entry.async_on_unload()-registered callbacks — none are
+    registered yet at this point) — so hub.detach()/hub.async_shutdown() must
+    never have run, leaving the hub's midnight/quota_expiry/poll_window timers
+    scheduled on hass.loop forever.
+
+    Verified directly via get_scheduled_timer_handles (the same primitive
+    pytest-homeassistant-custom-component's own verify_cleanup fixture uses)
+    rather than relying on that autouse fixture, whose own event-loop
+    resolution has an unrelated fragility in some local pytest-asyncio
+    environments (see .planning/debug/hub-lingering-timer-teardown.md) — this
+    assertion is what actually proves the leak/fix, independent of that.
+
+    The snapshot is taken AFTER manually mirroring pytest-homeassistant-
+    custom-component's own hass-fixture teardown sequence (unload any LOADED
+    entries, then hass.async_stop(force=True)) so that generic HA-framework
+    housekeeping timers (e.g. Store._async_schedule_callback_delayed_write,
+    flushed by the EVENT_HOMEASSISTANT_FINAL_WRITE that async_stop() fires)
+    are excluded — only a genuine Shop2Parcel hub leak should survive that
+    sequence.
+    """
+    import asyncio as _asyncio
+
+    from homeassistant.util.async_ import get_scheduled_timer_handles
+
+    before = {h for h in get_scheduled_timer_handles(hass.loop) if not h.cancelled()}
+
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            side_effect=GmailAuthError("fake auth fail")
+        )
+        result = await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    assert result is False
+    assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
+
+    # The hub singleton must have been fully torn down (detached, refcount 0,
+    # shut down) rather than left dangling in hass.data.
+    assert DOMAIN not in hass.data or "__shared__" not in hass.data[DOMAIN]
+
+    # Mirror pytest_homeassistant_custom_component.plugins.hass fixture's own
+    # teardown sequence exactly (see plugins.py lines ~600-618) so generic HA
+    # framework timers get their normal chance to flush/cancel before we
+    # snapshot — anything still scheduled after this is a genuine leak.
+    loaded_entries = [
+        e for e in hass.config_entries.async_entries() if e.state is ConfigEntryState.LOADED
+    ]
+    if loaded_entries:
+        await _asyncio.gather(
+            *(hass.config_entries.async_unload(e.entry_id) for e in loaded_entries)
+        )
+    await hass.async_stop(force=True)
+
+    after = {h for h in get_scheduled_timer_handles(hass.loop) if not h.cancelled()}
+    assert after <= before, (
+        f"async_setup_entry left lingering hub timer(s) scheduled after a setup "
+        f"failure: {after - before}"
+    )
+
+
 async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
     """async_unload_entry calls async_unload_platforms with PLATFORMS then drops hass.data."""
     mock_config_entry.add_to_hass(hass)
@@ -164,65 +241,15 @@ async def test_unload_entry_tolerates_missing_domain_data(hass, mock_config_entr
     assert result is True
 
 
-async def test_unload_entry_awaits_stage2_shutdown(hass, mock_config_entry):
-    """WR-01: unload must AWAIT Stage-2 shutdown — async_stop_stage2 has run to
-    COMPLETION by the time async_unload returns. The previous fire-and-forget
-    lambda (hass.async_create_task) let a reload start a new coordinator/worker
-    while the old teardown was still pending, so its debounced save could land
-    after — and clobber — the new coordinator's state."""
-    import asyncio
-
-    mock_config_entry.add_to_hass(hass)
-    hass.config_entries.async_update_entry(
-        mock_config_entry,
-        options={"ollama_url": "http://localhost:11434"},
-    )
-
-    stop_completed = False
-    real_stop = Shop2ParcelCoordinator.async_stop_stage2
-
-    async def _tracked_stop(self):
-        nonlocal stop_completed
-        # Force at least one event-loop suspension so an (incorrect) eager
-        # fire-and-forget registration cannot complete this synchronously.
-        await asyncio.sleep(0)
-        await real_stop(self)
-        stop_completed = True
-
-    with (
-        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
-        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
-        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
-        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
-        patch(
-            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
-        ) as mock_oauth,
-        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
-        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
-        patch("custom_components.shop2parcel.coordinator.ParcelAppClient"),
-        patch.object(Shop2ParcelCoordinator, "async_stop_stage2", _tracked_stop),
-    ):
-        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
-        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
-        await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
-        worker_task = coordinator._stage2_worker_task
-        assert worker_task is not None and not worker_task.done(), (
-            "precondition: worker running after setup"
-        )
-
-        assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
-
-        # WR-01: shutdown must be COMPLETE when unload returns — no pending
-        # fire-and-forget task allowed to overlap with a subsequent reload.
-        assert stop_completed, "unload must await async_stop_stage2 to completion"
-        assert worker_task.done(), "worker task must be fully stopped when unload returns"
-        assert coordinator._stage2_worker_task is None, (
-            "async_stop_stage2 must have run to completion inside unload"
-        )
+# Phase 32 (WORK-01/WORK-04): test_unload_entry_awaits_stage2_shutdown is
+# retired. It proved WR-01 (unload must AWAIT Stage-2 shutdown to completion,
+# not fire-and-forget) against the per-entry async_stop_stage2/worker task,
+# which no longer exist. The equivalent guarantee now applies to the SHARED
+# hub worker: async_unload_entry already awaits hub.async_shutdown() at
+# refcount 0 (Phase 29 wiring, unchanged by this cutover); the last-account
+# teardown assertions (worker task done, no orphaned task, __shared__ key
+# removed) are covered by the multi-account integration tests in
+# tests/test_multi_account.py (Plan 32-05 Task 3).
 
 
 async def test_setup_entry_forwards_to_sensor_platforms(hass, mock_config_entry):

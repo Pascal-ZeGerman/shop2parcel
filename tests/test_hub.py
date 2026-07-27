@@ -2,9 +2,11 @@
 
 Covers LIFE-01..05 (SPEC.md R1-R5): hub singleton creation exactly once under
 concurrent setup, the constructor-race asyncio.Lock, reference-counted
-attach/detach lifecycle, the hass-scoped worker stub (NotImplementedError on
-any dequeue, D-02), and the shop2parcel.__shared__ store version handling
-(including the T-29-01 corrupt-version backstop).
+attach/detach lifecycle, the shop2parcel.__shared__ store version handling
+(including the T-29-01 corrupt-version backstop), and — from Phase 32 Plan 03
+onward — the real shared Stage-2 worker (_async_hub_worker, replacing the
+Phase 29 _stub_worker): FIFO dispatch, entry_id resolution/skip, reload-to-
+fresh-coordinator routing, and the crash-isolation ladder.
 
 Direct-hub tests construct Shop2ParcelHub(hass) directly and mock
 Shop2ParcelStore at the hub's own import path. Wiring tests drive the real
@@ -57,31 +59,6 @@ def mock_config_entry_b() -> MockConfigEntry:
 # ---------------------------------------------------------------------------
 # Direct-hub tests (construct Shop2ParcelHub(hass) directly)
 # ---------------------------------------------------------------------------
-
-
-async def test_stub_worker_raises_not_implemented(hass):
-    """D-02/R4: enqueuing a job directly (hub._queue.put_nowait) makes the
-    stub worker crash with NotImplementedError — no coordinator wiring needed.
-    """
-    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
-
-    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-
-        hub = Shop2ParcelHub(hass)
-        await hub.async_setup()
-
-        hub._queue.put_nowait("sentinel-job")
-        # async_create_background_task tasks are not awaited by
-        # hass.async_block_till_done(); give the loop a few ticks to run the
-        # stub past its `await self._queue.get()` suspension point.
-        for _ in range(5):
-            await asyncio.sleep(0)
-
-        assert hub._worker_task.done()
-        with pytest.raises(NotImplementedError):
-            hub._worker_task.result()
 
 
 async def test_shared_store_version_written_on_first_setup(hass):
@@ -834,3 +811,2182 @@ async def test_second_restart_after_migration_reseeds_nothing(hass, mock_config_
     # The second restart's migration was a no-op — its per-entry mock's
     # async_save was never called (nothing to migrate: migrated_tns is empty).
     mock_store_cls2.return_value.async_save.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Phase 31 Plan 01: shared-budget mutators (QUOTA-01, QUOTA-02, QUOTA-04)
+# ---------------------------------------------------------------------------
+
+
+def test_try_consume_returns_false_after_20(hass):
+    """QUOTA-01/R1: 20 successful try_consume() calls all return True; the
+    21st returns False and used_today stays at PARCELAPP_DAILY_LIMIT.
+    """
+    from custom_components.shop2parcel.const import PARCELAPP_DAILY_LIMIT  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    for _ in range(PARCELAPP_DAILY_LIMIT):
+        assert hub.try_consume() is True
+
+    assert hub.try_consume() is False
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT
+
+
+def test_try_consume_two_callers_at_19_fcfs(hass):
+    """QUOTA-01/R1: with used_today==19, two back-to-back try_consume() calls
+    in one event-loop tick yield exactly one True and one False; used_today
+    ends at PARCELAPP_DAILY_LIMIT (never exceeds it) — proves the no-await
+    check-and-increment is race-free under a single-threaded loop.
+    """
+    from custom_components.shop2parcel.const import PARCELAPP_DAILY_LIMIT  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for _ in range(PARCELAPP_DAILY_LIMIT - 1):
+        hub.try_consume()
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT - 1
+
+    results = [hub.try_consume(), hub.try_consume()]
+
+    assert sorted(results) == [False, True]
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT
+
+
+def test_refund_consume_clamps_at_zero(hass):
+    """QUOTA-02/R2: refund_consume() on used_today==1 goes to 0; a second
+    refund on an already-zero counter stays at 0 (no negative).
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.try_consume()
+    assert hub.used_today == 1
+
+    hub.refund_consume()
+    assert hub.used_today == 0
+
+    hub.refund_consume()
+    assert hub.used_today == 0
+
+
+def test_refund_after_reserve_returns_slot(hass):
+    """QUOTA-02/R2: try_consume() to PARCELAPP_DAILY_LIMIT then
+    refund_consume() reclaims exactly one slot (used_today == LIMIT - 1).
+    """
+    from custom_components.shop2parcel.const import PARCELAPP_DAILY_LIMIT  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for _ in range(PARCELAPP_DAILY_LIMIT):
+        hub.try_consume()
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT
+
+    hub.refund_consume()
+
+    assert hub.used_today == PARCELAPP_DAILY_LIMIT - 1
+
+
+def test_record_quota_exhausted_sets_and_maxes(hass):
+    """QUOTA-02/R3 (D-06): record_quota_exhausted() with a later timestamp
+    then an earlier one leaves quota_exhausted_until at the LATER value —
+    max-precedence, never shortening an active block. Calling with None
+    falls back to the next UTC midnight (hub._next_midnight_utc()).
+
+    Regression (hub-lingering-timer-teardown, 2026-07-27): record_quota_
+    exhausted() unconditionally arms a real async_track_point_in_time
+    quota-expiry timer (hub.py _arm_quota_expiry_timer) on `self._hass`,
+    regardless of whether hub.async_setup()/async_shutdown() were ever
+    called. Every OTHER Direct-hub test in this file that arms a timer
+    calls `await hub.async_shutdown()` to cancel it (see the module
+    docstring); this test is synchronous (no `async def`) so it cannot
+    await async_shutdown() — it must cancel the raw unsub handle directly
+    instead. Without the explicit `hub._quota_expiry_unsub()` cleanup
+    below, both hub and hub2 leave a real scheduled TimerHandle on
+    hass.loop that outlives the test, which pytest-homeassistant-custom-
+    component's own verify_cleanup fixture is meant to catch (and does,
+    in CI) — verified directly here via get_scheduled_timer_handles so the
+    regression does not depend on that fixture's own loop-resolution
+    behavior (see .planning/debug/hub-lingering-timer-teardown.md).
+    """
+    from homeassistant.util.async_ import get_scheduled_timer_handles  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    before = {h for h in get_scheduled_timer_handles(hass.loop) if not h.cancelled()}
+
+    hub = Shop2ParcelHub(hass)
+
+    t_early = 1_000_000
+    t_late = 2_000_000
+
+    hub.record_quota_exhausted(t_late)
+    assert hub.quota_exhausted_until == t_late
+
+    hub.record_quota_exhausted(t_early)
+    assert hub.quota_exhausted_until == t_late
+
+    hub2 = Shop2ParcelHub(hass)
+    hub2.record_quota_exhausted(None)
+
+    from custom_components.shop2parcel.hub import _next_midnight_utc  # noqa: PLC0415
+
+    assert hub2.quota_exhausted_until == _next_midnight_utc()
+
+    # Cancel the timers this test armed on both hubs — mirrors every other
+    # Direct-hub test's `await hub.async_shutdown()` cleanup, adapted for a
+    # sync test that cannot await it.
+    if hub._quota_expiry_unsub is not None:
+        hub._quota_expiry_unsub()
+        hub._quota_expiry_unsub = None
+    if hub2._quota_expiry_unsub is not None:
+        hub2._quota_expiry_unsub()
+        hub2._quota_expiry_unsub = None
+
+    after = {h for h in get_scheduled_timer_handles(hass.loop) if not h.cancelled()}
+    assert after <= before, (
+        f"record_quota_exhausted() left a lingering scheduled timer: {after - before}"
+    )
+
+
+def test_poll_cap_shared_across_accounts(hass):
+    """QUOTA-04/R4: poll_cap_reached() is False below MAX_STAGE2_POSTS_PER_POLL;
+    record_poll_post() bumps the shared per-poll counter until the cap is
+    reached. A fresh hub starts with poll_cap_reached() False and
+    _stage2_posts_this_poll at 0.
+    """
+    from custom_components.shop2parcel.const import MAX_STAGE2_POSTS_PER_POLL  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    assert hub.poll_cap_reached() is False
+    assert hub._stage2_posts_this_poll == 0
+
+    for _ in range(MAX_STAGE2_POSTS_PER_POLL):
+        assert hub.poll_cap_reached() is False
+        hub.record_poll_post()
+
+    assert hub.poll_cap_reached() is True
+
+    fresh_hub = Shop2ParcelHub(hass)
+    assert fresh_hub.poll_cap_reached() is False
+    assert fresh_hub._stage2_posts_this_poll == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 31 Plan 02: quota persistence + migration (QUOTA-03, QUOTA-05)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_load_quota_round_trip_after_restart(hass):
+    """QUOTA-03/R3: hub A reserves 7 slots and records a quota-exhaustion
+    window, then async_saves; a fresh hub B whose store returns hub A's
+    payload loads used_today==7 and quota_exhausted_until==T — the day's
+    usage is NOT reset to 0 on restart (boundary R3)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    t_exhausted = 1_800_000_000
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub_a = Shop2ParcelHub(hass)
+        await hub_a.async_setup()
+        for _ in range(7):
+            hub_a.try_consume()
+        hub_a.record_quota_exhausted(t_exhausted)
+        assert hub_a.used_today == 7
+
+        await hub_a.async_save()
+        saved_payload = mock_store_cls.return_value.async_save.call_args.args[0]
+        await hub_a.async_shutdown()
+
+        # Simulated restart: a fresh hub's store returns hub A's saved payload.
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=saved_payload)
+        mock_store_cls.return_value.async_save.reset_mock()
+
+        hub_b = Shop2ParcelHub(hass)
+        await hub_b.async_setup()
+
+        assert hub_b.used_today == 7
+        assert hub_b.quota_exhausted_until == t_exhausted
+
+        await hub_b.async_shutdown()
+
+
+async def test_async_load_corrupt_quota_values_load_defaults(hass, caplog):
+    """T-31-04: a store payload with non-int used_today and non-int
+    quota_exhausted_until loads as used_today==0 / quota_exhausted_until==None
+    with a WARNING — no crash. used_today_date is set to today so a
+    legitimate UTC-rollover reset cannot be mistaken for the corrupt-value
+    guard firing."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub, _today_utc_str  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(
+            return_value={
+                "version": 1,
+                "used_today": "seven",
+                "used_today_date": _today_utc_str(),
+                "quota_exhausted_until": "not-an-int",
+            }
+        )
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        with caplog.at_level(logging.WARNING):
+            await hub.async_setup()
+
+        assert hub._used_today == 0
+        assert hub.quota_exhausted_until is None
+        assert "used_today" in caplog.text
+        assert "quota_exhausted_until" in caplog.text
+
+        await hub.async_shutdown()
+
+
+def test_migration_quota_max_across_accounts(hass):
+    """QUOTA-05/R5: seed_quota_from_account(None) then (T1) then (T2) yields
+    quota_exhausted_until == max(T1, T2); used_today stays 0 (migration day
+    starts conservatively — boundary R5). Also asserts (WR-03) that each
+    non-None seed call re-arms the shared expiry timer, mirroring
+    record_quota_exhausted()'s always-arm behavior — a None seed is a no-op
+    and must not touch the timer."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    t1 = 1_000_000
+    t2 = 2_000_000
+
+    with patch.object(
+        hub, "_arm_quota_expiry_timer", wraps=hub._arm_quota_expiry_timer
+    ) as mock_arm:
+        hub.seed_quota_from_account(None)
+        assert hub.quota_exhausted_until is None
+        mock_arm.assert_not_called()
+
+        hub.seed_quota_from_account(t1)
+        assert hub.quota_exhausted_until == t1
+        mock_arm.assert_called_once()
+
+        hub.seed_quota_from_account(t2)
+        assert hub.quota_exhausted_until == t2
+        assert hub.used_today == 0
+        assert mock_arm.call_count == 2
+
+
+def test_migration_quota_all_none_stays_none(hass):
+    """QUOTA-05/R5 (empty): no per-account quota keys present -> repeated
+    seed_quota_from_account(None) leaves quota_exhausted_until == None and
+    used_today == 0."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.seed_quota_from_account(None)
+    hub.seed_quota_from_account(None)
+
+    assert hub.quota_exhausted_until is None
+    assert hub.used_today == 0
+
+
+def test_migration_quota_order_independent(hass):
+    """QUOTA-05/R5 (ordering): seeding accounts A-then-B equals B-then-A for
+    quota_exhausted_until — max() is commutative."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    t_a = 1_500_000
+    t_b = 2_500_000
+
+    hub_ab = Shop2ParcelHub(hass)
+    hub_ab.seed_quota_from_account(t_a)
+    hub_ab.seed_quota_from_account(t_b)
+
+    hub_ba = Shop2ParcelHub(hass)
+    hub_ba.seed_quota_from_account(t_b)
+    hub_ba.seed_quota_from_account(t_a)
+
+    assert hub_ab.quota_exhausted_until == hub_ba.quota_exhausted_until == max(t_a, t_b)
+
+
+async def test_poll_counter_not_persisted(hass):
+    """QUOTA-04 (constraint): _stage2_posts_this_poll is ephemeral by design
+    — record_poll_post() bumps it, but async_save()/async_load() never
+    round-trips it; a fresh hub over the saved payload always starts at 0."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub_a = Shop2ParcelHub(hass)
+        await hub_a.async_setup()
+        hub_a.record_poll_post()
+        assert hub_a._stage2_posts_this_poll == 1
+
+        await hub_a.async_save()
+        saved_payload = mock_store_cls.return_value.async_save.call_args.args[0]
+        assert "_stage2_posts_this_poll" not in saved_payload
+        assert "stage2_posts_this_poll" not in saved_payload
+        await hub_a.async_shutdown()
+
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=saved_payload)
+        mock_store_cls.return_value.async_save.reset_mock()
+
+        hub_b = Shop2ParcelHub(hass)
+        await hub_b.async_setup()
+
+        assert hub_b._stage2_posts_this_poll == 0
+
+        await hub_b.async_shutdown()
+
+
+async def test_second_restart_after_quota_key_drop_reseeds_nothing(hass):
+    """QUOTA-05: after a first migration (seed_quota_from_account + save), a
+    second restart whose per-entry payload no longer carries per-account
+    quota keys (the 31-04 coordinator-side migration will not re-call
+    seed_quota_from_account once its own snapshot is quota-key-free) does not
+    change the shared used_today/quota_exhausted_until — idempotent, no
+    re-inflation."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    t_migrated = 1_700_000_000
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub_a = Shop2ParcelHub(hass)
+        await hub_a.async_setup()
+        # First migration: one per-account store seeds its quota_exhausted_until.
+        hub_a.seed_quota_from_account(t_migrated)
+        await hub_a.async_save()
+        first_restart_payload = mock_store_cls.return_value.async_save.call_args.args[0]
+        await hub_a.async_shutdown()
+
+    # Second restart: a fresh hub loads the persisted (post-first-migration)
+    # payload. No further seed_quota_from_account calls happen (mirrors a
+    # per-entry store whose quota keys have already been dropped).
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls2:
+        mock_store_cls2.return_value.async_load = AsyncMock(return_value=first_restart_payload)
+        mock_store_cls2.return_value.async_save = AsyncMock()
+
+        hub_b = Shop2ParcelHub(hass)
+        await hub_b.async_setup()
+
+        assert hub_b.quota_exhausted_until == t_migrated
+        assert hub_b.used_today == 0
+
+        await hub_b.async_shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Phase 31 Plan 03: hub-owned timers (QUOTA-03, QUOTA-04)
+# ---------------------------------------------------------------------------
+
+
+async def test_single_midnight_timer_after_two_accounts(hass):
+    """QUOTA-03/R3: async_setup() arms exactly one midnight timer; attach()
+    never arms another — there is only one hub instance, so two attach()
+    calls leave hub._midnight_unsub as the same single handle (no
+    per-account timer storm)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        assert hub._midnight_unsub is not None
+        first_handle = hub._midnight_unsub
+
+        coordinator_a = MagicMock()
+        coordinator_b = MagicMock()
+        hub.attach(coordinator_a)
+        hub.attach(coordinator_b)
+
+        assert hub._midnight_unsub is first_handle, "attach() must not arm a second midnight timer"
+
+        await hub.async_shutdown()
+
+
+async def test_midnight_tick_resets_used_today(hass):
+    """QUOTA-03/R3: the UTC-midnight timer forces the used_today rollover
+    reset and reschedules itself for the next midnight.
+
+    Drives _on_midnight directly (mirrors test_coordinator.py's
+    test_midnight_refresh_resets_used_today) rather than via
+    async_fire_time_changed: the hub's _maybe_reset_used_today reads the
+    real wall-clock UTC date, which a simulated HA time-fire does not
+    advance — so a stale used_today_date is set explicitly to force the
+    rollover check to trip.
+    """
+    import homeassistant.util.dt as dt_util  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+        assert hub._midnight_unsub is not None, "async_setup must schedule the midnight timer"
+        # async_setup already scheduled a real next-midnight timer. Cancel it
+        # before driving _on_midnight directly below, so _on_midnight's own
+        # self-reschedule is the only handle left (no leaked prior timer).
+        hub._midnight_unsub()
+        hub._midnight_unsub = None
+
+        hub.try_consume()
+        hub.try_consume()
+        hub.used_today_date = "2000-01-01"  # stale prior day forces a reset
+        assert hub._used_today == 2
+
+        hub._on_midnight(dt_util.utcnow())
+
+        assert hub._used_today == 0, "midnight tick must reset used_today"
+        assert hub._midnight_unsub is not None, "midnight timer must reschedule itself"
+
+        await hub.async_shutdown()
+
+
+async def test_quota_expiry_timer_clears_block(hass):
+    """QUOTA-03/R3 (D-04): record_quota_exhausted() re-arms the single hub
+    expiry timer; when it fires, quota_exhausted_until is cleared and
+    quota_is_exhausted reads False."""
+    import time as time_module  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
+
+    import homeassistant.util.dt as dt_util  # noqa: PLC0415
+    from pytest_homeassistant_custom_component.common import (
+        async_fire_time_changed,  # noqa: PLC0415
+    )
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        hub.record_quota_exhausted(int(time_module.time()) + 30)
+        assert hub.quota_is_exhausted is True
+        assert hub._quota_expiry_unsub is not None
+
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+        await hass.async_block_till_done()
+
+        assert hub.quota_exhausted_until is None, "expiry timer must clear the stale block"
+        assert hub.quota_is_exhausted is False
+
+        await hub.async_shutdown()
+
+
+async def test_poll_window_tick_resets_counter(hass):
+    """QUOTA-04/R4: firing time forward by HUB_STAGE2_POLL_WINDOW resets the
+    shared per-poll Stage-2 POST counter to 0."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    import homeassistant.util.dt as dt_util  # noqa: PLC0415
+    from pytest_homeassistant_custom_component.common import (
+        async_fire_time_changed,  # noqa: PLC0415
+    )
+
+    from custom_components.shop2parcel.const import HUB_STAGE2_POLL_WINDOW  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        hub.record_poll_post()
+        assert hub._stage2_posts_this_poll == 1
+
+        async_fire_time_changed(
+            hass, dt_util.utcnow() + HUB_STAGE2_POLL_WINDOW + timedelta(seconds=1)
+        )
+        await hass.async_block_till_done()
+
+        assert hub._stage2_posts_this_poll == 0, "poll-window tick must reset the shared counter"
+
+        await hub.async_shutdown()
+
+
+async def test_shutdown_cancels_all_three_timers(hass):
+    """QUOTA-03/R3: async_shutdown() cancels all three hub-owned timers
+    (refcount 0) — no lingering-timer warning, all handles cleared to None."""
+    import time as time_module  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+        hub.record_quota_exhausted(int(time_module.time()) + 3600)
+
+        assert hub._midnight_unsub is not None
+        assert hub._quota_expiry_unsub is not None
+        assert hub._poll_window_unsub is not None
+
+        await hub.async_shutdown()
+
+        assert hub._midnight_unsub is None
+        assert hub._quota_expiry_unsub is None
+        assert hub._poll_window_unsub is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 Plan 02: bounded queue + enqueue/_release_inflight/inflight_count
+# (Task 1) and entry_id -> coordinator registry in attach/detach (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def _make_stage2_job(entry_id: str = "entry-a", normalized_tn: str = "TN-1"):
+    """Build a minimal real Stage2Job for hub.enqueue() tests.
+
+    Mirrors tests/test_stage2_worker.py's _make_shipment/Stage2Job
+    construction pattern.
+    """
+    from custom_components.shop2parcel.api.email_parser import ShipmentData  # noqa: PLC0415
+    from custom_components.shop2parcel.coordinator import Stage2Job  # noqa: PLC0415
+
+    shipment = ShipmentData(
+        tracking_number=normalized_tn,
+        carrier_name="UPS",
+        order_name="#1234",
+        message_id=f"msg-{normalized_tn}",
+        email_date=1700000000,
+    )
+    return Stage2Job(
+        storage_key=normalized_tn,
+        normalized_tn=normalized_tn,
+        shipment=shipment,
+        html_body="<html/>",
+        message_id=f"msg-{normalized_tn}",
+        meta={"subject": "test", "from": "test@example.com"},
+        entry_id=entry_id,
+    )
+
+
+def test_enqueue_fresh_job_returns_enqueued_and_records_inflight(hass):
+    """D-02/D-05/D-06: a fresh normalized_tn on an entry with 0 in-flight is
+    ENQUEUED; the job lands in the queue and both _inflight and
+    _stage2_enqueued_keys gain the tn."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-1")
+
+    assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+    assert hub._queue.qsize() == 1
+    assert hub.inflight_count("entry-a") == 1
+    assert "TN-1" in hub._stage2_enqueued_keys
+
+
+def test_enqueue_duplicate_tn_returns_skipped_dup(hass):
+    """R3 dedup: a normalized_tn already in _stage2_enqueued_keys (from ANY
+    entry_id) is SKIPPED_DUP; queue size and both structures unchanged."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    first = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-DUP")
+    assert hub.enqueue(first) is EnqueueOutcome.ENQUEUED
+
+    dup_from_other_account = _make_stage2_job(entry_id="entry-b", normalized_tn="TN-DUP")
+    assert hub.enqueue(dup_from_other_account) is EnqueueOutcome.SKIPPED_DUP
+
+    assert hub._queue.qsize() == 1
+    assert hub.inflight_count("entry-b") == 0
+
+
+def test_enqueue_per_account_cap_boundary(hass):
+    """WORK-03 boundary + empty edges: the 8th job for an entry_id is
+    ENQUEUED, the 9th is DROPPED_BACKPRESSURE, and a second entry_id with 0
+    in-flight still ENQUEUES (R3 empty edge)."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+        EnqueueOutcome,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+        job = _make_stage2_job(entry_id="entry-a", normalized_tn=f"TN-A-{i}")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+    assert hub.inflight_count("entry-a") == STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+
+    ninth_job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-A-9TH")
+    assert hub.enqueue(ninth_job) is EnqueueOutcome.DROPPED_BACKPRESSURE
+    assert hub.inflight_count("entry-a") == STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+    assert "TN-A-9TH" not in hub._stage2_enqueued_keys
+
+    other_job = _make_stage2_job(entry_id="entry-b", normalized_tn="TN-B-1")
+    assert hub.enqueue(other_job) is EnqueueOutcome.ENQUEUED
+    assert hub.inflight_count("entry-b") == 1
+
+
+def test_enqueue_global_bound_fills_then_65th_dropped(hass):
+    """R3 boundary edge: filling the global queue to HUB_STAGE2_QUEUE_MAXLEN
+    (64, spread across 8 entry_ids x 8 jobs so no per-account cap is hit)
+    leaves the 65th job DROPPED_BACKPRESSURE via QueueFull, with nothing
+    recorded for it."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_QUEUE_MAXLEN,
+        STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+        EnqueueOutcome,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    accounts = HUB_STAGE2_QUEUE_MAXLEN // STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+
+    for acct in range(accounts):
+        for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+            job = _make_stage2_job(entry_id=f"entry-{acct}", normalized_tn=f"TN-{acct}-{i}")
+            assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+    assert hub._queue.qsize() == HUB_STAGE2_QUEUE_MAXLEN
+
+    overflow_job = _make_stage2_job(entry_id="entry-overflow", normalized_tn="TN-OVERFLOW")
+    assert hub.enqueue(overflow_job) is EnqueueOutcome.DROPPED_BACKPRESSURE
+    assert "TN-OVERFLOW" not in hub._stage2_enqueued_keys
+    assert hub.inflight_count("entry-overflow") == 0
+
+
+def test_enqueue_gate_order_dup_before_cap(hass):
+    """Gate order is dedup -> per-account cap -> global bound: a duplicate
+    tn at a FULL per-account cap still returns SKIPPED_DUP, not
+    DROPPED_BACKPRESSURE."""
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        STAGE2_PER_ACCOUNT_INFLIGHT_CAP,
+        EnqueueOutcome,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for i in range(STAGE2_PER_ACCOUNT_INFLIGHT_CAP):
+        hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn=f"TN-A-{i}"))
+    assert hub.inflight_count("entry-a") == STAGE2_PER_ACCOUNT_INFLIGHT_CAP
+
+    dup_job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-A-0")
+    assert hub.enqueue(dup_job) is EnqueueOutcome.SKIPPED_DUP
+
+
+def test_enqueue_verbatim_tn_no_normalization(hass):
+    """Prohibition: normalized_tn is matched verbatim — a byte-different key
+    (differing case/whitespace) is treated as new, not re-normalized."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="1z 999aa"))
+
+    different_case = _make_stage2_job(entry_id="entry-b", normalized_tn="1Z999AA")
+    assert hub.enqueue(different_case) is EnqueueOutcome.ENQUEUED
+
+
+def test_release_inflight_decrements_and_deletes_empty_key(hass):
+    """_release_inflight removes tn from _inflight[entry_id] (deleting the
+    entry_id key once its set empties) and discards it from
+    _stage2_enqueued_keys."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-2"))
+    assert hub.inflight_count("entry-a") == 2
+
+    hub._release_inflight("entry-a", "TN-1")
+    assert hub.inflight_count("entry-a") == 1
+    assert "TN-1" not in hub._stage2_enqueued_keys
+    assert "entry-a" in hub._inflight
+
+    hub._release_inflight("entry-a", "TN-2")
+    assert hub.inflight_count("entry-a") == 0
+    assert "entry-a" not in hub._inflight
+
+
+def test_release_inflight_idempotent_on_absent_tn(hass):
+    """_release_inflight on an absent entry_id/tn is a safe no-op."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+
+    hub._release_inflight("entry-unknown", "TN-UNKNOWN")
+    hub._release_inflight("entry-a", "TN-NEVER-ENQUEUED")
+
+    assert hub.inflight_count("entry-a") == 1
+
+
+def test_enqueue_and_release_inflight_are_plain_sync_defs(hass):
+    """source: enqueue/_release_inflight are plain `def`, no `await` between
+    check and mutate (sync lock-free mutator discipline)."""
+    import inspect  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    assert not inspect.iscoroutinefunction(Shop2ParcelHub.enqueue)
+    assert not inspect.iscoroutinefunction(Shop2ParcelHub._release_inflight)
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 Plan 02, Task 2: entry_id -> coordinator registry (attach/detach)
+# ---------------------------------------------------------------------------
+
+
+def test_attach_registers_coordinator_by_entry_id(hass):
+    """D-01: attach() inserts _coordinators[entry_id] = coordinator."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+
+    hub.attach(coordinator_a)
+
+    assert hub._coordinators["entry-a"] is coordinator_a
+
+
+def test_reload_same_entry_id_keeps_fresh_coordinator_registered(hass):
+    """D-01 identity guard: attach(new) then detach(old) for the SAME
+    entry_id leaves the registry pointing at `new` — `old`'s detach cannot
+    evict the freshly-attached replacement."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    old_coordinator = MagicMock()
+    old_coordinator.config_entry.entry_id = "entry-a"
+    new_coordinator = MagicMock()
+    new_coordinator.config_entry.entry_id = "entry-a"
+
+    hub.attach(old_coordinator)
+    hub.attach(new_coordinator)
+    hub.detach(old_coordinator)
+
+    assert hub._coordinators["entry-a"] is new_coordinator
+
+
+def test_detach_removes_registry_entry_when_identity_matches(hass):
+    """detach() removes the registry entry when it still points at the
+    detaching instance."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+
+    hub.attach(coordinator_a)
+    hub.detach(coordinator_a)
+
+    assert "entry-a" not in hub._coordinators
+
+
+def test_detach_purges_inflight_tns_for_entry(hass):
+    """D-05/WORK-04: detach purges the removed account's in-flight tns from
+    both _inflight and _stage2_enqueued_keys; inflight_count(entry_id)
+    becomes 0."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-2"))
+    assert hub.inflight_count("entry-a") == 2
+
+    hub.detach(coordinator_a)
+
+    assert hub.inflight_count("entry-a") == 0
+    assert "TN-1" not in hub._stage2_enqueued_keys
+    assert "TN-2" not in hub._stage2_enqueued_keys
+
+
+def test_detach_with_no_inflight_is_a_noop_purge(hass):
+    """R4 empty edge: detach for an entry_id with no in-flight tns is a
+    no-op purge — no crash."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    hub.detach(coordinator_a)
+
+    assert hub.inflight_count("entry-a") == 0
+
+
+def test_detach_leaves_queued_job_physically_queued(hass):
+    """D-01 precondition for the WR-01 fix: detach() must NOT remove an
+    already-queued Stage2Job for the departing entry_id — it has to survive
+    to dispatch against whichever coordinator is attached when the worker
+    reaches it (test_worker_reload_dispatches_to_fresh_coordinator). Only
+    the in-flight/dedup *bookkeeping* is purged, not the physical job."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+    assert hub._queue.qsize() == 1
+
+    hub.detach(coordinator_a)
+
+    assert hub._queue.qsize() == 1  # job stays queued
+    assert hub.inflight_count("entry-a") == 0  # but bookkeeping is purged (D-05)
+    assert "TN-1" not in hub._stage2_enqueued_keys
+
+
+def test_enqueue_rejects_duplicate_still_sitting_in_queue_after_detach(hass):
+    """WR-01: detach() purges _stage2_enqueued_keys (D-05) but deliberately
+    leaves an already-queued job in place (D-01), opening a window where the
+    primary dedup set no longer blocks a fresh duplicate for the same
+    tracking number. enqueue()'s queue-scan backstop must still reject it —
+    the queue must never hold two jobs for the same normalized_tn at once."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    old_coordinator = MagicMock()
+    old_coordinator.config_entry.entry_id = "entry-a"
+    hub.attach(old_coordinator)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+
+    # Reload: detach the old instance, attach a fresh one under the same entry_id.
+    hub.detach(old_coordinator)
+    new_coordinator = MagicMock()
+    new_coordinator.config_entry.entry_id = "entry-a"
+    hub.attach(new_coordinator)
+
+    # Same tracking number re-discovered post-reload — _stage2_enqueued_keys
+    # was purged by detach(), but the original job is still queued.
+    assert "TN-1" not in hub._stage2_enqueued_keys  # primary dedup gate is open
+    outcome = hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+
+    assert outcome is EnqueueOutcome.SKIPPED_DUP
+    assert hub._queue.qsize() == 1  # still only the one original job
+
+
+def test_enqueue_allows_different_tn_after_detach_purge(hass):
+    """The WR-01 backstop scans by normalized_tn, not entry_id or object
+    identity — a genuinely different tracking number for the same
+    (reloaded) entry_id must still enqueue normally, alongside the
+    surviving pre-reload job."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    old_coordinator = MagicMock()
+    old_coordinator.config_entry.entry_id = "entry-a"
+    hub.attach(old_coordinator)
+    hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-1"))
+
+    hub.detach(old_coordinator)
+    new_coordinator = MagicMock()
+    new_coordinator.config_entry.entry_id = "entry-a"
+    hub.attach(new_coordinator)
+
+    outcome = hub.enqueue(_make_stage2_job(entry_id="entry-a", normalized_tn="TN-2"))
+
+    assert outcome is EnqueueOutcome.ENQUEUED
+    assert hub._queue.qsize() == 2  # both TN-1 (survivor) and TN-2 (fresh) queued
+
+
+def test_attach_detach_with_config_entry_none_does_not_crash(hass):
+    """RESEARCH.md Pitfall 5 / D-01: a coordinator whose config_entry is
+    None is tolerated — attach/detach skip the registry write, mirroring
+    _debug_mode_active's None tolerance. Not exercised by any existing
+    test (bare MagicMock() auto-mocks a truthy config_entry)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_bare = MagicMock(config_entry=None)
+
+    hub.attach(coordinator_bare)
+    assert hub._coordinators == {}
+
+    hub.detach(coordinator_bare)
+    assert hub._coordinators == {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 Plan 03: the real shared worker (_async_hub_worker, replacing
+# _stub_worker). Task 1: resolve + drain + dispatch + finally release
+# (FIFO/routing/skip/reload/empty-idle). Task 2: crash-isolation ladder +
+# purge-vs-drain-race backstop.
+#
+# Driving pattern: hub.async_setup() spawns the real worker, which
+# immediately blocks on `await self._queue.get()`. Because Python's asyncio
+# is single-threaded and cooperative, the worker task is NOT scheduled to
+# run until the test coroutine hits its own `await` — so a sequence of
+# purely-synchronous hub calls (enqueue/attach/detach) after the worker has
+# started is guaranteed to complete BEFORE the worker ever wakes up. Tests
+# exploit this to set up "job enqueued, THEN registry mutated" orderings
+# deterministically, then `await hub._queue.join()` to let the worker drain
+# and observe the outcome. Every test ends with `await hub.async_shutdown()`
+# to cancel the worker cleanly (mirrors test_worker_task_survives_single_
+# entry_removal above).
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_dispatches_single_job_and_releases_inflight_in_finally(hass):
+    """Task 1 behavior: a single enqueued job is dispatched to its resolved
+    coordinator's _async_process_stage2_job exactly once (drain runs first),
+    and the hub in-flight slot is released afterward (finally always runs)."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock()
+        hub.attach(coordinator_a)
+
+        job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-1")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        await hub._queue.join()
+
+        coordinator_a._async_drain_pending_posts.assert_awaited_once()
+        coordinator_a._async_process_stage2_job.assert_awaited_once_with(job)
+        assert hub.inflight_count("entry-a") == 0
+        assert "TN-1" not in hub._stage2_enqueued_keys
+
+        await hub.async_shutdown()
+
+
+async def test_worker_processes_two_accounts_fifo_routing_no_cross_leak(hass):
+    """Task 1 behavior: two accounts each enqueue one job; the single worker
+    processes them in enqueue (FIFO) order and each result lands on its own
+    resolved coordinator — never crossed."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        dispatch_order: list[str] = []
+
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock(
+            side_effect=lambda job: dispatch_order.append(job.entry_id)
+        )
+        coordinator_b = MagicMock()
+        coordinator_b.config_entry.entry_id = "entry-b"
+        coordinator_b._async_drain_pending_posts = AsyncMock()
+        coordinator_b._async_process_stage2_job = AsyncMock(
+            side_effect=lambda job: dispatch_order.append(job.entry_id)
+        )
+        hub.attach(coordinator_a)
+        hub.attach(coordinator_b)
+
+        job_a = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-A")
+        job_b = _make_stage2_job(entry_id="entry-b", normalized_tn="TN-B")
+        assert hub.enqueue(job_a) is EnqueueOutcome.ENQUEUED
+        assert hub.enqueue(job_b) is EnqueueOutcome.ENQUEUED
+
+        await hub._queue.join()
+
+        assert dispatch_order == ["entry-a", "entry-b"]
+        coordinator_a._async_process_stage2_job.assert_awaited_once_with(job_a)
+        coordinator_b._async_process_stage2_job.assert_awaited_once_with(job_b)
+        assert hub.inflight_count("entry-a") == 0
+        assert hub.inflight_count("entry-b") == 0
+
+        await hub.async_shutdown()
+
+
+async def test_worker_skip_job_with_no_attached_coordinator(hass):
+    """Task 1 behavior: a job whose entry_id has NO attached coordinator is
+    skipped — no dispatch, no error, task_done + hub in-flight release still
+    run, and the worker keeps running."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        job = _make_stage2_job(entry_id="entry-never-attached", normalized_tn="TN-ORPHAN")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        await hub._queue.join()
+
+        assert hub.inflight_count("entry-never-attached") == 0
+        assert "TN-ORPHAN" not in hub._stage2_enqueued_keys
+        assert not hub._worker_task.done()
+
+        await hub.async_shutdown()
+
+
+async def test_worker_reload_dispatches_to_fresh_coordinator(hass):
+    """Task 1 behavior (WORK-02, D-01 non-negotiable): a job enqueued for
+    entry_id X while the OLD coordinator is attached dispatches to the FRESH
+    coordinator once X is detached+re-attached BEFORE the worker gets a
+    chance to run — dispatch-time resolution, not enqueue-time."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        old_coordinator = MagicMock()
+        old_coordinator.config_entry.entry_id = "entry-x"
+        old_coordinator._async_drain_pending_posts = AsyncMock()
+        old_coordinator._async_process_stage2_job = AsyncMock()
+
+        new_coordinator = MagicMock()
+        new_coordinator.config_entry.entry_id = "entry-x"
+        new_coordinator._async_drain_pending_posts = AsyncMock()
+        new_coordinator._async_process_stage2_job = AsyncMock()
+
+        hub.attach(old_coordinator)
+        job = _make_stage2_job(entry_id="entry-x", normalized_tn="TN-RELOAD")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        # No `await` has occurred since enqueue — the worker task cannot
+        # have been scheduled yet, so this reload race is deterministic.
+        hub.detach(old_coordinator)
+        hub.attach(new_coordinator)
+
+        await hub._queue.join()
+
+        new_coordinator._async_process_stage2_job.assert_awaited_once_with(job)
+        old_coordinator._async_process_stage2_job.assert_not_awaited()
+
+        await hub.async_shutdown()
+
+
+async def test_worker_idles_on_empty_queue_no_spin_no_error(hass):
+    """Task 1 behavior (R1 empty edge): an empty queue leaves the worker
+    blocked on queue.get() — no busy-loop, no exception, worker stays alive."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert not hub._worker_task.done()
+        assert not hub._worker_task.cancelled()
+
+        await hub.async_shutdown()
+
+
+async def test_async_setup_spawns_async_hub_worker_not_stub(hass):
+    """source: async_setup spawns _async_hub_worker (not _stub_worker) and
+    _stub_worker is deleted."""
+    import inspect  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    assert hasattr(Shop2ParcelHub, "_async_hub_worker")
+    assert not hasattr(Shop2ParcelHub, "_stub_worker")
+
+    setup_source = inspect.getsource(Shop2ParcelHub.async_setup)
+    assert "self._async_hub_worker()" in setup_source
+    assert "_stub_worker" not in setup_source
+
+
+def test_hub_release_and_task_done_appear_once_in_finally_not_duplicated(hass):
+    """source (Task 2 acceptance): the hub in-flight release + task_done
+    appear exactly once, in a single finally — not duplicated per except
+    branch."""
+    import inspect  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    worker_source = inspect.getsource(Shop2ParcelHub._async_hub_worker)
+    # Strip the docstring (which narrates both calls in prose) so the count
+    # below reflects actual code, not documentation text.
+    worker_code = worker_source.split('"""', 2)[-1]
+    assert worker_code.count("self._release_inflight(job.entry_id, normalized_tn)") == 1
+    assert worker_code.count("self._queue.task_done()") == 1
+    # Both calls live inside the single `finally:` block that closes the
+    # per-job try — not scattered across the except branches above it.
+    finally_block = worker_code.split("finally:", 1)[1]
+    assert "self._release_inflight(job.entry_id, normalized_tn)" in finally_block
+    assert "self._queue.task_done()" in finally_block
+
+
+async def test_worker_exception_isolation_join_does_not_hang_and_next_account_processes(
+    hass,
+):
+    """Task 2 behavior: a job whose _async_process_stage2_job raises a
+    generic Exception is isolated via coord._record_stage2_failure and
+    coord._release_inflight (the per-account msg-gate release); the worker
+    continues and a subsequent job for a DIFFERENT account is still
+    processed; queue.join() does not hang."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        boom = ValueError("Ollama exploded")
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock(side_effect=boom)
+        coordinator_a._release_inflight = MagicMock()
+        coordinator_a._record_stage2_failure = MagicMock()
+
+        coordinator_b = MagicMock()
+        coordinator_b.config_entry.entry_id = "entry-b"
+        coordinator_b._async_drain_pending_posts = AsyncMock()
+        coordinator_b._async_process_stage2_job = AsyncMock()
+
+        hub.attach(coordinator_a)
+        hub.attach(coordinator_b)
+
+        job_a = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-A-FAIL")
+        job_b = _make_stage2_job(entry_id="entry-b", normalized_tn="TN-B-OK")
+        assert hub.enqueue(job_a) is EnqueueOutcome.ENQUEUED
+        assert hub.enqueue(job_b) is EnqueueOutcome.ENQUEUED
+
+        await asyncio.wait_for(hub._queue.join(), timeout=5.0)  # must not hang
+
+        coordinator_a._record_stage2_failure.assert_called_once_with(job_a, boom)
+        coordinator_a._release_inflight.assert_called_once_with(job_a)
+        coordinator_b._async_process_stage2_job.assert_awaited_once_with(job_b)
+        assert hub.inflight_count("entry-a") == 0
+        assert hub.inflight_count("entry-b") == 0
+        assert not hub._worker_task.done()
+
+        await hub.async_shutdown()
+
+
+async def test_worker_auth_failure_logged_not_recorded_as_ollama_failure(hass, caplog):
+    """Task 2 behavior (WR-05): a job raising ConfigEntryAuthFailed is
+    logged and does NOT increment _record_stage2_failure (auth is not an
+    Ollama failure), but DOES call coord._release_inflight(job) (the
+    per-account msg-gate release); the worker continues."""
+    from homeassistant.exceptions import ConfigEntryAuthFailed  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        auth_err = ConfigEntryAuthFailed("bad parcelapp key")
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock(side_effect=auth_err)
+        coordinator_a._release_inflight = MagicMock()
+        coordinator_a._record_stage2_failure = MagicMock()
+        hub.attach(coordinator_a)
+
+        job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-AUTH")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        with caplog.at_level(logging.ERROR):
+            await asyncio.wait_for(hub._queue.join(), timeout=5.0)
+
+        coordinator_a._record_stage2_failure.assert_not_called()
+        coordinator_a._release_inflight.assert_called_once_with(job)
+        assert "auth error" in caplog.text
+        assert hub.inflight_count("entry-a") == 0
+        assert not hub._worker_task.done()
+
+        await hub.async_shutdown()
+
+
+async def test_worker_cancelled_error_propagates_and_stops_worker(hass):
+    """Task 2 behavior (R5 adjacency): CancelledError raised during a job
+    runs coord._release_inflight(job), the hub in-flight release + task_done
+    run in finally, and CancelledError propagates out (stops the worker) —
+    the only thing that stops it."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        coordinator_a = MagicMock()
+        coordinator_a.config_entry.entry_id = "entry-a"
+        coordinator_a._async_drain_pending_posts = AsyncMock()
+        coordinator_a._async_process_stage2_job = AsyncMock(side_effect=asyncio.CancelledError())
+        coordinator_a._release_inflight = MagicMock()
+        hub.attach(coordinator_a)
+
+        job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-CANCEL")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        await asyncio.wait_for(hub._queue.join(), timeout=5.0)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        coordinator_a._release_inflight.assert_called_once_with(job)
+        assert hub.inflight_count("entry-a") == 0
+        assert hub._worker_task.done()
+        assert hub._worker_task.cancelled()
+
+        # The worker already exited on its own — async_shutdown must not
+        # raise when the task is already done.
+        await hub.async_shutdown()
+
+
+async def test_worker_purge_vs_drain_race_backstop_skips_departed_account(hass):
+    """Task 2 behavior (🧪 held-out backstop, R4 ordering): a job for
+    account X is enqueued, then X is detached (purging its in-flight keys
+    and registry entry) BEFORE the worker dequeues it; when the worker
+    dequeues, coord resolves to None and the job is skipped — no dispatch,
+    no orphaned POST, no crash."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        coordinator_x = MagicMock()
+        coordinator_x.config_entry.entry_id = "entry-departed"
+        coordinator_x._async_drain_pending_posts = AsyncMock()
+        coordinator_x._async_process_stage2_job = AsyncMock()
+        hub.attach(coordinator_x)
+
+        job = _make_stage2_job(entry_id="entry-departed", normalized_tn="TN-DEPARTED")
+        assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+        # Detach BEFORE any `await` since enqueue — the worker cannot have
+        # dequeued yet, so this purge-vs-drain race is deterministic: the
+        # job is dequeued strictly AFTER detach's purge has already run.
+        hub.detach(coordinator_x)
+
+        await asyncio.wait_for(hub._queue.join(), timeout=5.0)
+
+        coordinator_x._async_process_stage2_job.assert_not_awaited()
+        assert hub.inflight_count("entry-departed") == 0
+        assert "TN-DEPARTED" not in hub._stage2_enqueued_keys
+        assert not hub._worker_task.done()
+
+        await hub.async_shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Phase 34 Plan 02 Task 1: stage2_queue_depth / stage2_pending read
+# accessors (DIAG-02/D-04 safety-net) — thin, sensors read these instead of
+# hub._inflight/hub._queue directly.
+# ---------------------------------------------------------------------------
+
+
+def test_stage2_queue_depth_and_pending_empty_hub_are_zero(hass):
+    """Empty hub (no _inflight entries, empty _queue): both accessors read 0."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    assert hub.stage2_queue_depth == 0
+    assert hub.stage2_pending == 0
+
+
+def test_stage2_queue_depth_sums_inflight_across_accounts(hass):
+    """D-04: stage2_queue_depth == sum(len(s) for s in hub._inflight.values())
+    across multiple entry_ids — total outstanding (pending + in-flight)."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    hub._inflight = {"a": {"1Z1", "1Z2"}, "b": {"1Z3"}}
+
+    assert hub.stage2_queue_depth == 3
+
+
+def test_stage2_pending_reflects_queue_size_before_dequeue(hass):
+    """stage2_pending == hub._queue.qsize() when three jobs are enqueued but
+    none have been dequeued yet."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    for i in range(3):
+        hub._queue.put_nowait(_make_stage2_job(entry_id="entry-a", normalized_tn=f"TN-{i}"))
+
+    assert hub.stage2_pending == 3
+
+
+def test_stage2_queue_depth_counts_dequeued_but_still_inflight_job(hass):
+    """SPEC R3 in-flight edge: a job dequeued from _queue (stage2_pending
+    drops to 0) but still tracked in _inflight (the worker hasn't hit its
+    finally-block release yet) is still counted by stage2_queue_depth —
+    pending + in-flight, not just physically-queued."""
+    from custom_components.shop2parcel.const import EnqueueOutcome  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    job = _make_stage2_job(entry_id="entry-a", normalized_tn="TN-INFLIGHT")
+    assert hub.enqueue(job) is EnqueueOutcome.ENQUEUED
+
+    # Simulate the worker dequeuing the job without yet releasing in-flight.
+    dequeued = hub._queue.get_nowait()
+    assert dequeued is job
+
+    assert hub.stage2_pending == 0
+    assert hub.stage2_queue_depth == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 34 Plan 02 Task 2: consolidated failure-streak + single hub
+# notification (DIAG-03 / D-05..D-08)
+#
+# 34-REVIEW-FIX (CR-02): record_stage2_worker_failure's effective threshold
+# is min(HUB_STAGE2_NOTIFY_THRESHOLD, max(1, len(hub._coordinators))) — tests
+# below that intend to exercise the FIXED (large-fleet) threshold attach a
+# same-sized set of mock coordinators via _attach_mock_coordinators() so
+# hub._coordinators reflects that fleet size, preserving the original
+# "5-account fleet, below/at/past threshold" semantics these tests describe.
+# ---------------------------------------------------------------------------
+
+
+def _attach_mock_coordinators(hub, entry_ids) -> None:
+    """Attach lightweight MagicMock coordinators for each entry_id.
+
+    Makes hub._coordinators (and therefore CR-02's fleet-size-scaled
+    effective threshold) reflect a fleet of len(entry_ids) attached
+    accounts, without any real Store I/O or coordinator construction.
+    """
+    for entry_id in entry_ids:
+        coord = MagicMock()
+        coord.config_entry.entry_id = entry_id
+        hub.attach(coord)
+
+
+def test_stage2_failing_entry_ids_init_empty(hass):
+    """Init: hub._stage2_failing_entry_ids starts as an empty set."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    assert hub._stage2_failing_entry_ids == set()
+
+
+def test_record_stage2_worker_failure_below_threshold_no_notification(hass):
+    """In a 5-account fleet (threshold 5), 4 distinct failing accounts do NOT
+    fire the notification.
+
+    34-REVIEW-FIX (CR-02): 5 mock coordinators are attached so
+    hub._coordinators reflects a 5-account fleet — the effective threshold
+    stays at HUB_STAGE2_NOTIFY_THRESHOLD=5 (min(5, max(1, 5))), preserving
+    this test's original "below the large-fleet threshold" intent (a
+    smaller/unattached fleet is instead covered by
+    test_record_stage2_worker_failure_effective_threshold_scales_down_for_small_fleet).
+    """
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b", "c", "d", "e"))
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for entry_id in ("a", "b", "c", "d"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        mock_create.assert_not_called()
+        assert hub._stage2_failing_entry_ids == {"a", "b", "c", "d"}
+
+
+def test_record_stage2_worker_failure_fifth_fires_notification_once(hass):
+    """In a 5-account fleet, the 5th distinct failing account fires
+    async_create exactly once with the fixed HUB_STAGE2_FAILING_NOTIFICATION_ID
+    and expected title (CR-02: 5 mock coordinators attached — see
+    test_record_stage2_worker_failure_below_threshold_no_notification)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b", "c", "d", "e"))
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for entry_id in ("a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        assert mock_create.call_count == 1
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["notification_id"] == HUB_STAGE2_FAILING_NOTIFICATION_ID
+        assert call_kwargs["title"] == "Shop2Parcel Stage-2 Failing"
+
+
+def test_record_stage2_worker_failure_sixth_does_not_refire(hass):
+    """In a 6-account fleet, a 6th distinct failing account does not fire a
+    second notification (no duplicate, D-06). CR-02: 6 mock coordinators
+    attached so the effective threshold is still capped at
+    HUB_STAGE2_NOTIFY_THRESHOLD=5 (min(5, max(1, 6)))."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b", "c", "d", "e", "f"))
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for entry_id in ("a", "b", "c", "d", "e", "f"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        assert mock_create.call_count == 1
+
+
+def test_record_stage2_worker_failure_effective_threshold_scales_down_for_small_fleet(hass):
+    """CR-02 (34-REVIEW.md): with only 2 accounts attached, the effective
+    threshold scales down to min(HUB_STAGE2_NOTIFY_THRESHOLD, max(1, 2)) == 2
+    — the 2nd distinct failing account fires the notification, instead of
+    the fixed threshold of 5 being unreachable for a small fleet."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b"))
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        hub.record_stage2_worker_failure("a")
+        mock_create.assert_not_called()
+
+        hub.record_stage2_worker_failure("b")
+        assert mock_create.call_count == 1
+        assert mock_create.call_args.kwargs["notification_id"] == HUB_STAGE2_FAILING_NOTIFICATION_ID
+
+
+def test_record_stage2_worker_failure_effective_threshold_never_below_one(hass):
+    """CR-02: with zero accounts attached (edge case — should not occur in
+    production, since attach() always precedes any poll/failure), the
+    effective threshold floors at 1 (max(1, 0)) rather than becoming 0 and
+    firing on an empty failing set."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    assert hub._coordinators == {}
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        hub.record_stage2_worker_failure("a")
+
+        assert mock_create.call_count == 1
+
+
+def test_record_stage2_worker_success_one_of_many_does_not_dismiss(hass):
+    """A success for ONE failing account while others remain failing does
+    NOT dismiss the notification (set still non-empty, D-07 reset semantics)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        for entry_id in ("a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        hub.record_stage2_worker_success("a")
+
+        mock_dismiss.assert_not_called()
+        assert hub._stage2_failing_entry_ids == {"b", "c", "d", "e"}
+
+
+def test_record_stage2_worker_success_last_failing_dismisses(hass):
+    """A success for the LAST failing account dismisses the notification
+    (set empties)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        for entry_id in ("a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_failure(entry_id)
+        for entry_id in ("a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_success(entry_id)
+
+        mock_dismiss.assert_called_once_with(
+            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+        )
+        assert hub._stage2_failing_entry_ids == set()
+
+
+def test_detach_discards_failing_account_from_set(hass):
+    """detach(coordinator) discards that account's entry_id from the
+    failing set (D-07); other accounts still failing means no dismiss."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        for entry_id in ("entry-a", "b", "c", "d", "e"):
+            hub.record_stage2_worker_failure(entry_id)
+
+        hub.detach(coordinator_a)
+
+        assert "entry-a" not in hub._stage2_failing_entry_ids
+        mock_dismiss.assert_not_called()
+
+
+def test_detach_of_last_failing_account_dismisses_notification(hass):
+    """detach() of the LAST failing account empties the set and dismisses
+    the notification — removing a failing account counts as recovery (D-07)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        hub.record_stage2_worker_failure("entry-a")
+
+        hub.detach(coordinator_a)
+
+        assert hub._stage2_failing_entry_ids == set()
+        mock_dismiss.assert_called_once_with(
+            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+        )
+
+
+async def test_async_shutdown_dismisses_hub_notification_unconditionally(hass):
+    """async_shutdown() calls async_dismiss for the hub notification
+    unconditionally, even with no active failing streak (D-07 teardown-dismiss)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        with patch.object(persistent_notification, "async_dismiss") as mock_dismiss:
+            await hub.async_shutdown()
+
+            mock_dismiss.assert_called_once_with(
+                hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+            )
+
+
+def test_hub_notification_body_is_pii_free(hass):
+    """PROH-1: the consolidated notification message is composed only from
+    aggregate counts + generic guidance — none of the forbidden per-job
+    fields (email, tracking number, subject, order name, credential-looking
+    tokens) ever appear in it.
+
+    CR-02: HUB_STAGE2_NOTIFY_THRESHOLD mock coordinators are attached so
+    hub._coordinators reflects a fleet exactly at the fixed threshold size,
+    preserving this test's "reaches HUB_STAGE2_NOTIFY_THRESHOLD distinct
+    failing accounts" intent.
+    """
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_NOTIFY_THRESHOLD,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, [f"entry-{i}" for i in range(HUB_STAGE2_NOTIFY_THRESHOLD)])
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        for i in range(HUB_STAGE2_NOTIFY_THRESHOLD):
+            hub.record_stage2_worker_failure(f"entry-{i}")
+
+        assert mock_create.call_count == 1
+        message = mock_create.call_args.kwargs["message"]
+        forbidden_tokens = (
+            "@",
+            "tracking_number",
+            "subject",
+            "order_name",
+            "Bearer ",
+            "api_key",
+            "token=",
+        )
+        for token in forbidden_tokens:
+            assert token not in message
+
+
+# ---------------------------------------------------------------------------
+# Phase 34-05 (R-01): global-sensor cross-entry ownership, re-home, teardown
+# ---------------------------------------------------------------------------
+
+
+async def test_global_sensors_registered_exactly_once(hass, mock_config_entry, mock_config_entry_b):
+    """DIAG-01/DIAG-02/R-01: with two entries attached, exactly one registry
+    row exists per global-sensor unique_id — never two, even though both
+    entries' sensor.py::async_setup_entry ran (claim_global_sensor_ownership
+    guards the unique_id-collision anti-pattern)."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry_b.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        registry = er.async_get(hass)
+        hub_entities = [
+            entry
+            for entry in registry.entities.values()
+            if entry.unique_id.startswith(f"{DOMAIN}___shared___")
+        ]
+        assert len(hub_entities) == 2, (
+            f"expected exactly 2 hub-scoped entity rows, got {[e.unique_id for e in hub_entities]}"
+        )
+
+        # Cleanup: unload both accounts so the hub worker task is cancelled
+        # before the mocked-Store context exits.
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
+
+
+async def test_global_sensor_rehomes_on_owner_unload(hass, mock_config_entry, mock_config_entry_b):
+    """R-01/Pitfall 2/3: unloading the entry that owns the two global sensors,
+    while the hub survives, re-parents them to the surviving entry — the
+    entity_id is stable, native_value is unchanged, and the entity stays
+    available (the smoking-gun assertion from Pitfall 3: config_entry_id must
+    flip to the survivor, not stay pointed at the now-removed owner)."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry_b.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        hub = hass.data[DOMAIN]["__shared__"]
+        owner_entry_id = hub._global_sensor_owner_entry_id
+        assert owner_entry_id in (mock_config_entry.entry_id, mock_config_entry_b.entry_id)
+        survivor_entry_id = (
+            mock_config_entry_b.entry_id
+            if owner_entry_id == mock_config_entry.entry_id
+            else mock_config_entry.entry_id
+        )
+
+        registry = er.async_get(hass)
+        quota_unique_id = f"{DOMAIN}___shared___{GlobalQuotaSensor._unique_id_suffix}"
+        queue_unique_id = f"{DOMAIN}___shared___{GlobalQueueSensor._unique_id_suffix}"
+        quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert quota_entity_id is not None
+        assert queue_entity_id is not None
+        assert registry.async_get(quota_entity_id).config_entry_id == owner_entry_id
+        assert registry.async_get(queue_entity_id).config_entry_id == owner_entry_id
+
+        value_before = hass.states.get(quota_entity_id).state
+
+        await hass.config_entries.async_unload(owner_entry_id)
+        await hass.async_block_till_done()
+
+        assert hub._refcount == 1
+        assert hass.data[DOMAIN]["__shared__"] is hub
+
+        assert registry.async_get(quota_entity_id).config_entry_id == survivor_entry_id, (
+            "config_entry_id must re-parent to the surviving entry after the owner unloads"
+        )
+        assert registry.async_get(queue_entity_id).config_entry_id == survivor_entry_id
+
+        state_after = hass.states.get(quota_entity_id)
+        assert state_after is not None
+        assert state_after.state != "unavailable"
+        assert state_after.state == value_before
+
+        # Cleanup: unload the surviving entry.
+        await hass.config_entries.async_unload(survivor_entry_id)
+
+
+async def test_teardown_removes_global_sensors(hass, mock_config_entry, mock_config_entry_b):
+    """R-01/Pitfall 2/A2: at last-account teardown (refcount 0), both global
+    sensors are removed from the entity registry and
+    hass.data[DOMAIN]["__shared__"] is deleted — no orphaned registry rows."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry_b.add_to_hass(hass)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        registry = er.async_get(hass)
+        quota_unique_id = f"{DOMAIN}___shared___{GlobalQuotaSensor._unique_id_suffix}"
+        queue_unique_id = f"{DOMAIN}___shared___{GlobalQueueSensor._unique_id_suffix}"
+        quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert quota_entity_id is not None
+        assert queue_entity_id is not None
+
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
+        await hass.async_block_till_done()
+
+        assert registry.async_get(quota_entity_id) is None
+        assert registry.async_get(queue_entity_id) is None
+        assert "__shared__" not in hass.data.get(DOMAIN, {})
+
+
+async def test_global_sensor_ownership_not_persisted(hass):
+    """Pitfall 4: ownership is session-scoped in-memory only — the shared
+    store's async_save payload never contains an ownership-related key."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        assert hub.claim_global_sensor_ownership("entry-a") is True
+        assert hub._global_sensor_owner_entry_id == "entry-a"
+        # A second claim by a different entry_id must be refused.
+        assert hub.claim_global_sensor_ownership("entry-b") is False
+
+        await hub.async_save()
+
+        last_call = mock_store_cls.return_value.async_save.call_args
+        payload = last_call.args[0]
+        assert not any("owner" in key.lower() for key in payload), (
+            f"no ownership-related key should ever be persisted (Pitfall 4); got keys={list(payload)}"
+        )
+
+        await hub.async_shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Phase 34-06 (LIFE-01b, D-09): remove-to-zero -> re-add teardown/recreate
+# lifecycle capstone test.
+# ---------------------------------------------------------------------------
+
+
+async def test_remove_to_zero_then_readd_recreates_hub(
+    hass, mock_config_entry, mock_config_entry_b
+):
+    """LIFE-01b (D-09): removing the last of two accounts tears the hub down
+    cleanly — worker cancelled, notification dismissed, both global sensors
+    removed from the entity registry, hass.data[DOMAIN]["__shared__"]
+    deleted, no orphaned task — and re-adding a fresh account afterward
+    creates a BRAND NEW hub with exactly one instance of each global sensor
+    re-registered under it.
+    """
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+        HUB_STAGE2_NOTIFY_THRESHOLD,
+        PARCELAPP_DAILY_LIMIT,
+    )
+    from custom_components.shop2parcel.diagnostic_sensor import GlobalQueueSensor  # noqa: PLC0415
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+    from custom_components.shop2parcel.sensor import GlobalQuotaSensor  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry_b.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    quota_unique_id = f"{DOMAIN}___shared___{GlobalQuotaSensor._unique_id_suffix}"
+    queue_unique_id = f"{DOMAIN}___shared___{GlobalQueueSensor._unique_id_suffix}"
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        # Two accounts set up together (domain not yet bootstrapped — a
+        # single async_setup() call sets up both pre-added entries).
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        hub = hass.data[DOMAIN]["__shared__"]
+        assert isinstance(hub, Shop2ParcelHub)
+        assert hub._refcount == 2
+
+        quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert quota_entity_id is not None
+        assert queue_entity_id is not None
+
+        worker_task = hub._worker_task
+        assert worker_task is not None and not worker_task.done(), (
+            "precondition: worker running after two-account setup"
+        )
+
+        # Seed an outstanding hub notification (drive record_stage2_worker_failure
+        # past HUB_STAGE2_NOTIFY_THRESHOLD, using the two real accounts plus
+        # synthetic entry_ids so the streak survives A's single-account
+        # removal below) so the teardown-dismiss path is genuinely exercised,
+        # not vacuously true.
+        with patch.object(persistent_notification, "async_create") as mock_create:
+            failing_ids = [mock_config_entry.entry_id, mock_config_entry_b.entry_id] + [
+                f"synthetic-{i}" for i in range(HUB_STAGE2_NOTIFY_THRESHOLD - 2)
+            ]
+            for entry_id in failing_ids:
+                hub.record_stage2_worker_failure(entry_id)
+            assert mock_create.call_count == 1, "the consolidated notification must fire once"
+
+        with patch.object(hub, "async_shutdown", wraps=hub.async_shutdown) as spy_shutdown:
+            # Removing A (not the last account) must not tear down the hub —
+            # the streak survives (B + synthetic ids still failing), so the
+            # notification must NOT be dismissed by this step either.
+            with patch.object(persistent_notification, "async_dismiss") as mock_dismiss_a:
+                await hass.config_entries.async_unload(mock_config_entry.entry_id)
+                await hass.async_block_till_done()
+            spy_shutdown.assert_not_called()
+            assert hass.data[DOMAIN]["__shared__"] is hub
+            assert hub._refcount == 1
+            assert not any(
+                call.kwargs.get("notification_id") == HUB_STAGE2_FAILING_NOTIFICATION_ID
+                for call in mock_dismiss_a.call_args_list
+            ), "the outstanding streak notification must not be dismissed by a non-last removal"
+
+            # Removing B — the LAST account — tears down the hub.
+            with patch.object(persistent_notification, "async_dismiss") as mock_dismiss_last:
+                await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
+                await hass.async_block_till_done()
+            spy_shutdown.assert_called_once()
+
+        # Teardown assertions: worker cancelled/done, notification dismissed,
+        # both global entities removed from the registry (no orphaned rows),
+        # hass.data[DOMAIN]["__shared__"] deleted.
+        assert worker_task.done(), "worker must be cancelled/done at last-account teardown"
+        mock_dismiss_last.assert_called_once_with(
+            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+        )
+        assert registry.async_get(quota_entity_id) is None, "quota sensor must be de-registered"
+        assert registry.async_get(queue_entity_id) is None, "queue sensor must be de-registered"
+        assert "__shared__" not in hass.data.get(DOMAIN, {})
+
+        # --- Re-add: a fresh account creates a BRAND NEW hub ------------------
+        mock_config_entry_c = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                "auth_implementation": DOMAIN,
+                "token": {
+                    "access_token": "fake-access-token-c",
+                    "refresh_token": "fake-refresh-token-c",
+                    "expires_at": 9999999999.0,
+                    "token_type": "Bearer",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                },
+                "api_key": "test-parcelapp-key-c",
+            },
+            unique_id="user3@gmail.com",
+        )
+        mock_config_entry_c.add_to_hass(hass)
+        await hass.config_entries.async_setup(mock_config_entry_c.entry_id)
+        await hass.async_block_till_done()
+
+        new_hub = hass.data[DOMAIN]["__shared__"]
+        assert isinstance(new_hub, Shop2ParcelHub)
+        assert new_hub is not hub, "re-add must create a FRESH hub object, not reuse the old one"
+        assert new_hub._refcount == 1
+
+        new_quota_entity_id = registry.async_get_entity_id("sensor", DOMAIN, quota_unique_id)
+        new_queue_entity_id = registry.async_get_entity_id("sensor", DOMAIN, queue_unique_id)
+        assert new_quota_entity_id is not None, "exactly one fresh quota sensor must be registered"
+        assert new_queue_entity_id is not None, "exactly one fresh queue sensor must be registered"
+        new_quota_state = hass.states.get(new_quota_entity_id)
+        assert new_quota_state is not None and new_quota_state.state != "unavailable"
+        assert int(new_quota_state.state) == PARCELAPP_DAILY_LIMIT, (
+            "fresh hub must start with a clean quota, not carry over old hub state"
+        )
+
+        # Cleanup: unload the re-added account so the new hub's worker task
+        # is cancelled before the mocked-Store context exits.
+        await hass.config_entries.async_unload(mock_config_entry_c.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# 34-REVIEW-FIX (CR-01): _init_lock must be held across the ENTIRE
+# detach -> conditional-shutdown -> delete sequence in async_unload_entry,
+# symmetric with async_setup_entry's hub-creation AND hub.attach() lock
+# acquisitions. A true concurrency repro (rather than a mock/inspection-only
+# test) is used here: a patched Shop2ParcelHub.async_shutdown pauses on a
+# controlled asyncio.Event mid-teardown, and a second account's
+# async_setup_entry is started while that pause is in effect — proving (not
+# just asserting) that the second setup cannot observe or attach to the
+# dying hub while the first entry's teardown is still holding the lock.
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_setup_during_last_account_teardown_does_not_orphan_new_account(
+    hass, mock_config_entry, mock_config_entry_b
+):
+    """CR-01 (34-REVIEW.md): a second account's async_setup_entry running
+    concurrently with the LAST existing account's async_unload_entry must
+    not attach to a hub instance that is mid-teardown.
+
+    Forces the exact interleaving the review describes: async_unload_entry's
+    hub.async_shutdown() is made to pause (via a controlled asyncio.Event)
+    after refcount has already reached 0 but before the final ``del
+    hass.data[DOMAIN]["__shared__"]``. While paused, a second entry's
+    async_setup_entry is started — it must block on ``_init_lock`` (not skip
+    ahead to attach onto the still-present, dying hub reference), and only
+    after the teardown completes and releases the lock does the new entry
+    correctly observe an empty hass.data[DOMAIN] and create + attach to a
+    brand-new hub.
+    """
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    mock_config_entry.add_to_hass(hass)
+
+    shutdown_started = asyncio.Event()
+    release_shutdown = asyncio.Event()
+    original_async_shutdown = Shop2ParcelHub.async_shutdown
+
+    async def _blocking_async_shutdown(self):
+        shutdown_started.set()
+        await release_shutdown.wait()
+        await original_async_shutdown(self)
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_hub_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_hub_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_hub_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+
+        # Only A is set up first — a single-account fleet, so A's removal
+        # below is the last-account (refcount 0) teardown path.
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+        old_hub = hass.data[DOMAIN]["__shared__"]
+        assert old_hub._refcount == 1
+
+        # B is added to hass only NOW — after the component is already set
+        # up — so its own async_setup() call below does not get folded into
+        # a bulk "set up all not-yet-loaded entries" pass together with A.
+        mock_config_entry_b.add_to_hass(hass)
+
+        with patch.object(Shop2ParcelHub, "async_shutdown", _blocking_async_shutdown):
+            unload_task = hass.async_create_task(
+                hass.config_entries.async_unload(mock_config_entry.entry_id)
+            )
+            # Let the unload coroutine run up to (and into) the patched
+            # async_shutdown — by this point it has already detached A
+            # (refcount 0) and is holding _init_lock while paused mid-teardown.
+            await shutdown_started.wait()
+
+            init_lock = hass.data[DOMAIN]["_init_lock"]
+            assert init_lock.locked(), (
+                "CR-01: _init_lock must still be held while async_shutdown is "
+                "in-flight (mid-teardown), not released before shutdown runs"
+            )
+            # The old (dying) hub is still referenced in hass.data at this
+            # point — this is exactly the unguarded window the pre-fix code
+            # left open for a concurrent setup to attach onto.
+            assert hass.data[DOMAIN]["__shared__"] is old_hub
+
+            setup_task = hass.async_create_task(
+                hass.config_entries.async_setup(mock_config_entry_b.entry_id)
+            )
+            # Give the setup task several chances to run — it must block on
+            # _init_lock (both at the hub-creation check and at hub.attach())
+            # and therefore make no progress while release_shutdown is unset.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not setup_task.done(), (
+                "CR-01: a concurrent async_setup_entry must block on "
+                "_init_lock while the last account's teardown is in flight"
+            )
+            assert hass.data[DOMAIN]["__shared__"] is old_hub, (
+                "the blocked setup must not have attached to (or replaced) "
+                "the still-present dying hub while unload holds the lock"
+            )
+
+            # Now let the teardown finish.
+            release_shutdown.set()
+            await unload_task
+            await setup_task
+
+        assert setup_task.result() is True
+
+        new_hub = hass.data[DOMAIN]["__shared__"]
+        assert new_hub is not old_hub, (
+            "CR-01: the new account must attach to a FRESH hub, never the torn-down instance"
+        )
+        assert new_hub._refcount == 1
+        assert mock_config_entry_b.entry_id in new_hub._coordinators
+        assert new_hub._worker_task is not None and not new_hub._worker_task.done(), (
+            "the new hub's worker must be alive — not inherited from the cancelled zombie worker"
+        )
+
+        # Cleanup: unload B so its hub's worker task is cancelled before the
+        # mocked-Store context exits.
+        await hass.config_entries.async_unload(mock_config_entry_b.entry_id)

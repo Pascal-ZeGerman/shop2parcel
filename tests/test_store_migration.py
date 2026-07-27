@@ -1007,11 +1007,13 @@ async def test_phase26_counters_persist_across_restart(
     mock_config_entry,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """P26-CNT-04: total_forwarded / last_forwarded_ts / used_today / used_today_date
-    survive a save → fresh-load round-trip (simulates HA restart).
+    """P26-CNT-04: total_forwarded / last_forwarded_ts survive a save -> fresh-load
+    round-trip (simulates HA restart).
 
-    Wave 0 RED: fails until the four Phase 26 store keys are wired in
-    _async_load_store and _async_save_store.
+    Phase 31 (D-08): used_today / used_today_date are dropped from this coordinator-level
+    round-trip test — they no longer live in the per-entry store at all. The equivalent
+    round-trip coverage for the shared hub's used_today/used_today_date now lives in
+    test_hub.py's test_async_load_quota_round_trip_after_restart (31-02).
     """
     mock_config_entry.add_to_hass(hass)
     with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
@@ -1030,22 +1032,19 @@ async def test_phase26_counters_persist_across_restart(
     # Seed Phase 26 counter state
     coord._total_forwarded = 7
     coord._last_forwarded_ts = 1700000000
-    coord._used_today = 3
-    coord._used_today_date = "2026-06-24"
 
     # Trigger save
     await coord._async_save_store()
 
-    # Verify payload contains all four keys
+    # Verify payload contains both coordinator-owned keys.
     assert captured_payload.get("total_forwarded") == 7, (
         "_async_save_store must persist total_forwarded"
     )
     assert captured_payload.get("last_forwarded_ts") == 1700000000, (
         "_async_save_store must persist last_forwarded_ts"
     )
-    assert captured_payload.get("used_today") == 3, "_async_save_store must persist used_today"
-    assert captured_payload.get("used_today_date") == "2026-06-24", (
-        "_async_save_store must persist used_today_date"
+    assert "used_today" not in captured_payload, (
+        "used_today must NOT be in the per-entry payload — it lives only in the hub store"
     )
 
     # Now simulate a fresh coordinator loading from the saved store
@@ -1057,8 +1056,6 @@ async def test_phase26_counters_persist_across_restart(
 
     assert coord2._total_forwarded == 7, "total_forwarded must be restored from store"
     assert coord2._last_forwarded_ts == 1700000000, "last_forwarded_ts must be restored from store"
-    assert coord2._used_today == 3, "used_today must be restored from store"
-    assert coord2._used_today_date == "2026-06-24", "used_today_date must be restored from store"
 
 
 # ---------------------------------------------------------------------------
@@ -1271,49 +1268,16 @@ async def test_load_store_seeds_pending_shipments_from_restored(hass, mock_confi
     assert coord._pending_shipments == coord._restored_shipments
 
 
-async def test_used_today_rollover_persist_before_first_poll_preserves_restored_shipments(
-    hass, mock_config_entry
-):
-    """CR-02 regression: a used_today-rollover persist (midnight timer / property read)
-    that fires BEFORE the first successful poll must snapshot the restored shipments —
-    not an empty dict that permanently wipes persisted_shipments from disk."""
-    mock_config_entry.add_to_hass(hass)
-    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=dict(_RESTORED_STORE))
-        delay_save = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save
-        coord = GmailCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
-        # Force a UTC date rollover (the _on_midnight / used_today read path).
-        coord._used_today_date = "2000-01-01"
-        coord._maybe_reset_used_today()
-    assert delay_save.called, "rollover must still persist outside debug mode"
-    snapshot = delay_save.call_args[0][0]()
-    assert "MSG_RESTORED" in snapshot["persisted_shipments"], (
-        "timer-driven persist before the first poll must not wipe restored shipments"
-    )
-
-
-async def test_quota_expiry_persist_before_first_poll_preserves_restored_shipments(
-    hass, mock_config_entry
-):
-    """CR-02 regression: the quota-expiry timer persist must also carry restored shipments."""
-    from datetime import UTC, datetime
-
-    mock_config_entry.add_to_hass(hass)
-    with _patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=dict(_RESTORED_STORE))
-        delay_save = MagicMock()
-        mock_store_cls.return_value.async_delay_save = delay_save
-        coord = GmailCoordinator(hass, mock_config_entry)
-        await coord._async_load_store()
-        coord._quota_exhausted_until = int(datetime.now(UTC).timestamp()) - 10
-        coord._on_quota_expiry(datetime.now(UTC))
-    assert delay_save.called, "quota-expiry clear must still persist outside debug mode"
-    snapshot = delay_save.call_args[0][0]()
-    assert "MSG_RESTORED" in snapshot["persisted_shipments"], (
-        "quota-expiry persist before the first poll must not wipe restored shipments"
-    )
+# Phase 31 (D-08): test_used_today_rollover_persist_before_first_poll_preserves_restored_shipments
+# and test_quota_expiry_persist_before_first_poll_preserves_restored_shipments are removed.
+# Both guarded a CR-02 regression where a COORDINATOR-owned timer callback
+# (_maybe_reset_used_today / _on_quota_expiry) fired a per-entry store persist before
+# the first poll. Both timers — and the coordinator methods themselves — are gone: the
+# hub now owns the only used_today-rollover and quota-expiry timers (31-01/31-03), and
+# they operate on the shared shop2parcel.__shared__ store, entirely separate from this
+# coordinator's persisted_shipments. The scenario these two tests guarded against is
+# now structurally impossible on the coordinator — no coordinator-level timer exists
+# that could persist before the first poll.
 
 
 async def test_load_store_renormalizes_submitted_tracking_numbers(hass, mock_config_entry):

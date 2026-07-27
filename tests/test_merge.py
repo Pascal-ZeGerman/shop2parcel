@@ -410,6 +410,196 @@ def test_real_carrier_conflict_still_recorded() -> None:
     assert conflicts == [{"field": "carrier_name", "stage1": "USPS", "stage2": "UPS"}]
 
 
+def test_grounding_none_and_blank_values_pass() -> None:
+    """MRG-05: validate_grounding(None, ...) and validate_grounding("  ", ...) have
+    nothing to gate — both return (value, True, None) unchanged."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    assert validate_grounding(None, "any prose") == (None, True, None)
+    assert validate_grounding("  ", "any prose") == ("  ", True, None)
+
+
+def test_grounding_no_content_tokens_rejected() -> None:
+    """MRG-05: a pure numeric/punctuation value has zero content tokens (numbers
+    excluded, alpha-only len>=3) — rejected with reason='no_content_tokens'."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    value, ok, reason = validate_grounding("#1234", "your order 1234 shipped via ups")
+    assert value == "#1234"
+    assert ok is False
+    assert reason == "no_content_tokens"
+
+
+_TRIGGER_PROSE = (
+    "Hi there, your order #1234 has been shipped and is on its way to you. "
+    "Your package was shipped via UPS. Tracking number: 1Z999AA10123456784"
+)
+_BLOOMWILD_PROSE = "Your order from Bloom & Wild has shipped. Letterbox Bouquet arrives soon."
+_TARGET_PROSE = "Your order from Target has shipped: Coffee maker included."
+
+
+def test_grounding_grounded_value_passes() -> None:
+    """MRG-05 GOOD case (spike 007 bloomwild): merchant+product tokens present in
+    body prose — the gate PASSES."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    value, ok, reason = validate_grounding("Bloom & Wild - Letterbox Bouquet", _BLOOMWILD_PROSE)
+    assert value == "Bloom & Wild - Letterbox Bouquet"
+    assert ok is True
+    assert reason is None
+
+
+def test_grounding_ungrounded_value_rejected() -> None:
+    """MRG-05 BAD case (spike 007 HALLUCINATION_TRIGGER): fabricated merchant/product
+    with zero tokens present in body prose — the gate REJECTS with reason='ungrounded'."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    value, ok, reason = validate_grounding("Target - Coffee maker", _TRIGGER_PROSE)
+    assert value == "Target - Coffee maker"
+    assert ok is False
+    assert reason == "ungrounded"
+
+
+def test_grounding_rejects_coincidental_substring_match() -> None:
+    """CR-01 regression: a value token that is merely a SUBSTRING of an unrelated
+    word already present in the prose (e.g. 'rack' inside 'tracking') must NOT
+    ground the claim -- only a whole-word match counts. Prior to the CR-01 fix,
+    `validate_grounding` used plain substring containment
+    (`token in source_text.lower()`), so a fabricated 'Rack Room Shoes' merchant
+    name spuriously PASSED the gate purely because _TRIGGER_PROSE contains
+    'Tracking number: ...'. This must be rejected as ungrounded."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    value, ok, reason = validate_grounding("Rack Room Shoes", _TRIGGER_PROSE)
+    assert value == "Rack Room Shoes"
+    assert ok is False
+    assert reason == "ungrounded"
+
+
+def test_grounding_platform_conflation_rejected() -> None:
+    """MRG-05 BAD case (spike 007 platform conflation): 'shopify' is in
+    _BOILERPLATE_DENYLIST and 'your'/'order' are stopwords, so _content_tokens()
+    is empty -> reason='no_content_tokens' (fails closed, not 'ungrounded')."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    value, ok, reason = validate_grounding("Shopify - Your order", _TRIGGER_PROSE)
+    assert value == "Shopify - Your order"
+    assert ok is False
+    assert reason == "no_content_tokens"
+
+
+def test_sender_subject_exclusion_body_only_rejects() -> None:
+    """SC-2 (spike 012's confirmed blind-spot fix): a 'Customer Care'-style value
+    whose tokens appear only in envelope context (never in body-only prose) is
+    rejected — sender/subject header tokens are never grounding evidence."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    value, ok, reason = validate_grounding("Customer Care - Your order #1234", _TRIGGER_PROSE)
+    assert value == "Customer Care - Your order #1234"
+    assert ok is False
+    assert reason == "ungrounded"
+
+
+def test_sender_subject_exclusion_enriched_would_spuriously_pass() -> None:
+    """SC-2 companion (spike 012): documents WHY body-only prose is required as
+    source_text — the SAME value spuriously PASSES if an enriched string
+    containing 'Customer Care' (as it would appear in an Email From: header)
+    were passed as source_text instead of body-only prose."""
+    from custom_components.shop2parcel.merge import validate_grounding  # noqa: PLC0415
+
+    enriched = f'Email From: "Customer Care" <updates@example.com>\n\n{_TRIGGER_PROSE}'
+    value, ok, _reason = validate_grounding("Customer Care - Your order #1234", enriched)
+    assert value == "Customer Care - Your order #1234"
+    assert ok is True, (
+        "Documents the blind spot: enriched source_text (header tokens) spuriously "
+        "grounds the value — this is exactly why source_text MUST be body-only prose."
+    )
+
+
+def test_grounding_content_tokens_extraction() -> None:
+    """MRG-05: _content_tokens() lowercases, keeps alpha tokens len>=3, strips
+    stopwords/denylist. All-stopword input yields an empty set."""
+    from custom_components.shop2parcel.merge import _content_tokens  # noqa: PLC0415
+
+    assert _content_tokens("Bloom & Wild") == {"bloom", "wild"}
+    assert _content_tokens("Your order shipped") == set()
+
+
+def test_grounding_wrapper_returns_four_tuple() -> None:
+    """MRG-05: merge_llm_authoritative_with_grounding returns a 4-tuple
+    (merged, conflicts, gate_rejections, grounding_rejections) — a DELIBERATE
+    deviation from the spike blueprint's 3-tuple (RESEARCH.md Pitfall 3)."""
+    from custom_components.shop2parcel.merge import (  # noqa: PLC0415
+        merge_llm_authoritative_with_grounding,
+    )
+
+    stage1 = _make_shipment()
+    result = _make_result(locked={})
+    returned = merge_llm_authoritative_with_grounding(stage1, result, "")
+    assert len(returned) == 4
+
+
+def test_grounding_wrapper_discards_ungrounded_order_summary() -> None:
+    """MRG-05 discard-not-conflict: Stage-1 order_summary is None (never populated
+    by Stage-1), Stage-2 fabricates 'Target - Coffee maker', source_text is the
+    ungrounded trigger prose -> the wrapper discards it back to the Stage-1
+    sentinel (None) and records a grounding rejection distinct from
+    gate_rejections."""
+    from custom_components.shop2parcel.merge import (  # noqa: PLC0415
+        merge_llm_authoritative_with_grounding,
+    )
+
+    stage1 = _make_shipment()
+    assert stage1.order_summary is None
+    result = _make_result(locked={"order_summary": "Target - Coffee maker"})
+    merged, _conflicts, gate_rejections, grounding_rejections = (
+        merge_llm_authoritative_with_grounding(stage1, result, _TRIGGER_PROSE)
+    )
+    assert merged.order_summary is None
+    assert grounding_rejections == [
+        {"field": "order_summary", "clean": "Target - Coffee maker", "reason": "ungrounded"}
+    ]
+    assert gate_rejections == []
+
+
+def test_grounding_wrapper_keeps_grounded_order_summary() -> None:
+    """MRG-05: same fabricated-looking value, but source_text now contains the
+    merchant/product tokens -> the wrapper keeps the Stage-2 value; no
+    grounding rejection recorded."""
+    from custom_components.shop2parcel.merge import (  # noqa: PLC0415
+        merge_llm_authoritative_with_grounding,
+    )
+
+    stage1 = _make_shipment()
+    result = _make_result(locked={"order_summary": "Target - Coffee maker"})
+    merged, _conflicts, _gate_rejections, grounding_rejections = (
+        merge_llm_authoritative_with_grounding(stage1, result, _TARGET_PROSE)
+    )
+    assert merged.order_summary == "Target - Coffee maker"
+    assert grounding_rejections == []
+
+
+def test_grounding_wrapper_noop_on_real_stage1() -> None:
+    """MRG-05: the wrapper only acts when _stage1_missing() is True. Stage-1 has a
+    REAL order_name ('#5678') -> the wrapper does not touch order_name at all;
+    MRG-03's existing conflict handling inside merge_llm_authoritative governs
+    it (Stage-1 wins, conflict recorded), and grounding_rejections stays empty
+    for that field."""
+    from custom_components.shop2parcel.merge import (  # noqa: PLC0415
+        merge_llm_authoritative_with_grounding,
+    )
+
+    stage1 = _make_shipment(order_name="#5678")
+    result = _make_result(locked={"order_name": "Fabricated Brand"})
+    merged, conflicts, _gate_rejections, grounding_rejections = (
+        merge_llm_authoritative_with_grounding(stage1, result, _TRIGGER_PROSE)
+    )
+    assert merged.order_name == "#5678"
+    assert len(conflicts) == 1
+    assert conflicts[0]["field"] == "order_name"
+    assert grounding_rejections == []
+
+
 def test_empty_stage1_tracking_number_gets_gated_promotion() -> None:
     """WR-02 + MRG-04: an (anomalous) empty Stage-1 tracking_number routes to the
     promotion path, where the strict carrier-format gate still applies."""

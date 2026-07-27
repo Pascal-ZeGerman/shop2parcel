@@ -11,12 +11,14 @@ Locked decisions (CONTEXT.md):
 - D-04: Store schema {"submitted_tracking_numbers": [...], "quota_exhausted_until": int | None, "persisted_shipments": {msg_id: ShipmentData-as-dict}}.
 - D-05: Quota exhausted -> polls continue, POST step skipped.
 - D-06: quota_exhausted_until = err.reset_at OR next_midnight_utc().
-- Phase 18: Stage2Job frozen dataclass + async_start_stage2/async_stop_stage2/_enqueue_stage2 base methods (QUE-01, QUE-03, QUE-06).
+- Phase 18: Stage2Job frozen dataclass + _enqueue_stage2 base method (QUE-01, QUE-03, QUE-06).
+- Phase 32 (D-03/D-04): the per-entry queue/worker (async_start_stage2/async_stop_stage2/
+  _async_stage2_worker) are retired in favor of the shared hub queue + worker
+  (hub.py); async_setup_stage2_extractor builds only this account's extractor.
 """
 
 from __future__ import annotations
 
-import asyncio
 import email as _email_stdlib
 import logging
 import re
@@ -25,15 +27,13 @@ from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta
-from datetime import time as dt_time
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -58,24 +58,27 @@ from .const import (
     CONF_OLLAMA_TIMEOUT,
     CONF_OLLAMA_URL,
     CONF_POLL_INTERVAL,
-    CONF_QUEUE_MAXLEN,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
-    DEFAULT_QUEUE_MAXLEN,
     DOMAIN,
+    MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
     MAX_STAGE2_FALLBACK_INLINE_SECONDS,
     MAX_STAGE2_POSTS_PER_POLL,
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
-    STAGE2_NOTIFY_COOLDOWN_S,
-    STAGE2_NOTIFY_THRESHOLD,
+    EnqueueOutcome,
     normalize_tracking_number,
     stage2_cap_notification_id,
-    stage2_failing_notification_id,
 )
-from .extractors.ollama_extractor import OllamaExtractor
-from .merge import merge_llm_authoritative
+from .extractors.ollama_extractor import OllamaExtractor, preprocess_html
+from .merge import merge_llm_authoritative_with_grounding, validate_grounding
+
+if TYPE_CHECKING:
+    # Phase 30-03: hub.py imports coordinator.py, so a module-level runtime import
+    # here would create a circular import. TYPE_CHECKING-only import lets self._hub
+    # be typed without one.
+    from .hub import Shop2ParcelHub
 
 if TYPE_CHECKING:
     # Phase 30-03: hub.py imports coordinator.py, so a module-level runtime import
@@ -172,32 +175,6 @@ def _extract_imap_email_meta(raw_bytes: bytes) -> dict:
         return {"subject": "", "from": "", "date": "", "snippet": ""}
 
 
-def _next_midnight_utc() -> int:
-    """Compute epoch seconds for the next 00:00 UTC.
-
-    Per CONTEXT.md D-06: when ParcelAppQuotaError.reset_at is None, fall back
-    to the next UTC midnight so the backoff aligns with parcelapp's daily reset.
-    """
-    today_utc = datetime.now(UTC).date()
-    return int(
-        datetime.combine(
-            today_utc + timedelta(days=1),
-            dt_time.min,
-            tzinfo=UTC,
-        ).timestamp()
-    )
-
-
-def _today_utc_str() -> str:
-    """Return today's UTC date as 'YYYY-MM-DD' string.
-
-    Used for UTC date-rollover check in _maybe_reset_used_today.
-    UTC has no DST so the rollover is always at exactly 00:00 UTC.
-    (Phase 26 RESEARCH Pitfall 3 — always use UTC, not local time.)
-    """
-    return datetime.now(UTC).strftime("%Y-%m-%d")
-
-
 def _valid_nonneg_int(value: object) -> bool:
     """True only for a genuine non-negative int.
 
@@ -240,6 +217,11 @@ class Stage2Job:
     message_id: Gmail message ID or IMAP UID — for _emit_scan_event attribution (D-06).
     meta: Email metadata dict {'subject': str, 'from': str} — for _emit_scan_event
         attribution (D-06). Populated from _extract_email_meta / _extract_imap_email_meta.
+    entry_id: Phase 32 (D-11, WORK-02) — the originating config entry's id. The shared
+        hub worker resolves entry_id to whichever coordinator is CURRENTLY attached under
+        that id at dispatch time (not the coordinator instance that existed at enqueue
+        time), so a reload (remove+add, same entry_id) lands the in-flight result on the
+        fresh coordinator instead of a torn-down one.
     prefetched_result: Phase 27 fix — a Stage2Result already produced by the Ollama
         fallback gatekeeper (gmail_coordinator). When set, the worker reuses it instead of
         calling the extractor a second time on the same HTML (avoids double extraction).
@@ -256,6 +238,7 @@ class Stage2Job:
     html_body: str
     message_id: str
     meta: dict
+    entry_id: str
     prefetched_result: Any | None = None
     raw_msg_id: str | None = None
 
@@ -329,6 +312,14 @@ class PollStats:
     carrier_format_rejected_total: int = 0
     last_carrier_format_rejected_value: str | None = None  # CLEANED canonical form (D-06)
     last_carrier_format_rejected_reason: str | None = None
+    # Phase 35 Plan 03 (MRG-05): grounding-gate rejection counter. In-memory,
+    # not persisted — resets to 0 on HA restart (same lifecycle as
+    # carrier_format_rejected_total). Deliberately SEPARATE from that counter
+    # (RESEARCH.md Pitfall 3) so CarrierFormatRejectionsSensor's existing
+    # semantics (tracking-number format rejections only) stay intact.
+    grounding_rejected_total: int = 0
+    last_grounding_rejected_value: str | None = None
+    last_grounding_rejected_reason: str | None = None
 
     def record_llm_call(self, latency_ms: float, *, fence_retry: bool) -> None:
         """Accumulate one successful LLM call into the latency and retry counters."""
@@ -351,6 +342,19 @@ class PollStats:
         self.carrier_format_rejected_total += 1
         self.last_carrier_format_rejected_value = clean_value
         self.last_carrier_format_rejected_reason = reason
+
+    def record_grounding_rejection(self, clean_value: str, reason: str) -> None:
+        """Increment the MRG-05 grounding-rejection counter and record the last value/reason.
+
+        Must only be called from HA-holding callers (coordinator.py) — not from merge.py (D-02).
+        In-memory only, no STORAGE_VERSION bump — mirrors record_carrier_format_rejection but
+        stays on its own counter (RESEARCH.md Pitfall 3): a grounding rejection (fabricated
+        order_name/order_summary) must never be conflated with a carrier-format (tracking-number)
+        rejection, which CarrierFormatRejectionsSensor's semantics specifically describe.
+        """
+        self.grounding_rejected_total += 1
+        self.last_grounding_rejected_value = clean_value
+        self.last_grounding_rejected_reason = reason
 
 
 class Shop2ParcelStore(Store):
@@ -502,7 +506,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # prefetched_result was simply discarded — doubling inference per capped
         # job). FIFO-bounded at _FALLBACK_PREFETCH_CACHE_MAXLEN; in-memory only.
         self._fallback_prefetch_cache: OrderedDict[str, Any] = OrderedDict()
-        self._quota_exhausted_until: int | None = None
         # Phase 7 (D-04): in-memory diagnostic accumulator. Resets on HA restart.
         self._diagnostics: PollStats = PollStats()
         # Phase 13.1: shipment persistence across HA restarts.
@@ -520,25 +523,23 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Phase 26: operational-health persisted counters.
         # Persisted across HA restarts via additive store keys (no STORAGE_VERSION bump).
         # Incremented only on genuine 2xx POST-success via _record_forward().
-        # _used_today_date holds the UTC date string when _used_today was last reset.
+        # Phase 31 (D-08): used_today/used_today_date moved to the shared hub —
+        # coordinator.used_today is now a thin delegating property (see below).
         self._total_forwarded: int = 0
         self._last_forwarded_ts: int | None = None
-        self._used_today: int = 0
-        self._used_today_date: str = ""
         self._store_loaded: bool = False
-        # Phase 18 CR-01: sentinel so async_stop_stage2 is safe to call before
-        # async_start_stage2 (e.g. Phase 19 worker or a reload race).
-        self._stage2_queue: asyncio.Queue[Stage2Job] | None = None
-        self._stage2_enqueued_keys: set[str] = set()
-        # Phase 19: worker task and extractor sentinels — None until async_start_stage2.
-        self._stage2_worker_task: asyncio.Task | None = None
+        # Phase 32 (D-03/D-04): the per-entry queue/worker (_stage2_queue,
+        # _stage2_enqueued_keys, _stage2_worker_task) are retired — the shared hub
+        # queue + single hub worker (hub.py) replace them entirely. Only the
+        # per-account extractor sentinel remains, set by
+        # async_setup_stage2_extractor.
         self._extractor: OllamaExtractor | None = None
-        # Phase 20 MRG-05 / D-11: per-poll Stage-2 POST counters.
-        # Both are reset at the top of each poll cycle via _reset_stage2_poll_counters().
-        # _stage2_posts_this_poll: count of successful Stage-2 POSTs in the current poll.
+        # Phase 20 MRG-05 / D-11: per-poll Stage-2 POST counter.
+        # Reset at the top of each poll cycle via _reset_stage2_poll_counters().
+        # Phase 31 (D-08): the POST-count-toward-cap counter (_stage2_posts_this_poll)
+        # moved to the shared hub (hub.poll_cap_reached()/record_poll_post()).
         # _stage2_cap_notified_this_poll: True once the cap notification has been fired
         #   this poll — ensures at most one HA notification per poll (D-10 / T-20-03-02).
-        self._stage2_posts_this_poll: int = 0
         self._stage2_cap_notified_this_poll: bool = False
         # Phase 23 AC-8: throttles the quota-skip WARNING to at most one per poll
         # (mirrors _stage2_cap_notified_this_poll). Reset in _reset_stage2_poll_counters.
@@ -566,19 +567,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # email_processing_active property.  Never modified inside _async_update_data itself —
         # only the subclass poll methods touch this flag.
         self._poll_in_progress: bool = False
-        # Phase 21 FAIL-04/05: consecutive-failure streak across polls + notification cooldown timestamp.
-        # Persist across polls; reset only on real success (line 710) or async_stop_stage2 (SPEC Req #5).
+        # Phase 21 FAIL-04/05: consecutive-failure streak across polls (per-account telemetry).
+        # Persist across polls; reset only on real success (_record_stage2_success).
+        # Phase 32 (D-04): the async_stop_stage2 reset path is retired — a fresh
+        # coordinator instance on reload already defaults this to 0, so no
+        # replacement reset is needed.
+        # Phase 34 (DIAG-03/D-05): the per-account notification (and its cooldown
+        # timestamp, formerly _stage2_last_notify_ts) is retired — the hub now owns
+        # the single consolidated notification; this counter stays as telemetry.
         self._stage2_consecutive_failures: int = 0
-        self._stage2_last_notify_ts: float | None = None
-        # Finding 3: time-boundary refresh timers for the should_poll=False operational
-        # entities. quota_is_exhausted / used_today flip by the passage of time (no event),
-        # so without these the Problem + Quota sensors stay stale until the next poll.
-        # Gated by _operational_timers_enabled (set True only from async_setup_entry via
-        # enable_operational_timers) so bare-coordinator unit tests that assign
-        # _quota_exhausted_until directly never schedule real (lingering) timers.
-        self._operational_timers_enabled: bool = False
-        self._quota_expiry_unsub: CALLBACK_TYPE | None = None
-        self._midnight_unsub: CALLBACK_TYPE | None = None
+        # Phase 31 (D-08): the per-account time-boundary refresh timers (quota-expiry +
+        # UTC-midnight used_today) are removed — the hub now owns exactly 3 shared timers
+        # (armed once in hub.async_setup(), cancelled once in hub.async_shutdown()),
+        # replacing the old 2N-per-account timer pattern.
         # NOTE: _email_client construction moves to subclass __init__
         # (GmailCoordinator sets GmailClient; ImapCoordinator sets ImapClient)
 
@@ -592,7 +593,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         Defined here on the base class (DRY) so both subclasses share a single
         implementation without duplicating the attribute reset logic.
         """
-        self._stage2_posts_this_poll = 0
+        # Phase 31 (D-08): the shared poll counter now resets on the hub's own
+        # HUB_STAGE2_POLL_WINDOW timer, not here.
         self._stage2_cap_notified_this_poll = False
         self._stage2_quota_warned_this_poll = False
         # Phase 27 Plan 03: reset fallback extraction counter (mirrors _stage2_posts_this_poll).
@@ -740,55 +742,45 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         """True when this entry is in debug/dry-run mode.
 
         CR-02: single helper for the DBG-03 "zero store writes in debug mode"
-        contract, so timer-driven persist paths (_maybe_reset_used_today,
-        _on_quota_expiry, async_stop_stage2) apply the same gate the poll paths
-        already honour. Safe on bare-coordinator tests: returns False when no
-        config_entry is attached.
+        contract, so timer-driven persist paths apply the same gate the poll
+        paths already honour. Safe on bare-coordinator tests: returns False
+        when no config_entry is attached.
         """
         return self.config_entry is not None and bool(
             self.config_entry.options.get(CONF_DEBUG_MODE, False)
         )
 
-    def _maybe_reset_used_today(self) -> None:
-        """Reset used_today to 0 on UTC date rollover.
-
-        Called at the start of _record_forward and from the used_today property read
-        path so the ParcelApp Quota sensor always reflects the current day's count.
-        UTC has no DST — rollover is deterministic at 00:00 UTC.
-        (Phase 26 RESEARCH Pattern 5 / Pitfall 3.)
-        """
-        today = _today_utc_str()
-        if self._used_today_date != today:
-            self._used_today = 0
-            self._used_today_date = today
-            # Finding 5: persist the rollover so a restart before the next forward does
-            # not restore yesterday's count. Fires only on an actual rollover (at most
-            # once per UTC day); _persist_state is await-free so it is safe here even
-            # when reached via the synchronous used_today property read path.
-            # CR-02: skipped in debug mode (DBG-03 zero-store-writes) — previously this
-            # timer-driven persist snapshotted the empty debug-mode _pending_shipments
-            # and wiped persisted_shipments from disk at the first UTC midnight.
-            if not self._debug_mode_active():
-                self._persist_state()
-
     def _record_forward(self) -> None:
         """Record one genuine 2xx POST success to ParcelApp.
 
-        Increments total_forwarded, used_today (with UTC date-rollover reset),
-        and updates last_forwarded_ts to the current epoch second.
+        Increments total_forwarded and updates last_forwarded_ts to the current
+        epoch second.
 
         MUST be called ONLY on the genuine 2xx success path — never on
         ParcelAppAlreadyAddedError or ParcelAppInvalidTrackingError, which do NOT
-        consume ParcelApp quota and do NOT represent forwarding a new shipment.
+        represent forwarding a new shipment (total_forwarded is a lifetime count
+        of distinct shipments actually forwarded, not of POST attempts).
         (Phase 26 RESEARCH Pitfall 1 / Pitfall 6 / STRIDE T-26-02.)
+
+        WR-01 (31-REVIEW): "do NOT consume ParcelApp quota" above refers only to
+        this method's own total_forwarded counter, NOT to the shared daily
+        API-budget reserve. That reserve is a different concept, owned by
+        hub.try_consume()/hub.refund_consume() (Phase 31, D-08) — reserved
+        BEFORE every POST and, by deliberate policy, deliberately NOT refunded
+        on AlreadyAdded/InvalidTracking at any of the four POST call sites
+        (Gmail inline, IMAP inline, drain loop, Stage-2 worker): from
+        ParcelApp's point of view those outcomes still occupied a real
+        daily-budget slot, even though they don't bump total_forwarded here.
+
+        Phase 31 (D-08): the daily-budget increment (used_today) now happens at
+        the hub.try_consume() reserve, BEFORE the POST — never here. This method
+        only tracks the per-account operational total_forwarded/last_forwarded_ts.
 
         Does NOT call _async_save_store; the existing save at each call site handles
         persistence so we avoid an extra debounce scheduling.
         """
-        self._maybe_reset_used_today()
         self._total_forwarded += 1
         self._last_forwarded_ts = int(_time.time())
-        self._used_today += 1
 
     def _record_stage2_failure(self, job: Stage2Job, err: Exception) -> None:
         """Centralize loud-surface side effects for a Stage-2 Ollama or worker-outer failure.
@@ -797,18 +789,28 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         counter + threshold notification with 1-hour cooldown) per D-01..D-09.
 
         Pure-surface contract (D-04): does NOT touch control flow — callers must still
-        call self._stage2_enqueued_keys.discard() and return/raise as appropriate.
+        return/raise as appropriate. Phase 32: the in-flight dedup/cap release this
+        docstring used to describe as a caller obligation is now the shared hub
+        worker's sole responsibility (its single finally block) — this coordinator
+        no longer owns that structure at all.
 
         Counter scope (D-05): ONLY called from Ollama except and worker-outer except sites —
         ParcelApp errors (Auth/Quota/AlreadyAdded/InvalidTracking/Transient) are handled
         inline and never routed through this helper, so the counter tracks Ollama failures only.
 
         Persistence (D-07): counter persists across polls; reset only on real success
-        (_record_stage2_success, D-06) or async_stop_stage2 (SPEC Req #5).
+        (_record_stage2_success, D-06). Phase 32 (D-04): a fresh coordinator
+        instance on reload already defaults this to 0.
 
         Thin wrapper over _surface_stage2_failure (Phase 27): the Gmail Ollama fallback
         gatekeeper has no Stage2Job at failure time, so the side-effect body lives in the
         kwargs-based helper and both call sites share one consecutive-failure streak.
+
+        Phase 34 (DIAG-03/D-05, T-34-08/T-34-09): also observes this worker-job outcome
+        at the hub, which owns the single consolidated cross-account failure notification.
+        Wired here (not inside _surface_stage2_failure) so the Gmail inline-fallback's
+        non-escalating backlog (escalate=False) never inflates the hub streak — only real
+        worker-path failures (this method) are observed.
         """
         self._surface_stage2_failure(
             meta=job.meta,
@@ -816,6 +818,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             normalized_tn=job.normalized_tn,
             err=err,
         )
+        if self._hub is not None:
+            self._hub.record_stage2_worker_failure(self.config_entry.entry_id)  # type: ignore[union-attr]
 
     def _surface_stage2_failure(
         self,
@@ -874,27 +878,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not escalate:
             return
 
-        # FAIL-04: consecutive-failure counter increment + threshold/cooldown notification gate.
+        # FAIL-04: consecutive-failure counter increment (per-account telemetry, D-05).
+        # Phase 34 (DIAG-03): the per-account threshold/cooldown notification gate that
+        # used to live here is retired — the hub now owns the single consolidated
+        # notification (see _record_stage2_failure's hub.record_stage2_worker_failure
+        # call, worker path only).
         self._stage2_consecutive_failures += 1
-
-        # D-09 cooldown state machine: fire if at/past threshold AND (never fired OR cooldown elapsed).
-        if self._stage2_consecutive_failures >= STAGE2_NOTIFY_THRESHOLD and (
-            self._stage2_last_notify_ts is None
-            or _time.time() - self._stage2_last_notify_ts >= STAGE2_NOTIFY_COOLDOWN_S
-        ):
-            # D-08: notification body mentions failure count + Stage-1 still working callout.
-            persistent_notification.async_create(
-                self.hass,
-                message=(
-                    f"Stage-2 extraction has failed {self._stage2_consecutive_failures} times in a row. "
-                    f"Check that the Ollama server is reachable and the configured model is pulled. "
-                    f"The integration continues running with Stage-1 results."
-                ),
-                title="Shop2Parcel Stage-2 Failing",
-                notification_id=stage2_failing_notification_id(self.config_entry.entry_id),  # type: ignore[union-attr]
-            )
-            # Update cooldown timestamp to gate re-fires (D-09).
-            self._stage2_last_notify_ts = _time.time()
 
         # Finding 2: this runs in the background Stage-2 worker, outside any poll's
         # listener dispatch. Push the updated streak to subscribers so ProblemBinarySensor
@@ -907,24 +896,23 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def _record_stage2_success(self) -> None:
         """Centralize loud-surface side effects for a Stage-2 successful POST.
 
-        Implements FAIL-05 (counter reset + notification dismiss) per D-03/D-06.
+        Implements FAIL-05 (counter reset) per D-03/D-06.
 
         Called ONLY from the success path at line 710 (after _stage2_posts_this_poll += 1)
         — D-06 defines 'success' as a real 2xx POST to parcelapp.net. Graceful rejections
         (AlreadyAdded, InvalidTracking), cap-skip, and quota-exhausted-skip do NOT call this.
 
-        The async_dismiss is unconditional (D-04): HA no-ops on unknown notification IDs
-        (Assumption A1 in 21-RESEARCH.md), so no _stage2_consecutive_failures > 0 guard is needed.
         Note (D-03): stage2_succeeded_total increment is Plan 03's job.
+
+        Phase 34 (DIAG-03/D-05, D-07): the per-account persistent_notification.async_dismiss
+        that used to live here is retired — the hub now owns the single consolidated
+        notification and its own dismiss (record_stage2_worker_success), called below.
         """
         self._stage2_consecutive_failures = 0
         # DIAG-02: lifetime success counter; incremented only on real 2xx POST (D-06).
         self._diagnostics.stage2_succeeded_total += 1
-        # FAIL-05: unconditional dismiss — HA is a no-op when the ID is unknown.
-        persistent_notification.async_dismiss(
-            self.hass,
-            notification_id=stage2_failing_notification_id(self.config_entry.entry_id),  # type: ignore[union-attr]
-        )
+        if self._hub is not None:
+            self._hub.record_stage2_worker_success(self.config_entry.entry_id)  # type: ignore[union-attr]
 
     @property
     def diagnostics(self) -> PollStats:
@@ -933,10 +921,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
     @property
     def stage2_queue_depth(self) -> int:
-        """Current Stage-2 queue depth; 0 when stage2 is disabled."""
-        if self._stage2_queue is None:
+        """Per-account Stage-2 in-flight count (hub-tracked); 0 when unattached.
+
+        Phase 32 cutover: reads self._hub.inflight_count(entry_id) — the public
+        accessor for the hub's per-account in-flight set (D-05) — rather than the
+        retired per-entry _stage2_queue.qsize(). Returns 0 when self._hub or
+        self.config_entry is None (mirrors the old "queue is None" 0-default).
+        """
+        if self._hub is None or self.config_entry is None:
             return 0
-        return self._stage2_queue.qsize()
+        return self._hub.inflight_count(self.config_entry.entry_id)
 
     @property
     def stage2_consecutive_failures(self) -> int:
@@ -975,12 +969,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def used_today(self) -> int:
         """Estimated ParcelApp POSTs made today (UTC day); auto-resets on UTC date rollover.
 
-        Calls _maybe_reset_used_today() on each read so the ParcelApp Quota sensor
-        never shows a stale prior-day count even if no forwarding has happened today
-        yet. (Phase 26 RESEARCH Pattern 5.)
+        Phase 31 (D-08): thin delegating property — the daily-budget counter now
+        lives on the shared hub, not per-account. The hub's own used_today
+        property already performs the rollover-on-read (mirrors this property's
+        prior in-place behavior). Safe to call from any code path: attach()
+        always runs before any sensor/coordinator read (see the assert at the
+        dedup call sites above).
         """
-        self._maybe_reset_used_today()
-        return self._used_today
+        assert self._hub is not None  # attach() runs before any sensor read (__init__.py:181)
+        return self._hub.used_today
 
     @property
     def currently_tracked_count(self) -> int:
@@ -996,109 +993,59 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     def quota_is_exhausted(self) -> bool:
         """True when ParcelApp quota is exhausted and the cooldown window has not yet elapsed.
 
-        Public accessor so entities never read the private _quota_exhausted_until attribute.
-        (Phase 26 RESEARCH Pitfall 4 / STRIDE T-26-02.)
+        Phase 31 (D-08): thin delegating property — the shared cooldown window now
+        lives on the hub. Public accessor so entities never read hub internals directly
+        (Phase 26 RESEARCH Pitfall 4 / STRIDE T-26-02, still honoured through the hub).
         """
-        return (
-            self._quota_exhausted_until is not None
-            and int(_time.time()) < self._quota_exhausted_until
-        )
+        assert self._hub is not None  # attach() runs before any sensor read (__init__.py:181)
+        return self._hub.quota_is_exhausted
 
     # ------------------------------------------------------------------
-    # Finding 3: time-boundary refresh timers
+    # Phase 31 TEMPORARY cross-plan compatibility shim (D-08).
     # ------------------------------------------------------------------
+    # WR-05 (31-REVIEW): this shim's original docstring said "remove in 31-05" —
+    # that was already false by the time 31-05 shipped. 31-05 DID finish rewiring
+    # gmail_coordinator.py/imap_coordinator.py onto the hub's public mutators
+    # (hub.quota_is_exhausted / hub.record_quota_exhausted / hub's own
+    # always-armed expiry timer, 31-03) — neither file references
+    # `_quota_exhausted_until` or `_arm_quota_expiry_timer` anymore. What 31-05
+    # did NOT do is migrate the ~40 test references across tests/test_coordinator.py,
+    # tests/test_store_migration.py, tests/test_stage2_worker.py, and
+    # tests/test_binary_sensor.py that still poke this private attribute/method
+    # directly instead of going through hub.quota_is_exhausted /
+    # hub.record_quota_exhausted() / direct hub timer-handle inspection. This
+    # shim is safe to keep — it is a pure passthrough onto the hub's real public
+    # state, private, and test-only — but it should be REMOVED once those four
+    # test files are migrated off it. That migration is real refactoring work,
+    # not yet scheduled to a phase.
+    #
+    # This base-class property + no-op method keep every existing test (and, if
+    # any production caller still existed, real polls) from crashing with
+    # AttributeError, by transparently redirecting the old private-attribute
+    # read/write onto the shared hub's public `quota_exhausted_until` attribute. This is
+    # NOT a scope-creep reimplementation of 31-05's D-01 gate order — it is a raw
+    # passthrough with no max-precedence merge, matching the OLD per-account
+    # raw-overwrite semantics exactly, just now writing into the shared value.
+    @property
+    def _quota_exhausted_until(self) -> int | None:
+        return self._hub.quota_exhausted_until if self._hub is not None else None
 
-    def enable_operational_timers(self) -> None:
-        """Enable the time-boundary refresh timers (finding 3).
-
-        Called once from async_setup_entry after the first refresh. Gated behind a flag
-        so unit tests that construct the coordinator bare (and poke _quota_exhausted_until
-        directly) never schedule real timers — only a fully set-up entry arms them. Arms
-        the quota-expiry timer (in case store hydration loaded a still-future window) and
-        the daily UTC-midnight used_today refresh. Pair with _cancel_operational_timers
-        registered via entry.async_on_unload.
-        """
-        self._operational_timers_enabled = True
-        self._arm_quota_expiry_timer()
-        self._schedule_midnight_refresh()
-
-    def _cancel_operational_timers(self) -> None:
-        """Cancel both refresh timers (registered via entry.async_on_unload).
-
-        Idempotent — safe on every teardown path (clean unload, exception, HA shutdown).
-        """
-        if self._quota_expiry_unsub is not None:
-            self._quota_expiry_unsub()
-            self._quota_expiry_unsub = None
-        if self._midnight_unsub is not None:
-            self._midnight_unsub()
-            self._midnight_unsub = None
+    @_quota_exhausted_until.setter
+    def _quota_exhausted_until(self, value: int | None) -> None:
+        if self._hub is not None:
+            self._hub.quota_exhausted_until = value
 
     def _arm_quota_expiry_timer(self) -> None:
-        """(Re)schedule the one-shot timer that refreshes entities when the ParcelApp
-        quota window expires (finding 3).
+        """No-op backward-compat shim (Phase 31 D-08) — the hub owns its own
+        always-armed quota-expiry timer (31-03); no per-coordinator arming needed.
 
-        Called after every _quota_exhausted_until mutation in the poll/drain paths.
-        No-op unless operational timers are enabled, so direct attribute assignment in
-        tests never leaks a timer. Always cancels any prior quota timer first; schedules
-        a new one only when _quota_exhausted_until is still in the future (a past value
-        is already reported as not-exhausted, and the poll-time clear persists it).
+        WR-05: remove once test_coordinator.py, test_store_migration.py,
+        test_stage2_worker.py, and test_binary_sensor.py are migrated to use
+        hub.quota_is_exhausted / hub.record_quota_exhausted() / direct hub
+        timer-handle inspection instead of this private passthrough — not tied
+        to any specific phase number.
         """
-        if self._quota_expiry_unsub is not None:
-            self._quota_expiry_unsub()
-            self._quota_expiry_unsub = None
-        if not self._operational_timers_enabled:
-            return
-        until = self._quota_exhausted_until
-        if until is None or until <= int(_time.time()):
-            return
-        self._quota_expiry_unsub = async_track_point_in_time(
-            self.hass, self._on_quota_expiry, datetime.fromtimestamp(until, tz=UTC)
-        )
-
-    @callback
-    def _on_quota_expiry(self, _now: datetime) -> None:
-        """Quota window elapsed: clear the stale block, persist, and refresh entities.
-
-        The timer is re-armed on every _quota_exhausted_until change (set or clear), so
-        when it fires it always corresponds to the current window — clear unconditionally.
-        Clearing in memory makes quota_is_exhausted read False immediately; persisting it
-        means the cleared state survives a restart (mirrors the poll-time stale-quota clear).
-        """
-        self._quota_expiry_unsub = None
-        if self._quota_exhausted_until is not None:
-            self._quota_exhausted_until = None
-            # CR-02: honour DBG-03 (zero store writes in debug mode) — the in-memory
-            # clear still happens so quota_is_exhausted reads False immediately.
-            if not self._debug_mode_active():
-                self._persist_state()
-        self.async_update_listeners()
-
-    def _schedule_midnight_refresh(self) -> None:
-        """(Re)schedule the one-shot timer at the next 00:00 UTC that refreshes used_today
-        (finding 3).
-
-        used_today auto-resets on UTC date rollover but only when the property is read;
-        with should_poll=False nothing reads it at midnight, so the Quota sensor can show
-        the prior day's count until the next poll. No-op unless operational timers are
-        enabled. Reschedules itself each midnight.
-        """
-        if self._midnight_unsub is not None:
-            self._midnight_unsub()
-            self._midnight_unsub = None
-        if not self._operational_timers_enabled:
-            return
-        self._midnight_unsub = async_track_point_in_time(
-            self.hass, self._on_midnight, datetime.fromtimestamp(_next_midnight_utc(), tz=UTC)
-        )
-
-    @callback
-    def _on_midnight(self, _now: datetime) -> None:
-        """UTC midnight: force the used_today rollover reset, refresh entities, reschedule."""
-        self._midnight_unsub = None
-        self._maybe_reset_used_today()
-        self.async_update_listeners()
-        self._schedule_midnight_refresh()
+        return
 
     def _emit_scan_event(
         self,
@@ -1136,36 +1083,24 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         d.scan_events.append(event)
         d.scan_events_total += 1
 
-    async def async_start_stage2(self) -> None:
-        """Construct the Stage-2 queue, build OllamaExtractor, and spawn the worker.
+    async def async_setup_stage2_extractor(self) -> None:
+        """Build this account's OllamaExtractor from its own config-entry options.
 
         Called from async_setup_entry when stage2_enabled=True.
 
-        QUE-01: reads CONF_QUEUE_MAXLEN from config entry options, clamps to [1, 256],
-        constructs self._stage2_queue and self._stage2_enqueued_keys.
+        Phase 32 (D-03): this method replaces async_start_stage2 — it ONLY builds
+        the per-account extractor. The per-entry queue/worker it used to construct
+        and spawn are retired; all Stage-2 jobs from every account now enqueue onto
+        the shared hub queue and are drained by the single hub worker (hub.py).
 
-        Phase 19 D-02: spawns the background worker via
-        entry.async_create_background_task after queue and extractor are ready (QUE-04).
-        Phase 19 D-03/D-04: builds OllamaClient and OllamaExtractor once per
-        setup/reload cycle from entry.options; extractor is cached as self._extractor.
+        Phase 19 D-03/D-04 (preserved verbatim): builds OllamaClient and
+        OllamaExtractor once per setup/reload cycle from entry.options; extractor
+        is cached as self._extractor. Each account keeps its own
+        CONF_OLLAMA_URL/model/custom_fields, so the shared worker dispatching to
+        this coordinator via entry_id resolution automatically uses this
+        account's own extractor.
         """
         assert self.config_entry is not None
-        raw = self.config_entry.options.get(CONF_QUEUE_MAXLEN, DEFAULT_QUEUE_MAXLEN)
-        try:
-            maxlen = max(1, min(256, int(raw)))
-        except (TypeError, ValueError):  # fmt: skip
-            # IN-05: a corrupt option (non-numeric string, None, list, ...) must not
-            # abort entry setup — fall back to the default with a WARNING, mirroring
-            # the _valid_nonneg_int discipline used for store hydration (ASVS V5).
-            _LOGGER.warning(
-                "queue_maxlen option is not a valid integer (type=%s); using default %d",
-                type(raw).__name__,
-                DEFAULT_QUEUE_MAXLEN,
-            )
-            maxlen = DEFAULT_QUEUE_MAXLEN
-        self._stage2_queue = asyncio.Queue(maxsize=maxlen)
-        self._stage2_enqueued_keys = set()
-        _LOGGER.debug("Stage-2 queue constructed with maxsize=%d", maxlen)
 
         # Phase 19 D-03: build extractor once per setup/reload cycle.
         session = async_get_clientsession(self.hass)
@@ -1203,114 +1138,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             field_list=field_list,
             async_add_executor_job=self.hass.async_add_executor_job,
         )
-
-        # Phase 19 D-02: spawn worker after queue and extractor are ready (QUE-04).
-        # async_create_background_task auto-registers task in entry._background_tasks;
-        # HA provides a 10-second hard-cancel fallback; our 5-second explicit cancel in
-        # async_stop_stage2 fires first (config_entries.py _async_process_on_unload).
-        self._stage2_worker_task = self.config_entry.async_create_background_task(
-            self.hass,
-            self._async_stage2_worker(),
-            name="shop2parcel_stage2_worker",
+        _LOGGER.debug(
+            "Stage-2 extractor built for entry %s (shared hub queue/worker)",
+            self.config_entry.entry_id,
         )
-        # IN-06 follow-up: retrieve a crashed worker's exception at completion time.
-        # async_stop_stage2 only awaits tasks that are still running — a worker that
-        # died BEFORE stop would otherwise leave its exception unretrieved, surfacing
-        # only as asyncio's "Task exception was never retrieved" at GC (and silently
-        # in production until then).
-        self._stage2_worker_task.add_done_callback(self._log_stage2_worker_crash)
-        _LOGGER.debug("Stage-2 worker spawned for entry %s", self.config_entry.entry_id)
-
-    @callback
-    def _log_stage2_worker_crash(self, task: asyncio.Task) -> None:
-        """Retrieve and log a Stage-2 worker exception the moment the task ends.
-
-        Marks the exception as retrieved (task.exception()) so asyncio never emits
-        an unretrieved-exception warning, and makes an unexpected worker death loud
-        in the HA log instead of silent until unload.
-        """
-        if task.cancelled():
-            return
-        err = task.exception()
-        if err is not None:
-            _LOGGER.error(
-                "Stage-2 worker crashed; Stage-2 extraction is stopped until the "
-                "integration is reloaded: %s",
-                err,
-                exc_info=err,
-            )
-
-    async def async_stop_stage2(self) -> None:
-        """Cancel worker (bounded 5 s), drain queue, release extractor.
-
-        D-01 sequence: (1) cancel worker task, (2) drain and reset queue.
-        Cancelling before drain is critical — cancelling after could leave a
-        worker that already received a get() result still running.
-
-        QUE-05: 5-second bounded wait via asyncio.wait_for; both CancelledError
-        and TimeoutError suppressed so on-unload never raises.
-        """
-        # Phase 21 SPEC Req #5: reset failure streak on stage2 stop/reload.
-        # Placed at the TOP of async_stop_stage2 (before any early-return) so the reset
-        # fires unconditionally — even when _stage2_queue is None (CR-01 sentinel path where
-        # async_start_stage2 was never called). A naive 'append at end' would miss this path.
-        self._stage2_consecutive_failures = 0
-        self._stage2_last_notify_ts = None
-
-        # Step 1 (Phase 19): cancel worker task — must precede queue drain (D-01).
-        # QUE-05: 5-second bounded wait via asyncio.wait_for.
-        # Explicit task.cancel() is required before wait_for: without it, wait_for on a
-        # not-yet-cancelled task simply waits for natural completion. An idle worker blocked
-        # on queue.get() never completes on its own, causing a 5-second delay on every clean
-        # shutdown. Cancelling first allows the idle worker to exit immediately; the 5-second
-        # backstop handles workers that are mid-operation when cancelled.
-        # CancelledError and TimeoutError are suppressed so unload never raises (QUE-05).
-        if self._stage2_worker_task is not None and not self._stage2_worker_task.done():
-            self._stage2_worker_task.cancel()
-            try:
-                await asyncio.wait_for(self._stage2_worker_task, timeout=5.0)
-            except (asyncio.CancelledError, TimeoutError):  # fmt: skip
-                pass
-            except Exception as err:  # noqa: BLE001
-                # IN-06: a worker that died with a non-CancelledError exception
-                # re-raises here when awaited; the QUE-05 contract says on-unload
-                # never raises, so log loudly and continue the teardown.
-                _LOGGER.error(
-                    "Stage-2 worker raised during shutdown (suppressed to honour "
-                    "QUE-05 'unload never raises'): %s",
-                    err,
-                    exc_info=True,
-                )
-        self._stage2_worker_task = None
-        self._extractor = None  # release OllamaClient / aiohttp session reference
-
-        # IN-03: clear the enabled flag FIRST so a poll racing this teardown routes
-        # away from the enqueue seam, and so diagnostics never report Stage-2 as
-        # enabled on a stopped coordinator. A reload constructs a fresh coordinator
-        # and async_setup_entry re-derives the flag from options.
-        self._diagnostics.stage2_enabled = False
-
-        # Step 2 (Phase 18 CR-02, reworked per IN-03): drain the queue, then null it.
-        # Recreating a live workerless queue here let a poll that raced teardown keep
-        # enqueueing jobs nothing would ever drain, and email_processing_active
-        # (queue depth > 0) read True indefinitely. The None sentinel is handled by
-        # stage2_queue_depth and _enqueue_stage2; the old "preserve maxsize" recreate
-        # is obsolete — a reload rebuilds the queue in async_start_stage2 from options.
-        if self._stage2_queue is None:
-            return
-        while not self._stage2_queue.empty():
-            try:
-                self._stage2_queue.get_nowait()
-                self._stage2_queue.task_done()
-            except asyncio.QueueEmpty:
-                break
-        self._stage2_queue = None
-        self._stage2_enqueued_keys.clear()
-        # CR-02: gate on debug mode too (DBG-03 zero-store-writes) — this save fires
-        # on every unload path, including a failed-first-refresh teardown.
-        if self._store_loaded and not self._debug_mode_active():
-            await self._async_save_store()
-        _LOGGER.debug("Stage-2 queue stopped and cleared")
 
     def _enqueue_stage2(
         self,
@@ -1324,43 +1155,40 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         prefetched_result: Any | None = None,
         raw_msg_id: str | None = None,
     ) -> bool:
-        """Enqueue a Stage-2 job with in-flight dedup and drop-newest backpressure.
+        """Enqueue a Stage-2 job onto the shared hub queue (WORK-01/02/03).
 
-        QUE-06: skips silently if normalized_tn already in _stage2_enqueued_keys.
-        QUE-03: on QueueFull, logs warning + emits stage2_dropped_backpressure event,
-                does NOT write to the shared hub's dedup set.
-        Uses put_nowait (never await put) per QUE-07.
+        Phase 32 cutover: the coordinator keeps its per-account poison-quarantine
+        pre-check (_stage2_quarantined_tns) and builds the Stage2Job, then
+        delegates ALL queue mechanics — global in-flight dedup, per-account
+        in-flight cap, and the global bound — to self._hub.enqueue(job) (D-02).
+        The hub returns a three-way EnqueueOutcome:
 
-        The add to _stage2_enqueued_keys happens ONLY after successful put_nowait
-        (Anti-Patterns §3) — if put_nowait raises QueueFull, the key is NOT added.
+        - ENQUEUED: bumps _diagnostics.stage2_enqueued_total, returns True.
+        - SKIPPED_DUP: a job for this tracking number is already in-flight
+          (this or another message/account) — returns False, no event, no
+          counter change (this call did not create a job).
+        - DROPPED_BACKPRESSURE: per-account cap or global bound is full — emits
+          stage2_dropped_backpressure (R3: no silent drop) + bumps
+          _diagnostics.stage2_dropped_backpressure_total, returns False.
 
-        Phase 27 fix: returns True ONLY when THIS call created a new Stage-2 job for this
-        tracking number (a successful put_nowait). Returns False for both QueueFull (job
-        dropped) AND the in-flight-skip case (the tracking number is already queued — possibly
-        from a DIFFERENT message). The fallback caller uses the True return to decide whether
-        to mark its message in-flight: it must only do so when it actually owns a job, so a
-        defer's _release_inflight (keyed by that job's raw_msg_id) frees the right message
-        (finding #674). A False return leaves the message un-pinned, so it converges via the
-        tracking-number dedup-skip / re-fetch instead. prefetched_result and raw_msg_id are
-        forwarded onto the Stage2Job (see its docstring).
+        Phase 27 fix (preserved): returns True ONLY when THIS call created a new
+        Stage-2 job for this tracking number. The fallback caller uses the True
+        return to decide whether to mark its message in-flight: it must only do
+        so when it actually owns a job, so a defer's _release_inflight (keyed by
+        that job's raw_msg_id) frees the right message (finding #674). A False
+        return leaves the message un-pinned, so it converges via the
+        tracking-number dedup-skip / re-fetch instead. prefetched_result and
+        raw_msg_id are forwarded onto the Stage2Job (see its docstring).
         """
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
+        assert self.config_entry is not None
         if normalized_tn in self._stage2_quarantined_tns:
             # WR-03: poison quarantine — extraction for this tracking number failed
             # STAGE2_MSG_QUARANTINE_THRESHOLD times in a row this session. Skip the
             # re-enqueue: the Gmail Stage-1 and IMAP paths re-parse and re-enqueue on
             # every poll, so without this seam the retry loop the quarantine was built
             # to stop stayed live on those paths. Session-scoped; a restart re-tries.
-            return False
-        if normalized_tn in self._stage2_enqueued_keys:
-            # In-flight skip (QUE-06): a job for this tracking number already exists (this or
-            # another message). Return False — THIS call did not create a job, so the caller
-            # must not pin its message in-flight under a job it does not own (finding #674).
-            return False
-        if self._stage2_queue is None:
-            # IN-03: stop/teardown race — async_stop_stage2 nulled the queue while a
-            # poll was still iterating. Drop this enqueue; the message stays
-            # re-fetchable and re-enqueues after the next (re)start.
-            _LOGGER.debug("Stage-2 queue is stopped — dropping enqueue for %s", normalized_tn)
+            # Per-account pre-check — retained ahead of the hub delegation below.
             return False
         job = Stage2Job(
             storage_key=storage_key,
@@ -1369,16 +1197,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             html_body=html_body,
             message_id=message_id,
             meta=meta,
+            entry_id=self.config_entry.entry_id,
             prefetched_result=prefetched_result,
             raw_msg_id=raw_msg_id,
         )
-        try:
-            self._stage2_queue.put_nowait(job)
-        except asyncio.QueueFull:
+        outcome = self._hub.enqueue(job)
+        if outcome is EnqueueOutcome.DROPPED_BACKPRESSURE:
             _LOGGER.warning(
-                "Stage-2 queue full (%d/%d); dropping %s — will retry next poll",
-                self._stage2_queue.qsize(),
-                self._stage2_queue.maxsize,
+                "Stage-2 backpressure (hub cap/bound full); dropping %s — will retry next poll",
                 normalized_tn,
             )
             self._emit_scan_event(
@@ -1391,76 +1217,392 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             return (
                 False  # NO dedup write (QUE-03), NO add to enqueued_keys; caller must not mark seen
             )
-        self._stage2_enqueued_keys.add(normalized_tn)  # add AFTER successful put (Anti-Patterns §3)
-        self._diagnostics.stage2_enqueued_total += 1  # DIAG-02: only on successful put_nowait
+        if outcome is EnqueueOutcome.SKIPPED_DUP:
+            # In-flight skip: a job for this tracking number already exists (this or
+            # another message/account). Return False — THIS call did not create a job, so
+            # the caller must not pin its message in-flight under a job it does not own
+            # (finding #674).
+            return False
+        self._diagnostics.stage2_enqueued_total += 1  # DIAG-02: only on successful enqueue
         return True
 
-    async def _async_stage2_worker(self) -> None:
-        """Single long-lived background worker draining _stage2_queue serially.
+    async def _run_inline_fallback(
+        self,
+        *,
+        msg_key: str,
+        prefix: str,
+        html: str,
+        meta: dict,
+        email_date: int,
+        candidate_tokens: list[str],
+        debug_mode: bool,
+    ) -> None:
+        """Shared Stage-1-miss inline Ollama fallback gatekeeper (Phase 33 Plan 02, D-04).
 
-        QUE-02: runs until cancelled via task.cancel() from async_stop_stage2.
-        Sole blocking point: await self._stage2_queue.get().
+        Pure params-in: every per-message value the gatekeeper needs is passed in as
+        a keyword argument (msg_key, prefix, html, meta, email_date, candidate_tokens,
+        debug_mode) and every side effect routes through self.<hook> calls
+        (_mark_message_seen, _mark_inflight, _register_inline_schema_failure,
+        _surface_stage2_failure, _emit_scan_event, _enqueue_stage2). There is no
+        subclass-type flag or branch — Gmail and IMAP call this identically.
 
-        CancelledError at any await point propagates to the outer try — never
-        swallowed. Phase 21 (FAIL-01..05) implemented loud failure surface via
-        _record_stage2_failure/_record_stage2_success; worker-outer Exception
-        calls _record_stage2_failure and does NOT crash the worker.
-
-        task_done() in finally: ensures queue.join() (if used in tests) never hangs.
+        This is a verbatim move of the former GmailCoordinator inline fallback body
+        (gmail_coordinator.py, pre-Phase-33) with ONLY mechanical renames applied
+        (msg_id -> msg_key, email_meta -> meta, the gmail-prefixed scan-event ID ->
+        f"{prefix}{msg_key}", result.candidate_tokens -> candidate_tokens parameter,
+        the `d` diagnostics alias -> self._diagnostics, time.monotonic() ->
+        _time.monotonic(), and every loop-control `continue` -> `return`, since this
+        method has no loop of its own). Callers own the pre-loop seen/in-flight skip
+        gate and MUST only invoke this on a genuine Stage-1 miss (result.shipment is
+        None) — this method does not re-check that condition. Immediately after
+        awaiting this method, the caller issues a single `continue` to resume its
+        own per-message loop.
         """
-        if self.config_entry is None or self._stage2_queue is None:
-            # IN-06: startup invariant violated (worker spawned on a torn-down
-            # coordinator). The former bare asserts crashed the background task and
-            # the AssertionError re-raised at unload await time, violating QUE-05
-            # ("on-unload never raises"); exit cleanly instead.
-            _LOGGER.error("Stage-2 worker started without config entry or queue — exiting")
-            return
-        # IN-03/IN-06: bind a local reference — async_stop_stage2 nulls
-        # self._stage2_queue during teardown, and the cancelled worker may still
-        # execute its finally-block after that point.
-        queue = self._stage2_queue
-        _LOGGER.debug("Stage-2 worker started for entry %s", self.config_entry.entry_id)
-        try:
-            while True:
-                job: Stage2Job = await queue.get()
-                normalized_tn = job.normalized_tn
-                try:
-                    # D-07 / IMAP parity: drain runs on the base class — ImapCoordinator
-                    # inherits this worker and therefore gets drain for free (no imap_coordinator.py
-                    # change needed). CancelledError from the drain re-raises below (worker shuts down).
-                    await self._async_drain_pending_posts()
-                    await self._async_process_stage2_job(job)
-                except asyncio.CancelledError:
-                    self._stage2_enqueued_keys.discard(normalized_tn)  # prevent permanent key lock
-                    self._release_inflight(job)  # re-fetch on next start (not lost)
-                    raise  # propagate — shuts down the worker
-                except ConfigEntryAuthFailed as err:
-                    # WR-05: parcelapp auth failure — NOT an Ollama failure. The D-05
-                    # contract says _record_stage2_failure tracks Ollama failures only;
-                    # routing auth errors through the generic handler inflated the
-                    # streak and fired the misleading "check Ollama" notification for
-                    # a parcelapp API-key problem. Log the real cause, discard the key
-                    # + release the message so the job re-runs after reauth; the next
-                    # inline poll raises ConfigEntryAuthFailed from poll context and
-                    # triggers HA's reauth flow (T-19-08).
-                    _LOGGER.error(
-                        "Stage-2 worker: parcelapp auth error for %s — check the "
-                        "ParcelApp API key (reauth is requested on the next poll): %s",
-                        normalized_tn,
-                        err,
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
+        # WR-01 (Phase 33 review): every log line below must attribute the event to
+        # the correct account type. `prefix` is already threaded through this method
+        # for scan-event IDs (f"{prefix}{msg_key}") — reuse it here so IMAP messages
+        # are no longer logged as "Gmail message" (the twelve _LOGGER.* calls below).
+        log_label = "Gmail message" if prefix == "gmail:" else "IMAP UID"
+        # Phase 27 Plan 03: Ollama fallback gatekeeper on Stage-1 miss.
+        # Runs only when stage2 is enabled, NOT in debug_mode, and a live extractor
+        # exists. The None guard defends against any window where stage2_enabled is
+        # True but async_setup_stage2_extractor has not (yet) populated _extractor
+        # (e.g. a bare-coordinator test), routing that case to the re-fetch branch
+        # below (finding #523) rather than caching the message as a reject.
+        #
+        # Seen-ID model = convergence: a fallback that ENQUEUES does NOT mark the
+        # message seen here. The message is re-fetched next poll; once the worker has
+        # POSTed the tracking number, the re-fetch hits the _submitted_tracking_numbers
+        # dedup guard and marks it seen then. Marking per-message at enqueue while work
+        # is per-shipment is what lost deferred/QueueFull jobs (findings #1/#594), so
+        # the tracking-number dedup converges the seen-ID instead of optimistic marking.
+
+        # Quick-260703-mac (A): first-refresh skip guard.
+        # On the bootstrap first refresh (inside HA's 300 s stage-2 global timeout)
+        # inline Ollama calls can overrun the window and cancel setup. Skip them here
+        # — Stage-1 regex already ran above; Stage-1-miss messages are left UN-marked
+        # (identical to the extractor-unavailable path below) so the next poll
+        # re-inspects and runs inline fallback normally. Stage-1 HIT enqueue is on a
+        # separate path and is unaffected.
+        if (
+            self._diagnostics.stage2_enabled
+            and not debug_mode
+            and self._extractor is not None
+            and not self._first_refresh_done
+        ):
+            _LOGGER.debug(
+                "%s %s: inline fallback deferred — first refresh not yet complete",
+                log_label,
+                msg_key,
+            )
+            return  # leave UN-marked; re-inspected on the next poll
+
+        if self._diagnostics.stage2_enabled and not debug_mode and self._extractor is not None:
+            # IN-07: reuse a cap-deferred prefetched extraction BEFORE the cap
+            # check or any Ollama call. A cache hit is not an extraction — it
+            # consumes no cap slot and re-records no LLM counters (the original
+            # run already counted the attempt and latency); previously the
+            # worker's cap-skip discarded the prefetched result and this
+            # gatekeeper ran a second full Ollama pass on the same body.
+            result_fb = self._fallback_prefetch_cache.pop(msg_key, None)
+            if result_fb is None:
+                # Per-poll cap check (Design §4 / T-27-03-03 DoS guard): if we have
+                # already run MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL extractions this
+                # poll, skip WITHOUT caching the ID so it is retried next poll (Pitfall 6).
+                if (
+                    self._stage2_fallback_extractions_this_poll
+                    >= MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL
+                ):
+                    _LOGGER.debug(
+                        "%s %s: fallback cap reached (%d/%d) — skipping this poll",
+                        log_label,
+                        msg_key,
+                        self._stage2_fallback_extractions_this_poll,
+                        MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
                     )
-                    self._stage2_enqueued_keys.discard(normalized_tn)
-                    self._release_inflight(job)  # re-fetch next poll (not lost)
-                except Exception as err:  # noqa: BLE001
-                    # FAIL-01/02/04: surface the failure loudly via the centralized helper (D-01..D-04).
-                    self._record_stage2_failure(job, err)
-                    self._stage2_enqueued_keys.discard(normalized_tn)
-                    self._release_inflight(job)  # re-fetch next poll (not lost)
-                finally:
-                    queue.task_done()
-        except asyncio.CancelledError:
-            _LOGGER.debug("Stage-2 worker cancelled — exiting cleanly")
-            raise
+                    return  # do NOT cache (retry next poll)
+
+                # Quick-260703-mac (B): per-poll wall-clock budget check.
+                # Checked between extractions (a single in-flight call can still run up
+                # to ollama_timeout). Budget-deferred messages are left UN-marked so
+                # they are retried on the next poll — same as the cap's return path.
+                # Inside the result_fb is None branch so a prefetch-cache reuse
+                # (already-computed, no new Ollama call) is not blocked.
+                if (
+                    self._stage2_fallback_inline_deadline is not None
+                    and _time.monotonic() >= self._stage2_fallback_inline_deadline
+                ):
+                    _LOGGER.debug(
+                        "%s %s: inline fallback wall-clock budget exhausted"
+                        " — deferring to next poll",
+                        log_label,
+                        msg_key,
+                    )
+                    return  # do NOT cache (retry next poll)
+
+                # Run Ollama fallback extraction (Design §3 / Pattern 3 / T-27-03-01).
+                # Count the attempt regardless of outcome (increment before try so cap
+                # applies even if the extractor raises).
+                self._stage2_fallback_extractions_this_poll += 1
+                # Finding #4: count the LLM attempt before the call (parity with the
+                # worker) so the emails_sent_to_llm diagnostic includes fallback runs.
+                self._diagnostics.stage2_llm_attempts_total += 1
+                try:
+                    result_fb = await self._extractor.async_extract(html, None)
+                except (OllamaTransientError, OllamaSchemaError) as fb_err:
+                    # Finding #2: route fallback failures through the shared failure
+                    # surface (the worker path's _record_stage2_failure equivalent) so a
+                    # sustained Ollama outage increments the consecutive-failure streak
+                    # and raises the persistent notification — instead of being swallowed
+                    # at DEBUG. Finding #450: only the FIRST fallback failure of a poll
+                    # escalates (bumps the streak / may notify); the rest are recorded
+                    # without inflating the shared streak ~10x per poll on a no-match
+                    # backlog.
+                    escalate = not self._stage2_fallback_failed_this_poll
+                    self._stage2_fallback_failed_this_poll = True
+                    self._surface_stage2_failure(
+                        meta=meta,
+                        message_id=f"{prefix}{msg_key}",
+                        normalized_tn="",
+                        err=fb_err,
+                        escalate=escalate,
+                    )
+                    # ollama-fallback-retry-loop: split the two error classes.
+                    # OllamaSchemaError is DETERMINISTIC — the same body yields the same
+                    # unparseable model output every poll, so without a terminal action
+                    # the message re-infers forever (observed 93x/15h on a USPS digest).
+                    # Count per-message schema failures; once the count reaches
+                    # STAGE2_MSG_QUARANTINE_THRESHOLD, mark the message seen (terminal —
+                    # mirrors the carrier-format-reject branch below) so the poll gate
+                    # stops re-fetching it. Below threshold it is left un-cached and
+                    # retried next poll (a rare few schema errors may be a model warm-up
+                    # blip). OllamaTransientError (network/5xx) is NEVER counted or marked
+                    # seen: a transient outage must keep retrying and must not permanently
+                    # skip a legitimate shipment email (findings #1/#594).
+                    if isinstance(
+                        fb_err, OllamaSchemaError
+                    ) and self._register_inline_schema_failure(msg_key):
+                        _LOGGER.warning(
+                            "%s %s ('%s' from '%s'): quarantining after "
+                            "%d consecutive inline OllamaSchemaError failures — marking "
+                            "seen to stop the per-poll re-inference loop (session-scoped; "
+                            "cleared on restart)",
+                            log_label,
+                            msg_key,
+                            meta.get("subject", ""),
+                            meta.get("from", ""),
+                            STAGE2_MSG_QUARANTINE_THRESHOLD,
+                        )
+                        self._mark_message_seen(msg_key)
+                        self._emit_scan_event(
+                            message_id=f"{prefix}{msg_key}",
+                            meta=meta,
+                            outcome="stage2_no_data",
+                        )
+                    return  # do NOT cache (below threshold: retry next poll)
+                except Exception as fb_err:  # noqa: BLE001
+                    # Finding #505: an unexpected (non-Ollama) exception must NOT abort the
+                    # whole poll mid-iteration (which would skip every later message and
+                    # drop the per-poll save). Surface it like a Stage-2 failure and move
+                    # on; the message stays un-cached, so it is retried next poll. Finding
+                    # #450: escalate at most once per poll (shared latch).
+                    _LOGGER.error(
+                        "%s %s: unexpected error during Ollama fallback "
+                        "extraction — skipping this message: %s",
+                        log_label,
+                        msg_key,
+                        fb_err,
+                        exc_info=True,
+                    )
+                    escalate = not self._stage2_fallback_failed_this_poll
+                    self._stage2_fallback_failed_this_poll = True
+                    self._surface_stage2_failure(
+                        meta=meta,
+                        message_id=f"{prefix}{msg_key}",
+                        normalized_tn="",
+                        err=fb_err,
+                        escalate=escalate,
+                    )
+                    return  # do NOT cache (retry next poll)
+
+                # Finding #4: record the successful extraction's latency (parity with the
+                # worker) so the LLM-call / parse-success-rate diagnostics stay accurate.
+                self._diagnostics.record_llm_call(
+                    result_fb.latency_ms,
+                    fence_retry=result_fb.passes_used == 2,
+                )
+
+            # Extract + validate the tracking number from the Ollama result.
+            # Phase 28 Plan 04 (R1/R2/R3): strict carrier-format gate via
+            # validate_carrier_format strips internal separators ([ -]) and
+            # uppercases before pattern-matching, then returns the canonical
+            # clean form used for dedup + enqueue + ShipmentData (D-03).
+            tn = (result_fb.locked.get("tracking_number") or "").strip()
+            fb_clean, fb_ok, fb_reason = validate_carrier_format(tn)
+            if not fb_ok:
+                # Hard reject: the fallback model returned a hallucinated or
+                # non-carrier string. Record the rejection (R3/D-06) and log at
+                # DEBUG only (D-07/T-28-09 — no INFO/WARNING leakage of TN values).
+                # This is a terminal decision (mirror the no-match branch below):
+                # mark seen so the gatekeeper does not re-run Ollama on this
+                # non-shipment email every poll.
+                self._diagnostics.record_carrier_format_rejection(
+                    fb_clean, fb_reason or "no_carrier_match"
+                )
+                _LOGGER.debug(
+                    "%s %s: fallback carrier-format gate rejected '%s' "
+                    "(reason=%s) — cached as rejected",
+                    log_label,
+                    msg_key,
+                    fb_clean,
+                    fb_reason,
+                )
+                self._mark_message_seen(msg_key)
+                self._emit_scan_event(
+                    message_id=f"{prefix}{msg_key}",
+                    meta=meta,
+                    outcome="stage2_no_data",
+                )
+            elif self._hub.is_submitted(fb_clean):
+                # Finding #5: mirror the main shipment loop's dedup guard. An
+                # already-forwarded tracking number is terminal — mark seen and do
+                # not re-enqueue (the worker only checks the in-flight set, not
+                # the shared hub's dedup set, so a re-POST would burn a quota slot).
+                self._mark_message_seen(msg_key)
+                _LOGGER.debug(
+                    "%s %s: fallback tracking %s already submitted — skipping",
+                    log_label,
+                    msg_key,
+                    fb_clean,
+                )
+            else:
+                # Gate pass, not-yet-forwarded: build ShipmentData using the gate
+                # clean canonical form (D-03 — separator-free, uppercased). Do NOT
+                # route through merge_llm_authoritative (Stage-1 is None here; Pattern 3).
+                # Do NOT mark seen — convergence re-fetch + dedup marks it once POSTed.
+                #
+                # Phase 35 Plan 04 (MRG-05, SC-1 Pitfall 2): gate order_name/
+                # order_summary through validate_grounding() directly — there is no
+                # Stage-1 ShipmentData here, so merge_llm_authoritative_with_grounding's
+                # wrapper does not apply (Pattern 3). Source text is always body-only
+                # prose (preprocess_html(html)) per SC-2 — never the raw html and never
+                # any sender/subject envelope string.
+                prose, _fb_links = preprocess_html(html)
+                raw_order_name = result_fb.locked.get("order_name") or ""
+                raw_order_summary = result_fb.locked.get("order_summary")
+                _on_val, on_ok, on_reason = validate_grounding(raw_order_name, prose)
+                _os_val, os_ok, os_reason = validate_grounding(raw_order_summary, prose)
+                gated_order_name = raw_order_name if on_ok else ""
+                gated_order_summary = raw_order_summary if os_ok else None
+                if not on_ok and raw_order_name:
+                    self._diagnostics.record_grounding_rejection(
+                        raw_order_name, on_reason or "ungrounded"
+                    )
+                    _LOGGER.debug(
+                        "%s %s: inline fallback grounding gate rejected "
+                        "order_name '%s' (reason=%s)",
+                        log_label,
+                        msg_key,
+                        raw_order_name,
+                        on_reason,
+                    )
+                if not os_ok and raw_order_summary:
+                    self._diagnostics.record_grounding_rejection(
+                        raw_order_summary, os_reason or "ungrounded"
+                    )
+                    _LOGGER.debug(
+                        "%s %s: inline fallback grounding gate rejected "
+                        "order_summary '%s' (reason=%s)",
+                        log_label,
+                        msg_key,
+                        raw_order_summary,
+                        os_reason,
+                    )
+                fb_shipment = ShipmentData(
+                    tracking_number=fb_clean,
+                    carrier_name=result_fb.locked.get("carrier_name") or "",
+                    order_name=gated_order_name,
+                    message_id=msg_key,
+                    email_date=email_date,
+                    custom_attributes=result_fb.custom,
+                    order_summary=gated_order_summary,
+                )
+                enqueued = self._enqueue_stage2(
+                    fb_clean,
+                    storage_key=msg_key,
+                    shipment=fb_shipment,
+                    html_body=html,
+                    message_id=f"{prefix}{msg_key}",
+                    meta=meta,
+                    # Finding #3: hand the already-extracted result to the worker so
+                    # it does NOT call Ollama a second time on the same body.
+                    prefetched_result=result_fb,
+                    raw_msg_id=msg_key,
+                )
+                if enqueued:
+                    # IN-07: fallback-found shipments are real matches — count them
+                    # in the matched/found diagnostics like the Stage-1 loop does
+                    # (post-dedup, pre-POST), so LLM-found parcels are visible in
+                    # emails_matched / tracking_numbers_found / last_poll_found.
+                    self._diagnostics.emails_matched_total += 1
+                    self._diagnostics.last_poll_emails_matched += 1
+                    self._diagnostics.tracking_numbers_found_total += 1
+                    self._diagnostics.last_poll_found.append(
+                        {
+                            "tracking_number": fb_clean,
+                            "carrier": fb_shipment.carrier_name,
+                            "order_name": fb_shipment.order_name,
+                            "message_id": msg_key,
+                            "candidates": candidate_tokens,
+                            **meta,
+                        }
+                    )
+                    # Round-4 fix #512: add to the in-memory in-flight gate so the
+                    # gatekeeper does NOT re-run Ollama on this message every poll
+                    # until the worker POSTs. The worker releases it on a defer; it
+                    # converges to a persisted seen ID via dedup once POSTed.
+                    self._mark_inflight(msg_key)
+                    _LOGGER.debug(
+                        "%s %s: Ollama fallback found tracking %s — "
+                        "enqueued (re-fetch converges the seen-ID)",
+                        log_label,
+                        msg_key,
+                        fb_clean,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "%s %s: Stage-2 queue full — fallback tracking %s "
+                        "not enqueued; will retry next poll",
+                        log_label,
+                        msg_key,
+                        fb_clean,
+                    )
+            # Note: empty or non-carrier strings are handled by the `if not fb_ok:`
+            # branch above (reason="empty" or "no_carrier_match") — no separate
+            # soft-reject else-branch is needed.
+            return
+
+        # stage2 enabled but the extractor is transiently unavailable (stop/reload
+        # race): the fallback could not judge this message. Do NOT mark it seen —
+        # leave it re-fetchable so the gatekeeper runs once the extractor is restored
+        # (finding #523).
+        if self._diagnostics.stage2_enabled and not debug_mode:
+            _LOGGER.debug(
+                "%s %s: stage2 enabled but extractor unavailable — leaving un-cached for retry",
+                log_label,
+                msg_key,
+            )
+            return
+
+        # stage2 disabled: no fallback will ever run for this message, so a Stage-1
+        # miss is a terminal no-match — mark seen. Finding #749: do NOT mark in
+        # debug_mode — that writes the PERSISTED seen cache during a dry-run, so an
+        # email scanned in debug (possibly a real shipment the regex missed) would be
+        # filtered out once debug is disabled, before the fallback could judge it.
+        if not debug_mode:
+            self._mark_message_seen(msg_key)
+        return
 
     async def _async_drain_pending_posts(self) -> None:
         """Drain pending posts from prior quota-blocked extraction cycles.
@@ -1469,8 +1611,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         (WR-04 — both subclasses call it from _async_update_data_inner, so the
         "drained on next quota-free poll" contract holds even when no new shipment
         email ever arrives) to opportunistically flush the backlog when quota/cap
-        conditions allow. Respects MAX_STAGE2_POSTS_PER_POLL cap and
-        _quota_exhausted_until timestamp.
+        conditions allow. Respects the shared per-poll cap (hub.poll_cap_reached())
+        and the shared cooldown window (hub.quota_is_exhausted).
 
         Guard order:
           1. Empty _pending_posts → no-op.
@@ -1478,15 +1620,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
           3. Quota still exhausted → no-op.
           Then: POSTs each pending item WITHOUT re-invoking the extractor (LD-05 / AC-3).
 
-        IMAP parity (D-07): this method lives on the base class; ImapCoordinator
-        inherits _async_stage2_worker and therefore this drain automatically — no
-        imap_coordinator.py changes needed.
+        IMAP parity (D-07): this method lives on the base class, so both
+        GmailCoordinator and ImapCoordinator get it automatically. Phase 32
+        (D-10): the shared hub worker calls this on whichever coordinator it
+        resolves via entry_id before dispatching a job — no imap_coordinator.py
+        or gmail_coordinator.py change needed.
+
+        Phase 31 (D-01): each POST reserves a shared daily-budget slot via
+        hub.try_consume() BEFORE the POST call, so the gate order is
+        poll_cap_reached() -> try_consume() -> POST -> outcome-routed
+        refund/record_quota_exhausted/record_poll_post.
 
         Error handling mirrors _async_process_stage2_job:
           - ParcelAppAuthError  → raise ConfigEntryAuthFailed
-          - ParcelAppQuotaError → set _quota_exhausted_until and BREAK (items remain)
+          - ParcelAppQuotaError → hub.record_quota_exhausted(reset_at) and BREAK (items remain)
           - AlreadyAdded / InvalidTracking → treat as success (dedup write + remove)
-          - ParcelAppTransientError → continue (item stays for next poll — Pitfall 2)
+          - ParcelAppTransientError → hub.refund_consume() + continue (item stays for retry)
         """
         if not self._pending_posts:
             return
@@ -1495,8 +1644,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
         if debug_mode:
             return  # debug mode never accumulates _pending_posts; early exit is safe (Pitfall 1)
-        now = int(_time.time())
-        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+        if self._hub.quota_is_exhausted:
             return  # quota still exhausted; drain blocked until the window resets
 
         parcel_client = ParcelAppClient(
@@ -1507,7 +1655,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Iterate a COPY so dict mutation during iteration is safe (RESEARCH constraint).
         for storage_key, merged_shipment in list(self._pending_posts.items()):
             # AC-4 / Pitfall 4: shared counter covers drain + new-extraction POSTs this poll.
-            if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
+            if self._hub.poll_cap_reached():
                 break  # cap reached; remaining items wait for next poll
 
             # Phase 28 Plan 03 (D-04): defensive carrier-format re-gate before each drain POST.
@@ -1544,6 +1692,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 merged_shipment.carrier_name,
             )
 
+            # D-01: reserve one shared daily-budget slot BEFORE the POST. If the shared
+            # budget is exhausted this window, stop draining — remaining items stay in
+            # _pending_posts for the next window (mirrors the poll-cap break semantics).
+            if not self._hub.try_consume():
+                break
+
             # Phase 26 RESEARCH Pitfall 6: posted_2xx flag distinguishes genuine 2xx from
             # AlreadyAdded/InvalidTracking fall-through. _record_forward ONLY fires on 2xx.
             posted_2xx = False
@@ -1561,10 +1715,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             except ParcelAppQuotaError as err:
                 # Quota re-exhausted mid-drain; set the block and stop draining.
                 # Remaining items stay in _pending_posts for the next quota window.
-                self._quota_exhausted_until = (
-                    err.reset_at if err.reset_at is not None else _next_midnight_utc()
-                )
-                self._arm_quota_expiry_timer()  # finding 3: refresh entities when it expires
+                # D-01: no refund on 429 — record_quota_exhausted blocks all accounts,
+                # so a stray +1 reserve is moot until reset.
+                self._hub.record_quota_exhausted(err.reset_at)
                 _LOGGER.warning(
                     "Stage-2 drain: parcelapp quota hit mid-drain — deferring remaining "
                     "pending items until quota resets"
@@ -1574,6 +1727,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # Treat as success for dedup purposes — fall through to bookkeeping below.
                 # posted_2xx stays False: AlreadyAdded/InvalidTracking do NOT consume quota
                 # and do NOT represent forwarding a new shipment (RESEARCH Pitfall 6 / T-26-02).
+                # D-01: no refund — the reserve stays consumed (the item genuinely occupied
+                # a daily-budget slot from parcelapp's point of view).
                 _LOGGER.debug(
                     "Stage-2 drain: tn=%s already known to parcelapp (AlreadyAdded/InvalidTracking)",
                     normalized_tn,
@@ -1581,6 +1736,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
 
             except ParcelAppTransientError as err:
                 # Leave item in _pending_posts for retry next poll (Pitfall 2).
+                # D-01: refund the reserved-but-unspent slot back to the shared budget.
+                self._hub.refund_consume()
                 _LOGGER.debug(
                     "Stage-2 drain: transient error for tn=%s — item stays for retry: %s",
                     normalized_tn,
@@ -1591,9 +1748,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # Success or AlreadyAdded/InvalidTracking: bookkeeping (Pitfall 3: call
             # _record_stage2_success on drain POSTs too — they are real POSTs).
             if posted_2xx:
-                # WR-08/D-12: only a genuine 2xx POST consumes a cap slot — AlreadyAdded/
-                # InvalidTracking consumed no parcelapp quota (Pitfall 4: shared counter).
-                self._stage2_posts_this_poll += 1
+                # WR-08/D-12: only a genuine 2xx POST bumps the shared per-poll counter —
+                # AlreadyAdded/InvalidTracking consumed no parcelapp quota (Pitfall 4).
+                self._hub.record_poll_post()
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx only, not AlreadyAdded)
             self._record_stage2_success()
             # Write dedup so next poll does not retry this TN (DEDUP-01: shared hub).
@@ -1613,7 +1770,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
     async def _async_process_stage2_job(self, job: Stage2Job) -> None:
         """Process one Stage2Job: extract via Ollama, merge, POST to parcelapp, update state.
 
-        Called by _async_stage2_worker for each drained job.
+        Called by the shared hub worker (hub.py's _async_hub_worker) for each
+        drained job, after resolving job.entry_id to this coordinator.
 
         Implements D-05 (per-job store save after POST), D-06 (snapshot pattern),
         MRG-01 (extractor called for every job), MRG-02 (merged shipment POSTed),
@@ -1621,16 +1779,21 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         MRG-05 (per-poll POST cap gate + once-per-poll notification + D-12 counter),
         FAIL-03 (OllamaTransientError / OllamaSchemaError → no POST, no dedup write).
 
+        Phase 31 (D-01): reserves a shared daily-budget slot via hub.try_consume()
+        immediately before the POST; refunds it on a transient error, routes 429 to
+        hub.record_quota_exhausted(reset_at) with no refund.
+
         Error hierarchy mirrors inline POST in gmail_coordinator.py lines 434-511:
           - ParcelAppAuthError  -> raise ConfigEntryAuthFailed (caught by worker BLE001)
-          - ParcelAppQuotaError -> update _quota_exhausted_until + log warning
+          - ParcelAppQuotaError -> hub.record_quota_exhausted(reset_at) + log warning
           - ParcelAppAlreadyAddedError / ParcelAppInvalidTrackingError -> dedup-write + continue
-          - ParcelAppTransientError -> log warning, discard key, allow retry
+          - ParcelAppTransientError -> hub.refund_consume() + log warning, discard key, allow retry
 
-        Note (T-19-08): ConfigEntryAuthFailed raised here is caught by _async_stage2_worker's
-        except Exception (BLE001) — HA's reauth flow is NOT triggered from worker context.
-        Auth failures degrade silently to key-discard + next-poll retry; reauth is triggered
-        by the next _async_update_data poll cycle instead.
+        Note (T-19-08): ConfigEntryAuthFailed raised here is caught by the shared
+        hub worker's dedicated except ConfigEntryAuthFailed branch (hub.py) — HA's
+        reauth flow is NOT triggered from worker context. Auth failures degrade
+        silently to key-discard + next-poll retry; reauth is triggered by the next
+        _async_update_data poll cycle instead.
         """
         assert self.config_entry is not None
         assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
@@ -1653,12 +1816,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             _LOGGER.debug(
                 "Stage-2: tn=%s already forwarded — skipping duplicate POST", normalized_tn
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return
 
         # MRG-05: per-poll POST cap gate (D-09). Checked BEFORE the extractor call so
         # cap-skipped jobs never reach Ollama (avoids wasted inference cost during cap-hit polls).
-        if self._stage2_posts_this_poll >= MAX_STAGE2_POSTS_PER_POLL:
+        if self._hub.poll_cap_reached():
             if not self._stage2_cap_notified_this_poll:
                 # D-10: fire exactly one notification per poll (first cap-hit only).
                 self._stage2_cap_notified_this_poll = True
@@ -1674,12 +1836,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
             self._diagnostics.stage2_cap_skip_total += 1
             _LOGGER.debug(
-                "Stage-2 worker: cap hit (%d/%d) — skipping POST for %s; will retry next poll",
-                self._stage2_posts_this_poll,
+                "Stage-2 worker: shared per-poll cap hit (max %d) — skipping POST for %s; "
+                "will retry next poll",
                 MAX_STAGE2_POSTS_PER_POLL,
                 normalized_tn,
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
             # IN-07: preserve the fallback's already-computed extraction across the
             # cap-defer — discarding it made the gatekeeper run a SECOND Ollama pass
             # on the same body next poll. The gatekeeper pops this cache before
@@ -1713,7 +1874,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 # FAIL-03: no POST, no dedup write; next poll retries (D-04 pure-surface: helper does
                 # not touch control flow; existing discard+return below remain unchanged).
                 self._record_stage2_failure(job, err)
-                self._stage2_enqueued_keys.discard(normalized_tn)
                 if self._register_stage2_msg_failure(job):
                     # Poison-message quarantine: leave the message in the in-flight
                     # skip set (do NOT release) so the poll gate stops re-fetching it,
@@ -1732,9 +1892,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 fence_retry=stage2_result.passes_used == 2,
             )
 
-            # MRG-02: merge Stage-2 result into Stage-1 shipment.
-            merged_shipment, conflicts, gate_rejections = merge_llm_authoritative(
-                job.shipment, stage2_result
+            # Phase 35 Plan 03 (MRG-05 Pitfall 1): recompute body-only prose from the raw
+            # HTML for the grounding gate's source_text. Never job.html_body raw and never
+            # any enriched (Subject/From) string — body-only prose is the ONLY grounding
+            # evidence (SC-2).
+            prose, _links = preprocess_html(job.html_body)
+
+            # MRG-02/MRG-05: merge Stage-2 result into Stage-1 shipment, gating
+            # order_name/order_summary through the MRG-05 grounding check.
+            merged_shipment, conflicts, gate_rejections, grounding_rejections = (
+                merge_llm_authoritative_with_grounding(job.shipment, stage2_result, prose)
             )
 
             # Phase 28 Plan 03 (R3/D-06/D-07): record carrier-format rejections that
@@ -1744,6 +1911,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 self._diagnostics.record_carrier_format_rejection(rej["clean"], rej["reason"])
                 _LOGGER.debug(
                     "Stage-2 worker: carrier-format gate rejected promotion of '%s' (reason=%s)",
+                    rej["clean"],
+                    rej["reason"],
+                )
+
+            # Phase 35 Plan 03 (MRG-05, SC-1): record grounding rejections on a
+            # DEDICATED counter, separate from carrier-format (RESEARCH.md Pitfall 3).
+            # DEBUG-only logging — no value leakage at INFO/WARNING (Phase 28 D-07 convention).
+            for rej in grounding_rejections:
+                self._diagnostics.record_grounding_rejection(rej["clean"], rej["reason"])
+                _LOGGER.debug(
+                    "Stage-2 worker: grounding gate rejected promotion of field '%s' "
+                    "value '%s' (reason=%s)",
+                    rej["field"],
                     rej["clean"],
                     rej["reason"],
                 )
@@ -1780,7 +1960,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 "[Shop2Parcel DEBUG] Stage-2 dry-run: extracted tn=%s, no POST",
                 normalized_tn,
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)  # LD-01: allow re-enqueue next poll
             self._release_inflight(job)  # re-fetch next poll (dry-run defer)
             return  # no POST, no dedup write, no pending_posts write, no store save
 
@@ -1802,7 +1981,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 outcome="stage2_no_data",
                 tracking_number=None,
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return  # no POST, no dedup write, no _pending_posts write, no store save
 
         # WR-02: Defensive carrier-format re-gate before the worker POST.
@@ -1823,7 +2001,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._diagnostics.record_carrier_format_rejection(
                 wk_clean, wk_reason or "no_carrier_match"
             )
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return  # terminal — no POST, no _pending_posts write, no _release_inflight
 
         # Rebind merged_shipment to the gate-clean canonical form (D-03) so the quota-defer
@@ -1835,8 +2012,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # runs for every dequeued job. When quota is exhausted, persist the already-merged
         # shipment to _pending_posts so the drain (plan 04) can POST it later without
         # re-invoking Ollama (no wasted GPU on re-runs).
-        now = int(_time.time())
-        if self._quota_exhausted_until is not None and now < self._quota_exhausted_until:
+        if self._hub.quota_is_exhausted:
             self._pending_posts[job.storage_key] = merged_shipment
             await self._async_save_store()
             self._diagnostics.stage2_quota_skipped_total += 1  # DIAG-02: "extracted, POST deferred"
@@ -1854,13 +2030,20 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     " (warning already emitted this poll)",
                     normalized_tn,
                 )
-            self._stage2_enqueued_keys.discard(normalized_tn)  # allow re-enqueue next poll
             return  # no POST, no dedup write; drain handles the pending item
 
         parcel_client = ParcelAppClient(
             session=async_get_clientsession(self.hass),
             api_key=self.config_entry.data[CONF_API_KEY],
         )
+
+        # D-01: reserve one shared daily-budget slot BEFORE the POST. Budget exhausted
+        # this window (raced with another account between the check above and here) —
+        # defer identically to the quota-exhausted branch above.
+        if not self._hub.try_consume():
+            self._pending_posts[job.storage_key] = merged_shipment
+            await self._async_save_store()
+            return
 
         _LOGGER.debug(
             "Stage-2: POSTing tn=%s carrier=%s to parcelapp",
@@ -1879,10 +2062,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         except ParcelAppAuthError as err:
             raise ConfigEntryAuthFailed("parcelapp.net auth error") from err
         except ParcelAppQuotaError as err:
-            self._quota_exhausted_until = (
-                err.reset_at if err.reset_at is not None else _next_midnight_utc()
-            )
-            self._arm_quota_expiry_timer()  # finding 3: refresh entities when it expires
+            # D-01: no refund on 429 — record_quota_exhausted blocks all accounts,
+            # so a stray +1 reserve is moot until reset.
+            self._hub.record_quota_exhausted(err.reset_at)
             _LOGGER.warning(
                 "parcelapp.net daily quota exhausted (Stage-2 worker); forwarding paused: %s",
                 str(err)[:100],
@@ -1891,7 +2073,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # drain will POST it once quota resets without re-running Ollama (LD-05).
             self._pending_posts[job.storage_key] = merged_shipment
             await self._async_save_store()
-            self._stage2_enqueued_keys.discard(normalized_tn)
             return
         except (ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError):  # fmt: skip
             _LOGGER.debug(
@@ -1899,13 +2080,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 normalized_tn,
             )
             self._diagnostics.stage2_already_added_total += 1
-            # WR-08: do NOT increment _stage2_posts_this_poll here — no POST succeeded
+            # WR-08: do NOT bump the shared poll counter here — no POST succeeded
             # and no parcelapp quota was consumed, so counting these ate
             # MAX_STAGE2_POSTS_PER_POLL cap slots for non-POST outcomes (the D-12
-            # contract is "increment only on successful POST").
-            # Write dedup so next poll does not retry; discard in-flight key (DEDUP-01: shared hub).
+            # contract is "increment only on successful POST"). D-01: no refund either
+            # — the reserve stays consumed (it genuinely occupied a daily-budget slot).
+            # Write dedup so next poll does not retry (DEDUP-01: shared hub).
             self._hub.check_and_mark(normalized_tn)
-            self._stage2_enqueued_keys.discard(normalized_tn)
             # WR-08: mirror the success path — persist AND publish. Persisting without
             # async_set_updated_data left store and live data divergent (the entry was
             # invisible to sensors/cleanup), and the next poll's snapshot then dropped
@@ -1921,16 +2102,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 str(err)[:100],
             )
             self._diagnostics.stage2_transient_error_total += 1
-            self._stage2_enqueued_keys.discard(normalized_tn)
+            # D-01: refund the reserved-but-unspent slot back to the shared budget.
+            self._hub.refund_consume()
             self._release_inflight(job)  # re-fetch next poll (transient, not lost)
             return
 
         # Success path (mirrors gmail_coordinator.py lines 513-526).
-        self._stage2_posts_this_poll += 1  # MRG-05 D-12: increment only on successful POST
+        self._hub.record_poll_post()  # MRG-05 D-12: bump the shared counter only on successful POST
         self._record_stage2_success()  # FAIL-05: dismiss failing-notification + reset streak on real 2xx POST (D-03/D-06).
         self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
         self._hub.check_and_mark(normalized_tn)  # DEDUP-01: shared dedup-write
-        self._stage2_enqueued_keys.discard(normalized_tn)  # Phase 18 WR-01 fix
 
         # D-06: snapshot pattern — never mutate self.data directly.
         # Guard: self.data is None before the first coordinator refresh; use empty dict as base.
@@ -1995,8 +2176,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # self._store_loaded = True below for why.
         migrated_tns = [normalize_tracking_number(tn) for tn in stored_list if isinstance(tn, str)]
         self._hub.seed_from_list(migrated_tns)
+        # Phase 31 (R5/QUOTA-05): one-time migration of the per-entry quota_exhausted_until
+        # into the shared hub via max-precedence merge. Conservative: used_today is
+        # deliberately NOT carried over — the migration day starts the shared budget at 0
+        # (seed_quota_from_account never touches used_today).
         qe = stored.get("quota_exhausted_until")
-        self._quota_exhausted_until = qe if isinstance(qe, int) else None
+        self._hub.seed_quota_from_account(qe if isinstance(qe, int) else None)
+        # Phase 31 (D-08): a per-entry quota key present at all (even a bare-None
+        # quota_exhausted_until, or a used_today/used_today_date left over from a
+        # pre-31-04 store) means this account needs its one-time durable drop persist
+        # below, independent of whether it also carried any dedup TNs to migrate.
+        had_quota_keys = qe is not None or "used_today" in stored or "used_today_date" in stored
         _LOGGER.debug(
             "Migrated %d submitted tracking numbers from per-entry store into the shared hub",
             len(migrated_tns),
@@ -2050,9 +2240,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
         self._restored_shipments = restored
         # CR-02: seed _pending_shipments from the restored shipments so any store save
-        # that fires before the first successful non-debug poll (async_stop_stage2 on a
-        # failed first refresh, _maybe_reset_used_today rollover, _on_quota_expiry) never
-        # snapshots an empty dict and wipes persisted_shipments from disk.
+        # that fires before the first successful non-debug poll never snapshots an
+        # empty dict and wipes persisted_shipments from disk.
         self._pending_shipments = dict(restored)
         # Phase 23 D-03 / LD-05: hydrate pending_posts — post-deferred merged shipments
         # that survived an HA restart while ParcelApp quota was exhausted.
@@ -2116,16 +2305,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 type(raw_lf).__name__,
             )
             self._last_forwarded_ts = None
-        raw_ut = stored.get("used_today", 0)
-        if _valid_nonneg_int(raw_ut):
-            self._used_today = raw_ut
-        else:
-            _LOGGER.warning(
-                "used_today in store is not a non-negative int (type=%s); resetting to 0",
-                type(raw_ut).__name__,
-            )
-            self._used_today = 0
-        self._used_today_date = str(stored.get("used_today_date", ""))
+        # Phase 31 (D-08): used_today/used_today_date are NOT hydrated into any coordinator
+        # attribute — they no longer exist post-D-08. The migration above (seed_quota_from_
+        # account) deliberately does not carry used_today into the hub either (conservative:
+        # the shared budget starts the migration day at 0, R5).
         self._store_loaded = True
         _LOGGER.debug(
             "Restored %d persisted shipments and %d pending posts from store",
@@ -2143,8 +2326,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # 'submitted_tracking_numbers' key unconditionally — see _store_snapshot). A
         # crash between the two awaits leaves the per-entry key intact; seed_from_list's
         # setdefault makes re-seeding on the next restart idempotent (no duplicate, no
-        # loss).
-        if migrated_tns:
+        # loss). Phase 31: broadened to `migrated_tns or had_quota_keys` so a quota-only
+        # account (dedup list empty/absent, but a quota key present) also durably drops
+        # its per-entry quota_exhausted_until/used_today/used_today_date keys.
+        if migrated_tns or had_quota_keys:
             await self._hub.async_save()
             await self._async_save_store(immediate=True)
 
@@ -2177,9 +2362,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         (Shop2ParcelHub.async_save). Every per-entry save after this plan omits the
         key unconditionally, which is what makes the one-time migration delete
         permanent (see _async_load_store).
+
+        Phase 31 (D-08/R5): 'quota_exhausted_until', 'used_today', and 'used_today_date'
+        are likewise deliberately ABSENT — that quota state now lives only in the shared
+        hub's shop2parcel.__shared__ store (Shop2ParcelHub.async_save, 31-02). The
+        one-time migration in _async_load_store (seed_quota_from_account) makes the drop
+        of these three per-entry keys permanent, mirroring the dedup migrate-then-drop
+        choreography above. No tracking-number or other PII value is referenced by this
+        comment (P2).
         """
         return {
-            "quota_exhausted_until": self._quota_exhausted_until,
             "persisted_shipments": {
                 msg_id: asdict(shipment) for msg_id, shipment in self._pending_shipments.items()
             },
@@ -2190,8 +2382,6 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # Phase 26: operational-health counters (additive keys — no STORAGE_VERSION bump).
             "total_forwarded": self._total_forwarded,
             "last_forwarded_ts": self._last_forwarded_ts,
-            "used_today": self._used_today,
-            "used_today_date": self._used_today_date,
             # Phase 27 Plan 02: seen-message-ID cache (additive key — no STORAGE_VERSION bump).
             # Stored as an ordered list of IDs (insertion order preserved by list(keys())).
             "seen_message_ids": list(self._seen_message_ids.keys()),

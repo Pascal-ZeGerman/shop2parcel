@@ -1,6 +1,8 @@
 """Constants for the Shop2Parcel integration."""
 
 import re
+from datetime import timedelta
+from enum import Enum
 
 DOMAIN = "shop2parcel"
 
@@ -98,6 +100,10 @@ def debug_mode_notification_id(entry_id: str) -> str:
 # quota. See WR-01 in phase 20 REVIEW.md for full analysis.
 # stage2_cap_notification_id mirrors debug_mode_notification_id pattern.
 MAX_STAGE2_POSTS_PER_POLL: int = 5
+# Phase 31 (D-02): shared per-poll Stage-2 POST window used by the hub's
+# _poll_window_unsub timer (31-03) to reset the shared _stage2_posts_this_poll
+# counter. Matches DEFAULT_POLL_INTERVAL's 30-minute wall-clock cadence.
+HUB_STAGE2_POLL_WINDOW = timedelta(minutes=30)
 # Phase 27 volume guards (Constants summary, Design §1):
 # SEEN_MESSAGE_IDS_MAXLEN: FIFO bound for the seen-message-ID cache introduced
 #   in Plan 02 (coordinator.py). Oldest ID evicted when the cache reaches this
@@ -114,6 +120,38 @@ MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL: int = 10
 # global timeout and caps steady-state inline Ollama time on every poll.
 MAX_STAGE2_FALLBACK_INLINE_SECONDS: float = 60.0
 STAGE2_CAP_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_cap"
+
+# Phase 32 (D-12, WORK-03): shared hub Stage-2 queue/worker bounds. Both are
+# fixed named constants — NOT user-configurable (contrast the vestigial
+# per-account CONF_QUEUE_MAXLEN/DEFAULT_QUEUE_MAXLEN below, which predates the
+# shared hub queue and is retired once the per-entry queue/worker are cut over).
+# HUB_STAGE2_QUEUE_MAXLEN: global asyncio.Queue maxsize on the hub — the
+#   drop-newest bound across ALL accounts sharing the single worker.
+HUB_STAGE2_QUEUE_MAXLEN: int = 64
+# STAGE2_PER_ACCOUNT_INFLIGHT_CAP: max jobs enqueued-but-not-yet-completed for
+#   a single entry_id at any time, independent of the global bound above.
+STAGE2_PER_ACCOUNT_INFLIGHT_CAP: int = 8
+
+
+class EnqueueOutcome(Enum):
+    """Three-way distinguishable result of hub.enqueue() (D-02, Phase 32 WORK-03).
+
+    Lives in const.py (not hub.py or coordinator.py) so both modules can import
+    it with no circular import — hub.py already imports coordinator at module
+    scope, and coordinator imports hub only under TYPE_CHECKING.
+
+    ENQUEUED: job accepted onto the shared queue; coordinator bumps
+        stage2_enqueued_total.
+    DROPPED_BACKPRESSURE: rejected by either bound (global queue-full or the
+        per-account in-flight cap); coordinator emits stage2_dropped_backpressure
+        and bumps stage2_dropped_backpressure_total.
+    SKIPPED_DUP: a job for this tracking number is already in flight (this or
+        another entry); silent no-op — no event, no counter bump.
+    """
+
+    ENQUEUED = "enqueued"
+    DROPPED_BACKPRESSURE = "dropped_backpressure"
+    SKIPPED_DUP = "skipped_dup"
 
 
 def stage2_cap_notification_id(entry_id: str) -> str:
@@ -155,6 +193,30 @@ def stage2_failing_notification_id(entry_id: str) -> str:
     window (FAIL-04 threshold notification; 1-hour cooldown via STAGE2_NOTIFY_COOLDOWN_S).
     """
     return f"{STAGE2_FAILING_NOTIFICATION_ID_PREFIX}_{entry_id}"
+
+
+# Phase 34 (D-06): hub-scoped consolidated Stage-2 failure notification —
+# ONE notification for the whole HA instance instead of one per account.
+# HUB_STAGE2_NOTIFY_THRESHOLD is deliberately HIGHER than the per-account
+# STAGE2_NOTIFY_THRESHOLD=3 above: the hub aggregates the affected-account
+# count across up to ~10 accounts sharing the queue+worker, so the streak
+# crosses the threshold faster than any single account would, and the
+# all-recovered dismiss (D-07) makes a low threshold sticky/noisy. Unlike
+# stage2_failing_notification_id() above, HUB_STAGE2_FAILING_NOTIFICATION_ID
+# is a FIXED string, not a per-entry helper — there is exactly ONE hub-scoped
+# notification with no entry_id parameter (D-05/D-08).
+#
+# 34-REVIEW-FIX (CR-02): this value is a CAP on the effective threshold, not
+# a fixed floor. hub.record_stage2_worker_failure() scales the effective
+# threshold DOWN to the number of currently-attached accounts
+# (min(HUB_STAGE2_NOTIFY_THRESHOLD, max(1, len(self._coordinators)))) so the
+# project's stated primary use case — a "personal HA ecosystem" with one or
+# a handful of accounts (CLAUDE.md) — can still trip the notification once
+# every attached account is failing, instead of never reaching a fixed
+# 5-distinct-account bar. Larger fleets still keep this value as their
+# ceiling, so a single flaky account among ~10 never fires it alone.
+HUB_STAGE2_NOTIFY_THRESHOLD: int = 5
+HUB_STAGE2_FAILING_NOTIFICATION_ID: str = "shop2parcel_hub_stage2_failing"
 
 
 def normalize_tracking_number(tracking_number: str) -> str:
@@ -217,6 +279,11 @@ CONF_OLLAMA_MODEL = "ollama_model"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
 CONF_OLLAMA_TIMEOUT = "ollama_timeout"
 DEFAULT_OLLAMA_TIMEOUT = 60  # seconds
+# Phase 32 (WORK-01, orchestrator decision 2): retained but INERT as of Phase 32 —
+# the per-account Stage-2 queue this option used to size is retired; the Stage-2
+# queue is now hub-global and bounded by HUB_STAGE2_QUEUE_MAXLEN (64) above.
+# Left in the options flow (options_flow.py) to avoid a user-facing migration; a
+# user who changes it will see no effect.
 CONF_QUEUE_MAXLEN = "queue_maxlen"
 DEFAULT_QUEUE_MAXLEN = 32
 CONF_CUSTOM_FIELDS = "custom_fields"  # list[dict]: {"name": str, "description": str | None}

@@ -186,3 +186,56 @@ def test_plan03_keys_preserved(strings):
     errors = strings["options"]["error"]
     assert "ollama_cannot_connect" in errors
     assert "ollama_model_not_found" in errors
+
+
+# ---------------------------------------------------------------------------
+# Quick task 260720-mt8: regression guard for unresolved reference-syntax
+# placeholders (e.g. "[%key:common::config_flow::abort::reauth_successful%]")
+# leaking to the reauth confirmation screen.
+# ---------------------------------------------------------------------------
+
+_KEY_REFERENCE_MARKER = "[%key:"
+
+
+def test_en_json_has_no_key_references():
+    """Quick 260720-mt8: no HA reference-syntax placeholders in the runtime files.
+
+    A custom (HACS) integration serves translations/en.json to the frontend
+    directly — HA core's build tooling, which resolves `[%key:...%]` common
+    string references, never runs for custom integrations. Any occurrence of
+    this marker renders verbatim to the user (this is exactly what caused the
+    reported reauth-success screen to show a raw placeholder instead of a
+    sentence). strings.json must also be free of the marker since the project
+    keeps the two files byte-identical.
+    """
+    en_raw = _EN.read_text()
+    strings_raw = _STRINGS.read_text()
+    assert _KEY_REFERENCE_MARKER not in en_raw, (
+        "translations/en.json contains an unresolved HA reference-syntax "
+        "placeholder (e.g. '[%key:common::config_flow::abort::...%]'). "
+        "Custom/HACS integrations serve this file to the frontend at "
+        "runtime — HA never resolves this syntax outside core's build "
+        "tooling, so it renders verbatim to the user."
+    )
+    assert _KEY_REFERENCE_MARKER not in strings_raw, (
+        "strings.json contains an unresolved HA reference-syntax "
+        "placeholder — it must stay byte-identical to translations/en.json, "
+        "which must never contain this marker (see above)."
+    )
+
+
+def test_config_abort_common_strings_resolved(strings):
+    """Quick 260720-mt8: config.abort common-string keys hold resolved English text."""
+    abort = strings["config"]["abort"]
+    expected = {
+        "reauth_successful": "Re-authentication was successful",
+        "oauth_error": "Received invalid token data.",
+        "oauth_failed": "Error while obtaining access token.",
+        "oauth_timeout": "Timeout while resolving the OAuth token.",
+        "oauth_unauthorized": "OAuth authorization error while obtaining access token.",
+        "missing_configuration": "The component is not configured. Please follow the documentation.",
+    }
+    for key, expected_value in expected.items():
+        assert abort[key] == expected_value, (
+            f"config.abort.{key} must equal {expected_value!r}, got {abort[key]!r}"
+        )

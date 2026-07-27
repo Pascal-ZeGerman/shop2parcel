@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
@@ -36,6 +36,7 @@ from .diagnostic_sensor import (
     EmailsParsedByLLMSensor,
     EmailsScannedSensor,
     EmailsSentToLLMSensor,
+    GlobalQueueSensor,
     KeywordHitsSensor,
     NewEmailsInspectedSensor,
     OllamaLatencySensor,
@@ -45,6 +46,13 @@ from .diagnostic_sensor import (
     Stage2Sensor,
     TrackingNumbersFoundSensor,
 )
+
+if TYPE_CHECKING:
+    # Phase 34-03: hub.py imports coordinator.py, so a module-level runtime
+    # import here would create a circular import. TYPE_CHECKING-only import
+    # lets GlobalQuotaSensor's hub param be typed without one (mirrors
+    # coordinator.py's identical TYPE_CHECKING guard for self._hub).
+    from .hub import Shop2ParcelHub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,6 +69,13 @@ async def async_setup_entry(
 
     Phase 7 (D-09): 14 static diagnostic sensors co-registered here.
     Phase 26 Plan 03 (P26-ENT-01..03): 3 primary operational sensors registered here.
+    Phase 34-05 (R-01/DIAG-01/DIAG-02): registers the two hub-owned global
+    sensors from EXACTLY ONE entry (whichever first claims ownership via
+    hub.claim_global_sensor_ownership) — never unconditionally from every
+    entry, which would produce a unique_id collision (RESEARCH.md
+    Anti-Pattern). Every entry's async_add_entities callback is stored on
+    the hub regardless of ownership so a LATER entry can still serve as a
+    re-home target if it becomes the survivor after the owner unloads.
     """
     coordinator: Shop2ParcelCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
@@ -93,6 +108,27 @@ async def async_setup_entry(
             ParcelAppQuotaSensor(coordinator, entry),
         ]
     )
+
+    # Phase 34-05 (R-01/DIAG-01/DIAG-02): remember this entry's callback so
+    # the hub can re-add the global sensors here later if THIS entry becomes
+    # the new owner (maybe_rehome_global_sensors, hub.py). Guarded with
+    # .get() defensively — the hub is always present after __init__.py's
+    # attach() by this point, but this mirrors the .get()-guard style used
+    # elsewhere in this codebase (e.g. _debug_mode_active's None tolerance).
+    hub: Shop2ParcelHub | None = hass.data.get(DOMAIN, {}).get("__shared__")
+    if hub is not None:
+        hub.register_sensor_add_entities(entry.entry_id, async_add_entities)
+        if hub.claim_global_sensor_ownership(entry.entry_id):
+            # First entry ever to attach (or the hub had no owner) —
+            # register the two global sensors now. This is the ONLY
+            # registration site for them — never registered unconditionally
+            # from every entry (unique_id-collision anti-pattern).
+            async_add_entities(
+                [
+                    GlobalQuotaSensor(coordinator, hub),
+                    GlobalQueueSensor(coordinator, hub),
+                ]
+            )
 
 
 class ShipmentsForwardedSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
@@ -210,6 +246,65 @@ class ParcelAppQuotaSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEnti
             "daily_limit": PARCELAPP_DAILY_LIMIT,
             "used_today": self.coordinator.used_today,
             "exhausted": self.coordinator.quota_is_exhausted,
+            "description": ("estimate from our own count; authoritative only once a 429 is seen"),
+        }
+
+
+class GlobalQuotaSensor(CoordinatorEntity[Shop2ParcelCoordinator], SensorEntity):
+    """Hub-owned global remaining-ParcelApp-quota sensor (DIAG-01, D-01/D-02/D-03).
+
+    Additive to ParcelAppQuotaSensor (D-01) — the three per-account sensors
+    are NOT removed. Post-Phase-31, every per-account quota sensor already
+    reads the shared hub value via coordinator.used_today, so this entity's
+    number is deliberately identical; its purpose is being the ONE
+    hub-scoped, removal-surviving source of truth under a distinct
+    "Shop2Parcel Hub" device (D-02), disambiguated by device + name rather
+    than by removing existing entities.
+
+    Registered under a hub-scoped identifier (not entry_id-scoped, D-02) so
+    exactly one instance exists regardless of which/how many accounts are
+    attached. Registration in async_setup_entry is deferred to 34-05 to
+    avoid the unique_id-collision anti-pattern (R-01) — this class only
+    defines the value/attribute/identity surface, unit-tested by driving
+    hub state directly.
+
+    Reads ONLY the public hub.used_today / hub.quota_is_exhausted
+    properties — never the private _used_today / quota_exhausted_until
+    (mirrors ParcelAppQuotaSensor's discipline, RESEARCH Pitfall 4 /
+    STRIDE T-26-05 / T-34-06).
+    """
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_name = "Hub Quota Remaining"
+    _unique_id_suffix = "hub_quota_remaining"  # hub-scoped — never entry_id-scoped (D-02)
+
+    def __init__(
+        self,
+        coordinator: Shop2ParcelCoordinator,
+        hub: Shop2ParcelHub,
+    ) -> None:
+        super().__init__(coordinator)
+        self._hub = hub
+        self._attr_unique_id = f"{DOMAIN}___shared___{self._unique_id_suffix}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, "__shared__")},
+            name="Shop2Parcel Hub",
+        )
+
+    @property
+    def native_value(self) -> int:
+        """Estimated shared remaining quota; clamped to 0 (never negative)."""
+        return max(0, PARCELAPP_DAILY_LIMIT - self._hub.used_today)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """daily_limit, used_today, exhausted flag, scope='shared', and estimate caveat."""
+        return {
+            "daily_limit": PARCELAPP_DAILY_LIMIT,
+            "used_today": self._hub.used_today,
+            "exhausted": self._hub.quota_is_exhausted,
+            "scope": "shared",
             "description": ("estimate from our own count; authoritative only once a 429 is seen"),
         }
 
