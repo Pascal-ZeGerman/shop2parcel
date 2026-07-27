@@ -80,6 +80,12 @@ if TYPE_CHECKING:
     # be typed without one.
     from .hub import Shop2ParcelHub
 
+if TYPE_CHECKING:
+    # Phase 30-03: hub.py imports coordinator.py, so a module-level runtime import
+    # here would create a circular import. TYPE_CHECKING-only import lets self._hub
+    # be typed without one.
+    from .hub import Shop2ParcelHub
+
 _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 3
