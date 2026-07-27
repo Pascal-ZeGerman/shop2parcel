@@ -19,6 +19,8 @@ dev = [
     "pytest-cov",
     "aioresponses",
     "pytest-homeassistant-custom-component",
+    "ruff==0.15.14",
+    "mypy==2.1.0",
 ]
 
 [tool.pytest.ini_options]
