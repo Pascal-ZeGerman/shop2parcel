@@ -893,8 +893,28 @@ def test_record_quota_exhausted_sets_and_maxes(hass):
     then an earlier one leaves quota_exhausted_until at the LATER value —
     max-precedence, never shortening an active block. Calling with None
     falls back to the next UTC midnight (hub._next_midnight_utc()).
+
+    Regression (hub-lingering-timer-teardown, 2026-07-27): record_quota_
+    exhausted() unconditionally arms a real async_track_point_in_time
+    quota-expiry timer (hub.py _arm_quota_expiry_timer) on `self._hass`,
+    regardless of whether hub.async_setup()/async_shutdown() were ever
+    called. Every OTHER Direct-hub test in this file that arms a timer
+    calls `await hub.async_shutdown()` to cancel it (see the module
+    docstring); this test is synchronous (no `async def`) so it cannot
+    await async_shutdown() — it must cancel the raw unsub handle directly
+    instead. Without the explicit `hub._quota_expiry_unsub()` cleanup
+    below, both hub and hub2 leave a real scheduled TimerHandle on
+    hass.loop that outlives the test, which pytest-homeassistant-custom-
+    component's own verify_cleanup fixture is meant to catch (and does,
+    in CI) — verified directly here via get_scheduled_timer_handles so the
+    regression does not depend on that fixture's own loop-resolution
+    behavior (see .planning/debug/hub-lingering-timer-teardown.md).
     """
+    from homeassistant.util.async_ import get_scheduled_timer_handles  # noqa: PLC0415
+
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    before = {h for h in get_scheduled_timer_handles(hass.loop) if not h.cancelled()}
 
     hub = Shop2ParcelHub(hass)
 
@@ -913,6 +933,21 @@ def test_record_quota_exhausted_sets_and_maxes(hass):
     from custom_components.shop2parcel.hub import _next_midnight_utc  # noqa: PLC0415
 
     assert hub2.quota_exhausted_until == _next_midnight_utc()
+
+    # Cancel the timers this test armed on both hubs — mirrors every other
+    # Direct-hub test's `await hub.async_shutdown()` cleanup, adapted for a
+    # sync test that cannot await it.
+    if hub._quota_expiry_unsub is not None:
+        hub._quota_expiry_unsub()
+        hub._quota_expiry_unsub = None
+    if hub2._quota_expiry_unsub is not None:
+        hub2._quota_expiry_unsub()
+        hub2._quota_expiry_unsub = None
+
+    after = {h for h in get_scheduled_timer_handles(hass.loop) if not h.cancelled()}
+    assert after <= before, (
+        f"record_quota_exhausted() left a lingering scheduled timer: {after - before}"
+    )
 
 
 def test_poll_cap_shared_across_accounts(hass):

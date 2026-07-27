@@ -209,6 +209,18 @@ def _auto_attach_test_hub(hass):
     overwrites self._hub with the real hub, incrementing refcount exactly
     once — the LIFE-01..05 hub lifecycle tests in test_hub.py never observe
     this fixture's test hub.
+
+    Teardown (hub-lingering-timer-teardown fix, 2026-07-27): this test hub's
+    async_setup() is deliberately never called (see _make_test_hub's
+    docstring), but several hub mutators — record_quota_exhausted() and
+    seed_quota_from_account() — unconditionally arm a REAL
+    async_track_point_in_time quota-expiry timer regardless of that. Tests
+    that trigger a ParcelAppQuotaError (429) inline-forward path call one of
+    those on this shared test hub, leaving a scheduled TimerHandle on
+    hass.loop with nothing to ever cancel it. Cancel any of the three
+    hub-owned unsub callbacks the test may have armed after the test yields —
+    mirrors what Shop2ParcelHub.async_shutdown() cancels in production, minus
+    the I/O (this hub's _store is a MagicMock, never real).
     """
     from custom_components.shop2parcel.coordinator import Shop2ParcelCoordinator
 
@@ -225,6 +237,14 @@ def _auto_attach_test_hub(hass):
 
     with patch.object(Shop2ParcelCoordinator, "__init__", patched_init):
         yield
+
+    test_hub = hass.data.get(DOMAIN, {}).get("_test_hub")
+    if test_hub is not None:
+        for attr in ("_midnight_unsub", "_quota_expiry_unsub", "_poll_window_unsub"):
+            unsub = getattr(test_hub, attr, None)
+            if unsub is not None:
+                unsub()
+                setattr(test_hub, attr, None)
 
 
 @pytest.fixture(autouse=True)

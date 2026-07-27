@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -30,6 +31,14 @@ from .binary_sensor import OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES
 from .const import DOMAIN
 from .diagnostic_sensor import DIAGNOSTIC_SENSOR_UID_SUFFIXES
 from .sensor import OPERATIONAL_SENSOR_UID_SUFFIXES
+
+if TYPE_CHECKING:
+    # Module-level import here would create a circular import (coordinator.py
+    # imports from this package indirectly via gmail_coordinator.py/
+    # imap_coordinator.py); TYPE_CHECKING-only import lets
+    # _detach_and_maybe_shutdown_hub's signature reference the real type
+    # (mirrors coordinator.py's identical TYPE_CHECKING guard for self._hub).
+    from .coordinator import Shop2ParcelCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,6 +128,42 @@ def _sweep_orphaned_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
         registry.async_remove(entity_id)
 
 
+async def _detach_and_maybe_shutdown_hub(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: Shop2ParcelCoordinator | None
+) -> None:
+    """Detach ``coordinator`` from the shared hub; shut the hub down if this
+    was the last attached account (refcount reaches 0).
+
+    Shared by ``async_unload_entry`` (normal teardown) and ``async_setup_entry``'s
+    failure path (hub-lingering-timer-teardown fix, 2026-07-27): a setup
+    failure AFTER ``hub.attach(coordinator)`` has already run — e.g.
+    ``ConfigEntryAuthFailed`` raised by ``async_config_entry_first_refresh()``
+    on a bad Gmail token — must not leave the shared hub's 3 timers + worker
+    task running forever. HA's core config-entry setup runner does NOT call
+    this integration's ``async_unload_entry`` when ``async_setup_entry``
+    raises (it only fires ``entry.async_on_unload()``-registered callbacks,
+    and hub teardown is deliberately not wired through that mechanism — see
+    ``async_unload_entry``'s docstring). Without this, a failed first setup
+    orphans the hub (timers + worker task leak, and ``hub._refcount`` never
+    returns to the value it would have had absent this coordinator, since it
+    is never detached).
+
+    MUST be called with ``hass.data[DOMAIN]["_init_lock"]`` held by the
+    caller (mirrors CR-01's concurrency guarantees) — this function does not
+    acquire the lock itself so callers can choose their own acquisition
+    scope.
+    """
+    hub = hass.data.get(DOMAIN, {}).get("__shared__")
+    if hub is None:
+        return
+    hub.maybe_rehome_global_sensors(entry.entry_id)
+    if coordinator is not None:
+        hub.detach(coordinator)
+    if hub._refcount == 0:
+        await hub.async_shutdown()
+        del hass.data[DOMAIN]["__shared__"]
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Shop2Parcel from a config entry.
 
@@ -148,6 +193,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     already deleted) — it will either see the survived hub (refcount bumped
     correctly) or block until the concurrent teardown finishes and then
     re-read a freshly-created hub.
+
+    hub-lingering-timer-teardown fix (2026-07-27): everything from
+    ``hub.attach(coordinator)`` through ``async_config_entry_first_refresh()``
+    now runs under a ``try/except BaseException`` that detaches the
+    coordinator (and shuts the hub down if it was the last account) before
+    re-raising — see ``_detach_and_maybe_shutdown_hub``. Without this, a
+    setup failure (e.g. ``ConfigEntryAuthFailed``) left the shared hub's
+    timers + worker task running forever, since HA never calls
+    ``async_unload_entry`` for a config entry whose setup failed.
     """
     import asyncio  # stdlib — already available
 
@@ -175,7 +229,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONNECTION_TYPE_GMAIL,
         CONNECTION_TYPE_IMAP,
     )
-    from .coordinator import Shop2ParcelCoordinator  # noqa: PLC0415
     from .gmail_coordinator import GmailCoordinator  # noqa: PLC0415
     from .imap_coordinator import ImapCoordinator  # noqa: PLC0415
 
@@ -196,27 +249,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async with hass.data[DOMAIN]["_init_lock"]:
         hub = hass.data[DOMAIN]["__shared__"]
         hub.attach(coordinator)
-    await coordinator._async_load_store()
-    # Phase 26 Plan 02 (P26-REG-01..03): sweep orphaned entity registry entries
-    # (shipment_* per-message uids + has_active_shipments) left by prior versions.
-    # MUST run after _async_load_store (store hydrated) and BEFORE
-    # async_forward_entry_setups (RESEARCH.md Pitfall 2 — sweep before platform
-    # setup so new entities register into a clean registry).
-    _sweep_orphaned_entities(hass, entry)
-    # Phase 17 D-05: derive stage2_enabled before first poll.
-    # bool() coerces any non-empty URL string to True without exposing the URL value.
-    # Empty string fallback prevents AttributeError on v1.2 entries with no ollama_url key.
-    coordinator._diagnostics.stage2_enabled = bool(entry.options.get(CONF_OLLAMA_URL, ""))
-    # Phase 32 (D-03/D-04, WORK-01): when Stage-2 is enabled, build this account's
-    # OllamaExtractor from its own options. The per-entry queue/worker this call
-    # used to construct/spawn is retired — every account's Stage-2 jobs now
-    # enqueue onto the shared hub queue (hub.enqueue) drained by the single hub
-    # worker; the hub is attached above and torn down only at last-account
-    # detach (async_unload_entry), so no async_on_unload registration is needed
-    # here anymore for Stage-2 teardown.
-    if coordinator._diagnostics.stage2_enabled:
-        await coordinator.async_setup_stage2_extractor()
-    await coordinator.async_config_entry_first_refresh()
+    # hub-lingering-timer-teardown fix (2026-07-27): from here through
+    # async_config_entry_first_refresh(), any exception must detach this
+    # coordinator (and shut the hub down if it was the last account) before
+    # propagating — see _detach_and_maybe_shutdown_hub's docstring. Without
+    # this, e.g. a ConfigEntryAuthFailed on first refresh left the hub's 3
+    # timers + worker task attached and running forever, since HA does not
+    # call async_unload_entry when async_setup_entry raises.
+    try:
+        await coordinator._async_load_store()
+        # Phase 26 Plan 02 (P26-REG-01..03): sweep orphaned entity registry entries
+        # (shipment_* per-message uids + has_active_shipments) left by prior versions.
+        # MUST run after _async_load_store (store hydrated) and BEFORE
+        # async_forward_entry_setups (RESEARCH.md Pitfall 2 — sweep before platform
+        # setup so new entities register into a clean registry).
+        _sweep_orphaned_entities(hass, entry)
+        # Phase 17 D-05: derive stage2_enabled before first poll.
+        # bool() coerces any non-empty URL string to True without exposing the URL value.
+        # Empty string fallback prevents AttributeError on v1.2 entries with no ollama_url key.
+        coordinator._diagnostics.stage2_enabled = bool(entry.options.get(CONF_OLLAMA_URL, ""))
+        # Phase 32 (D-03/D-04, WORK-01): when Stage-2 is enabled, build this account's
+        # OllamaExtractor from its own options. The per-entry queue/worker this call
+        # used to construct/spawn is retired — every account's Stage-2 jobs now
+        # enqueue onto the shared hub queue (hub.enqueue) drained by the single hub
+        # worker; the hub is attached above and torn down only at last-account
+        # detach (async_unload_entry), so no async_on_unload registration is needed
+        # here anymore for Stage-2 teardown.
+        if coordinator._diagnostics.stage2_enabled:
+            await coordinator.async_setup_stage2_extractor()
+        await coordinator.async_config_entry_first_refresh()
+    except BaseException:
+        async with hass.data[DOMAIN]["_init_lock"]:
+            await _detach_and_maybe_shutdown_hub(hass, entry, coordinator)
+        raise
 
     # Phase 31 (D-08): the per-account time-boundary refresh timers (quota-expiry +
     # UTC-midnight used_today) are gone — the shared hub now owns exactly 3 timers,
@@ -328,26 +393,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         coordinator = entry_data.get("coordinator") if entry_data else None
 
-        async def _teardown_hub_if_last_account() -> None:
-            hub = hass.data.get(DOMAIN, {}).get("__shared__")
-            if hub is not None:
-                hub.maybe_rehome_global_sensors(entry.entry_id)
-            if hub is not None and coordinator is not None:
-                hub.detach(coordinator)
-            if hub is not None and hub._refcount == 0:
-                await hub.async_shutdown()
-                del hass.data[DOMAIN]["__shared__"]
-
         # IN-05 edge case: if hass.data[DOMAIN] (and therefore _init_lock) was
         # never created — i.e. no async_setup_entry ever ran for this hass
         # instance — there is nothing to race against, so fall back to the
         # unguarded path rather than raising a KeyError.
+        #
+        # hub-lingering-timer-teardown fix (2026-07-27): the detach ->
+        # conditional-shutdown -> delete sequence itself now lives in the
+        # module-level _detach_and_maybe_shutdown_hub, shared with
+        # async_setup_entry's failure path, so the two teardown code paths
+        # can never drift apart.
         init_lock = hass.data.get(DOMAIN, {}).get("_init_lock")
         if init_lock is not None:
             async with init_lock:
-                await _teardown_hub_if_last_account()
+                await _detach_and_maybe_shutdown_hub(hass, entry, coordinator)
         else:
-            await _teardown_hub_if_last_account()
+            await _detach_and_maybe_shutdown_hub(hass, entry, coordinator)
         # cancel_cleanup is registered via entry.async_on_unload in async_setup_entry
         # so HA cancels it automatically — no explicit call needed here.
     return unload_ok

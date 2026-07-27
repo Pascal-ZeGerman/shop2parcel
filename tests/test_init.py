@@ -125,6 +125,83 @@ async def test_setup_entry_gmail_auth_failure_sets_setup_error(hass, mock_config
     assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
 
 
+async def test_setup_entry_auth_failure_leaves_no_lingering_hub_timers(hass, mock_config_entry):
+    """Regression (hub-lingering-timer-teardown, 2026-07-27): async_setup_entry
+    creates+attaches the shared Shop2ParcelHub (arming all 3 hub-owned timers
+    plus the worker task) BEFORE coordinator.async_config_entry_first_refresh()
+    runs. When first_refresh raises ConfigEntryAuthFailed, HA's core config-
+    entry setup runner does NOT call this integration's async_unload_entry (it
+    only fires entry.async_on_unload()-registered callbacks — none are
+    registered yet at this point) — so hub.detach()/hub.async_shutdown() must
+    never have run, leaving the hub's midnight/quota_expiry/poll_window timers
+    scheduled on hass.loop forever.
+
+    Verified directly via get_scheduled_timer_handles (the same primitive
+    pytest-homeassistant-custom-component's own verify_cleanup fixture uses)
+    rather than relying on that autouse fixture, whose own event-loop
+    resolution has an unrelated fragility in some local pytest-asyncio
+    environments (see .planning/debug/hub-lingering-timer-teardown.md) — this
+    assertion is what actually proves the leak/fix, independent of that.
+
+    The snapshot is taken AFTER manually mirroring pytest-homeassistant-
+    custom-component's own hass-fixture teardown sequence (unload any LOADED
+    entries, then hass.async_stop(force=True)) so that generic HA-framework
+    housekeeping timers (e.g. Store._async_schedule_callback_delayed_write,
+    flushed by the EVENT_HOMEASSISTANT_FINAL_WRITE that async_stop() fires)
+    are excluded — only a genuine Shop2Parcel hub leak should survive that
+    sequence.
+    """
+    import asyncio as _asyncio
+
+    from homeassistant.util.async_ import get_scheduled_timer_handles
+
+    before = {h for h in get_scheduled_timer_handles(hass.loop) if not h.cancelled()}
+
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(
+            side_effect=GmailAuthError("fake auth fail")
+        )
+        result = await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    assert result is False
+    assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
+
+    # The hub singleton must have been fully torn down (detached, refcount 0,
+    # shut down) rather than left dangling in hass.data.
+    assert DOMAIN not in hass.data or "__shared__" not in hass.data[DOMAIN]
+
+    # Mirror pytest_homeassistant_custom_component.plugins.hass fixture's own
+    # teardown sequence exactly (see plugins.py lines ~600-618) so generic HA
+    # framework timers get their normal chance to flush/cancel before we
+    # snapshot — anything still scheduled after this is a genuine leak.
+    loaded_entries = [
+        e for e in hass.config_entries.async_entries() if e.state is ConfigEntryState.LOADED
+    ]
+    if loaded_entries:
+        await _asyncio.gather(
+            *(hass.config_entries.async_unload(e.entry_id) for e in loaded_entries)
+        )
+    await hass.async_stop(force=True)
+
+    after = {h for h in get_scheduled_timer_handles(hass.loop) if not h.cancelled()}
+    assert after <= before, (
+        f"async_setup_entry left lingering hub timer(s) scheduled after a setup "
+        f"failure: {after - before}"
+    )
+
+
 async def test_unload_entry_removes_coordinator(hass, mock_config_entry):
     """async_unload_entry calls async_unload_platforms with PLATFORMS then drops hass.data."""
     mock_config_entry.add_to_hass(hass)
