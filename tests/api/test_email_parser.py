@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 
 from custom_components.shop2parcel.api.email_parser import (
+    CARRIER_REGISTRY,
     STRATEGY_BROAD_REGEX,
+    STRATEGY_DHL,
     STRATEGY_FEDEX,
     STRATEGY_HTML,
     STRATEGY_REGEX,
@@ -19,6 +21,12 @@ from custom_components.shop2parcel.api.email_parser import (
     EmailParser,
     ParseResult,
     ShipmentData,
+    _detect_dhl,
+    _detect_fedex,
+    _detect_ups,
+    _detect_usps,
+    _extract_usps_shippers,
+    _parse_dhl,
 )
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
@@ -45,6 +53,11 @@ def usps_html() -> str:
 @pytest.fixture
 def fedex_html() -> str:
     return (FIXTURE_DIR / "fedex_shipping.html").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def dhl_html() -> str:
+    return (FIXTURE_DIR / "dhl_shipping.html").read_text(encoding="utf-8")
 
 
 def test_extracts_all_fields_from_fixture(shopify_html: str) -> None:
@@ -291,6 +304,72 @@ def test_usps_digest_deduplicates_repeated_tracking_number() -> None:
     assert result.shipment is not None
     assert result.shipment.tracking_number == "9200190106460364169829"
     assert result.extra_shipments == []
+
+
+def test_extract_usps_shippers_pairs_named_and_empty() -> None:
+    """USPS-STRUCT-01: _extract_usps_shippers reads real pra-shipper-name-id spans
+    and returns them in document order, named shipper first, empty span second."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest_structural.html").read_text(
+        encoding="utf-8"
+    )
+    assert _extract_usps_shippers(html) == ["PRIMARY KIDS INC", ""]
+
+
+def test_usps_digest_structural_populates_order_summary() -> None:
+    """USPS-STRUCT-01: real-id digest populates order_summary from the paired
+    shipper span (named shipper -> name, empty shipper span -> None)."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest_structural.html").read_text(
+        encoding="utf-8"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "digest_struct", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "9261290316868031775213"
+    assert result.shipment.order_summary == "PRIMARY KIDS INC"
+    assert len(result.extra_shipments) == 1
+    assert result.extra_shipments[0].tracking_number == "9400111899223450094040"
+    assert result.extra_shipments[0].order_summary is None
+
+
+def test_usps_digest_secondary_span_deduplicated() -> None:
+    """USPS-STRUCT-01: the pra-tracking-number-id-secondary mobile duplicate does
+    NOT create a phantom third sibling."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest_structural.html").read_text(
+        encoding="utf-8"
+    )
+    parser = EmailParser()
+    result = parser.parse(html, "digest_struct", 1746000000)
+    assert result.shipment is not None
+    assert len([result.shipment, *result.extra_shipments]) == 2
+
+
+def test_extract_usps_shippers_count_mismatch_returns_empty() -> None:
+    """USPS-STRUCT-01: real ids present but shipper count != tracking count ->
+    guard trips, returns [], and no order_summary is guessed by partial index."""
+    html = (
+        Path(__file__).parent.parent / "fixtures" / "usps_digest_count_mismatch.html"
+    ).read_text(encoding="utf-8")
+    assert _extract_usps_shippers(html) == []
+    parser = EmailParser()
+    result = parser.parse(html, "digest_mismatch", 1746000000)
+    assert result.shipment is not None
+    for s in [result.shipment, *result.extra_shipments]:
+        assert s.order_summary is None
+
+
+def test_extract_usps_shippers_ids_absent_returns_empty() -> None:
+    """USPS-STRUCT-01: existing synthetic usps_digest.html has 0 shipper spans vs
+    3 tracking numbers -> guard trips, returns [] (regression proof for the
+    ids-absent branch)."""
+    html = (Path(__file__).parent.parent / "fixtures" / "usps_digest.html").read_text(
+        encoding="utf-8"
+    )
+    assert _extract_usps_shippers(html) == []
+    parser = EmailParser()
+    result = parser.parse(html, "digest_msg1", 1746000000)
+    assert result.shipment is not None
+    for s in [result.shipment, *result.extra_shipments]:
+        assert s.order_summary is None
 
 
 def test_fedex_template_extracts_tracking(fedex_html: str) -> None:
@@ -955,3 +1034,57 @@ def test_validate_carrier_format_regression_fedex_12() -> None:
     assert ok is True
     assert reason is None
     assert clean == "123456789012"
+
+
+def test_dhl_template_extracts_tracking(dhl_html: str) -> None:
+    """DHL-01: DHL Express template extracts waybill number, sets carrier_name='DHL Express'
+    and strategy_used=STRATEGY_DHL."""
+    parser = EmailParser()
+    result = parser.parse(dhl_html, "dhl_msg1", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "4212345678"
+    assert result.shipment.carrier_name == "DHL Express"
+    assert result.shipment.order_name == ""
+    assert result.strategy_used == STRATEGY_DHL
+    assert result.skip_reason is None
+
+
+def test_dhl_first_english_waybill_wins(dhl_html: str) -> None:
+    """DHL-01: real fixture contains a second Spanish 'número de guía' waybill number;
+    the deterministic .search() first-match convention (shared with _parse_ups/_parse_fedex)
+    must pick the English match, not the Spanish one."""
+    parser = EmailParser()
+    result = parser.parse(dhl_html, "dhl_msg1", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "4212345678"
+    assert result.shipment.tracking_number != "4294142591"
+
+
+def test_dhl_detect_fn_not_triggered_on_other_fixtures(
+    ups_html: str, usps_html: str, fedex_html: str, shopify_html: str
+) -> None:
+    """DHL-01 / T-Spoof mitigation: _detect_dhl must be False on every existing
+    UPS/USPS/FedEx/Shopify regression fixture (zero false positives, WR-03)."""
+    assert _detect_dhl(ups_html) is False
+    assert _detect_dhl(usps_html) is False
+    assert _detect_dhl(fedex_html) is False
+    assert _detect_dhl(shopify_html) is False
+
+
+def test_other_detect_fns_not_triggered_on_dhl_fixture(dhl_html: str) -> None:
+    """DHL-01: the real DHL body must route only to DHL — no earlier UPS/USPS/FedEx
+    detector steals it."""
+    assert _detect_ups(dhl_html) is False
+    assert _detect_usps(dhl_html) is False
+    assert _detect_fedex(dhl_html) is False
+
+
+def test_strategy_dhl_constant() -> None:
+    """DHL-01 / D-07: STRATEGY_DHL is importable with locked string value."""
+    assert STRATEGY_DHL == "dhl_template"
+
+
+def test_carrier_registry_includes_dhl_last() -> None:
+    """DHL-01: CARRIER_REGISTRY has exactly 4 entries, DHL appended last after FedEx."""
+    assert CARRIER_REGISTRY[-1] == (_detect_dhl, _parse_dhl)
+    assert len(CARRIER_REGISTRY) == 4

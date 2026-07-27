@@ -99,6 +99,7 @@ STRATEGY_HTML = "html_template"
 STRATEGY_UPS = "ups_template"
 STRATEGY_USPS = "usps_template"
 STRATEGY_FEDEX = "fedex_template"
+STRATEGY_DHL = "dhl_template"
 STRATEGY_REGEX = "regex_fallback"
 STRATEGY_BROAD_REGEX = "broad_regex"
 
@@ -210,6 +211,29 @@ def _extract_tracking_from_hrefs(soup: BeautifulSoup) -> str | None:
 _UPS_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])ups\.com\b")
 _USPS_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])usps\.com\b")
 _FEDEX_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])fedex\.com\b")
+_DHL_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])dhl\.com\b")
+
+# DHL Express waybill/AWB numbers are commonly 9-11 digits (10 in practice). NOT
+# covered by the shared _TRACKING_PATTERNS list (UPS/USPS/FedEx only — see R5
+# comment above) — Decision 1 (36-01-PLAN.md): local-only validation, never
+# extend the shared list/MRG-04 validator with this shape. Bounded quantifiers
+# only — no ReDoS risk (ASVS V5).
+_DHL_TRACKING_RE = re.compile(r"waybill\s+number[^0-9]{0,10}(\d{9,11})", re.IGNORECASE)
+
+
+def _dhl_looks_like_tracking(s: str) -> bool:
+    """Local candidate validator for DHL's 9-11 digit waybill shape.
+
+    Deliberately NOT reusing the shared _looks_like_tracking()/_TRACKING_PATTERNS
+    list — DHL's bare-digit shape isn't (and per Decision 1 in 36-01-PLAN.md must
+    never be) in that shared list, since it feeds merge.py's MRG-04 Stage-2
+    promotion gate. A bare 9-11-digit shape there would let the LLM promote any
+    unlabeled digit-string guess as a "valid" DHL tracking number. This local
+    validator only ever runs against a match already gated by _DHL_TRACKING_RE's
+    'waybill number' label anchor inside _parse_dhl, so it can never be reached
+    from the Stage-2 path.
+    """
+    return bool(re.match(r"^\d{9,11}$", s))
 
 
 def _detect_ups(html: str) -> bool:
@@ -247,6 +271,17 @@ def _detect_fedex(html: str) -> bool:
     """
     html_lower = html.lower()
     return bool(_FEDEX_DOMAIN_RE.search(html_lower)) and "shopify" not in html_lower
+
+
+def _detect_dhl(html: str) -> bool:
+    """Return True if html is a DHL Express shipping notification email.
+
+    Marker: boundary-anchored 'dhl.com' (WR-03) AND 'shopify' not present —
+    prevents misclassifying Shopify merchant emails for DHL-fulfilled orders
+    (T-Spoof mitigation, matching _detect_ups pattern).
+    """
+    html_lower = html.lower()
+    return bool(_DHL_DOMAIN_RE.search(html_lower)) and "shopify" not in html_lower
 
 
 def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
@@ -297,6 +332,41 @@ def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
     )
 
 
+def _extract_usps_shippers(html: str) -> list[str]:
+    """Structurally extract per-package shipper names from a USPS Informed
+    Delivery digest, in document order (spikes 022, 023 -- USPS-STRUCT-01).
+
+    USPS's own digest template pairs a shipper-name span
+    (id="pra-shipper-name-id", empty when no sender data upstream) with a
+    tracking-number span (id="pra-tracking-number-id") in the same package
+    block, one pair per physical package, in document order -- the same order
+    _parse_usps's own tracking_numbers findall already returns. Mirrors that
+    exact extraction (findall over get_text(), same dict.fromkeys dedup) so
+    the two counts always agree when USPS's real ids are present.
+
+    find_all(id="pra-shipper-name-id") returns exactly one span per physical
+    package -- unlike pra-tracking-number-id, it has no "-secondary" mobile-
+    view duplicate, so no dedup is needed here.
+
+    Guarded on an exact count match: if len(shippers) != len(tracking_numbers)
+    (real ids entirely absent, as in the synthetic pytest fixtures, or present
+    but mismatched), returns [] rather than guessing by partial index -- callers
+    must treat [] as "no structural pairing available" and leave order_summary
+    unset (today's behavior).
+    """
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
+    raw = _USPS_TRACKING_RE.findall(text)
+    tracking_numbers = list(dict.fromkeys(m for m in raw if _looks_like_tracking(m)))
+
+    shipper_spans = soup.find_all(id="pra-shipper-name-id")
+    shippers = [s.get_text(strip=True) for s in shipper_spans]
+
+    if len(shippers) != len(tracking_numbers):
+        return []
+    return shippers
+
+
 def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
     """Extract tracking number(s) from a USPS email.
 
@@ -306,21 +376,29 @@ def _parse_usps(html: str, message_id: str, email_date: int) -> ParseResult:
     matches go into ParseResult.extra_shipments. dict.fromkeys deduplicates
     while preserving order (same TN appearing twice in the HTML counts once).
     Href fallback runs only when the body text contains no valid tracking numbers.
+
+    When USPS's real pra-shipper-name-id/pra-tracking-number-id template ids
+    are present and their counts match the tracking numbers found here
+    (USPS-STRUCT-01, spikes 022/023), each sibling's order_summary is
+    populated from its paired shipper (empty span -> None). Otherwise
+    order_summary stays None, matching today's behavior.
     """
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text(separator=" ")
     raw = _USPS_TRACKING_RE.findall(text)
     tracking_numbers = list(dict.fromkeys(m for m in raw if _looks_like_tracking(m)))
     if tracking_numbers:
+        shippers = _extract_usps_shippers(html)
         shipments = [
             ShipmentData(
                 tracking_number=tn,
                 carrier_name="USPS",
                 order_name="",
+                order_summary=(shippers[idx] or None) if shippers else None,
                 message_id=message_id,
                 email_date=email_date,
             )
-            for tn in tracking_numbers
+            for idx, tn in enumerate(tracking_numbers)
         ]
         return ParseResult(
             shipment=shipments[0],
@@ -398,8 +476,41 @@ def _parse_fedex(html: str, message_id: str, email_date: int) -> ParseResult:
     )
 
 
-# Registry order: UPS -> USPS -> FedEx -> (fallthrough to Shopify in parse()).
-# First match wins. Order matters per RESEARCH.md ordering analysis.
+def _parse_dhl(html: str, message_id: str, email_date: int) -> ParseResult:
+    """Extract waybill number from DHL Express shipping notification email.
+
+    Mirrors _parse_ups's structure exactly (labeled regex, no href fallback —
+    not needed for this fixture shape per spike 024). order_name='' for direct
+    carrier emails (no Shopify order number present). Uses the local
+    _dhl_looks_like_tracking() validator, NOT the shared _looks_like_tracking()
+    (Decision 1, 36-01-PLAN.md).
+    """
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
+    m = _DHL_TRACKING_RE.search(text)
+    if m and _dhl_looks_like_tracking(m.group(1)):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=m.group(1),
+                carrier_name="DHL Express",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_DHL,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    return ParseResult(
+        shipment=None,
+        skip_reason="no_template_match",
+        strategy_used=None,
+        keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+    )
+
+
+# Registry order: UPS -> USPS -> FedEx -> DHL -> (fallthrough to Shopify in
+# parse()). First match wins. Order matters per RESEARCH.md ordering analysis.
 _CarrierEntry = tuple[
     Callable[[str], bool],
     Callable[[str, str, int], ParseResult],
@@ -408,6 +519,7 @@ CARRIER_REGISTRY: list[_CarrierEntry] = [
     (_detect_ups, _parse_ups),
     (_detect_usps, _parse_usps),
     (_detect_fedex, _parse_fedex),
+    (_detect_dhl, _parse_dhl),
 ]
 
 
