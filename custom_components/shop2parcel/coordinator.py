@@ -1583,8 +1583,7 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # (finding #523).
         if self._diagnostics.stage2_enabled and not debug_mode:
             _LOGGER.debug(
-                "%s %s: stage2 enabled but extractor unavailable — "
-                "leaving un-cached for retry",
+                "%s %s: stage2 enabled but extractor unavailable — leaving un-cached for retry",
                 log_label,
                 msg_key,
             )
