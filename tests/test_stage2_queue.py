@@ -421,8 +421,8 @@ async def test_drop_newest_backpressure(hass, mock_stage2_config_entry, caplog):
         )
         # (b) Last scan event must be stage2_dropped_backpressure.
         assert coord.diagnostics.scan_events[-1]["outcome"] == "stage2_dropped_backpressure"
-        # (c) Dropped TN must NOT be in _submitted_tracking_numbers.
-        assert dropped_tn not in coord._submitted_tracking_numbers
+        # (c) Dropped TN must NOT be in the shared hub's dedup set.
+        assert not coord._hub.is_submitted(dropped_tn)
         # (d) Dropped TN must NOT be in _stage2_enqueued_keys.
         assert dropped_tn not in coord._stage2_enqueued_keys
 

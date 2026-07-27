@@ -143,7 +143,7 @@ async def test_new_shipment_is_posted(hass, mock_config_entry):
         data = await coord._async_update_data()
         assert "msg1" in data
         # Phase 10: dedup uses tracking-number (normalized), not msg-ID.
-        assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+        assert coord._hub.is_submitted("1Z999AA10123456784")
         mock_parcel_cls.return_value.async_add_delivery.assert_called_once()
         # Verify the real access_token string was forwarded to the Gmail client (IN-01).
         call_args = mock_gmail_cls.return_value.async_list_messages.call_args
@@ -212,8 +212,9 @@ async def test_dedup_survives_restart(hass, mock_config_entry):
     """FWRD-02: submitted_tracking_numbers persisted in Store survive coordinator re-init.
 
     Phase 10 change: Store schema uses submitted_tracking_numbers list (not forwarded_ids).
-    After _async_load_store, coordinator._submitted_tracking_numbers is an OrderedDict
-    preserving insertion order from the stored list.
+    Phase 30-03: _async_load_store now migrates that per-entry list into the shared
+    hub's OrderedDict (coord._hub._submitted_tracking_numbers), preserving insertion
+    order from the stored list.
     """
     mock_config_entry.add_to_hass(hass)
     with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
@@ -228,8 +229,8 @@ async def test_dedup_survives_restart(hass, mock_config_entry):
         await coord._async_load_store()
         # WR-01: stored keys are re-normalized to the canonical separator-free
         # form on load (insertion order preserved).
-        assert list(coord._submitted_tracking_numbers.keys()) == ["TNA", "TNB"]
-        assert isinstance(coord._submitted_tracking_numbers, OrderedDict)
+        assert list(coord._hub._submitted_tracking_numbers.keys()) == ["TNA", "TNB"]
+        assert isinstance(coord._hub._submitted_tracking_numbers, OrderedDict)
         assert coord._quota_exhausted_until is None
 
 
@@ -253,33 +254,16 @@ async def test_load_store_trims_oversized_tracking_list(hass, mock_config_entry)
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
 
-        assert len(coord._submitted_tracking_numbers) == MAX_SUBMITTED_TRACKING_NUMBERS
+        assert coord._hub.submitted_count == MAX_SUBMITTED_TRACKING_NUMBERS
         # FIFO: the OLDEST entries are evicted; the newest survive.
-        assert "TN00000" not in coord._submitted_tracking_numbers
-        assert oversized[-1] in coord._submitted_tracking_numbers
+        assert not coord._hub.is_submitted("TN00000")
+        assert coord._hub.is_submitted(oversized[-1])
 
 
-async def test_record_submitted_tn_trims_with_while_loop(hass, mock_config_entry):
-    """IN-01: _record_submitted_tn converges an over-cap dedup set in ONE insert
-    (while-loop trim), instead of evicting a single entry per insert."""
-    from collections import OrderedDict as _OD  # noqa: PLC0415
-
-    from custom_components.shop2parcel.const import (  # noqa: PLC0415
-        MAX_SUBMITTED_TRACKING_NUMBERS,
-    )
-
-    mock_config_entry.add_to_hass(hass)
-    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
-        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
-        mock_store_cls.return_value.async_save = AsyncMock()
-        coord = GmailCoordinator(hass, mock_config_entry)
-        # Simulate an over-cap in-memory set (10 entries over the cap).
-        coord._submitted_tracking_numbers = _OD(
-            (f"TN{i:05d}", None) for i in range(MAX_SUBMITTED_TRACKING_NUMBERS + 10)
-        )
-        coord._record_submitted_tn("NEWTN")
-        assert len(coord._submitted_tracking_numbers) == MAX_SUBMITTED_TRACKING_NUMBERS
-        assert "NEWTN" in coord._submitted_tracking_numbers
+# Phase 30-03: test_record_submitted_tn_trims_with_while_loop removed —
+# _record_submitted_tn no longer exists (dedup writes route through
+# Shop2ParcelHub.check_and_mark). Its FIFO-trim-in-one-insert behavior is
+# already covered by Plan 30-01's hub tests (tests/test_hub.py).
 
 
 # -------- FWRD-03: Store load/save semantics ----------------------------
@@ -335,7 +319,7 @@ async def test_store_loaded_before_first_poll(hass, mock_config_entry):
         coord = GmailCoordinator(hass, mock_config_entry)
         # Load store first — this is the contract
         await coord._async_load_store()
-        assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+        assert coord._hub.is_submitted("1Z999AA10123456784")
         # Now run the poll — tracking number dedup blocks the POST.
         await coord._async_update_data()
         mock_parcel_cls.return_value.async_add_delivery.assert_not_called()
@@ -641,7 +625,7 @@ async def test_quota_recovers_after_reset_at_past(hass, mock_config_entry):
         mock_parcel_cls.return_value.async_add_delivery.assert_called_once()
         # New shipment is in returned data; tracking number is in submitted set.
         assert "msg_recover" in data
-        assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+        assert coord._hub.is_submitted("1Z999AA10123456784")
         # Quota window was cleared
         assert coord._quota_exhausted_until is None
         # Debounced save was scheduled at least once after recovery
@@ -691,7 +675,7 @@ async def test_parcelapp_transient_error_skipped(hass, mock_config_entry):
         # Must NOT raise
         data = await coord._async_update_data()
         # Tracking number NOT in submitted set (transient error: will retry next cycle)
-        assert "1Z999AA10123456784" not in coord._submitted_tracking_numbers
+        assert not coord._hub.is_submitted("1Z999AA10123456784")
         # But coordinator still returns a data dict
         assert isinstance(data, dict)
 
@@ -865,7 +849,7 @@ async def test_invalid_tracking_not_deduped(hass, mock_config_entry):
         await coord._async_update_data()
         # Phase 10: tracking number IS in submitted set — permanent 400 suppresses
         # retries to protect the 20/day quota from being drained by invalid messages.
-        assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+        assert coord._hub.is_submitted("1Z999AA10123456784")
 
 
 # -------- Phase 5 async_cleanup_delivered tests --------------------------
@@ -1378,7 +1362,7 @@ async def test_imap_basic_poll_cycle(hass, mock_imap_config_entry):
     # Shipment data keyed by UID string (coordinator stores by uid_str)
     assert "100" in data
     # Phase 10: tracking-number dedup — normalized TN recorded after successful POST
-    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+    assert coord._hub.is_submitted("1Z999AA10123456784")
     mock_parcel_cls.return_value.async_add_delivery.assert_called_once()
 
 
@@ -1502,7 +1486,7 @@ async def test_imap_quota_blocked_does_not_submit_tracking(hass, mock_imap_confi
         await coord._async_update_data()
 
     # Tracking number must NOT be recorded — forwarding was blocked by quota
-    assert "1Z999AA10123456784" not in coord._submitted_tracking_numbers, (
+    assert not coord._hub.is_submitted("1Z999AA10123456784"), (
         "CR-01: tracking number must not be added when quota was blocked this cycle"
     )
     # No delivery was attempted — quota-blocked
@@ -2736,7 +2720,7 @@ async def test_imap_coordinator_uses_tracking_number_as_description_when_order_n
 
 
 async def test_load_store_debug_log(hass, mock_config_entry, caplog):
-    """DEDUP-03: _async_load_store emits a DEBUG log with the count of loaded TNs."""
+    """DEDUP-03: _async_load_store emits a DEBUG log with the count of migrated TNs."""
     mock_config_entry.add_to_hass(hass)
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
@@ -2753,13 +2737,19 @@ async def test_load_store_debug_log(hass, mock_config_entry, caplog):
         with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
             await coord._async_load_store()
     debug_messages = " ".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
-    assert "Loaded 3 submitted tracking numbers from store" in debug_messages
+    assert (
+        "Migrated 3 submitted tracking numbers from per-entry store into the shared hub"
+        in debug_messages
+    )
 
 
 async def test_save_store_debug_log(hass, mock_config_entry, caplog):
-    """DEDUP-03: _async_save_store emits a DEBUG log with the count of scheduled TNs.
+    """DEDUP-03: _async_save_store emits a DEBUG log with the count of scheduled items.
 
     W1/P13-WR-06: log message updated to reflect debounced scheduling via async_delay_save.
+    Phase 30-03: submitted_tracking_numbers is no longer part of the per-entry
+    snapshot (it lives in the shared hub store), so the debug log no longer
+    mentions a TN count — it reports persisted_shipments/pending_posts counts.
     """
     mock_config_entry.add_to_hass(hass)
     with (
@@ -2769,11 +2759,12 @@ async def test_save_store_debug_log(hass, mock_config_entry, caplog):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_delay_save = MagicMock()
         coord = GmailCoordinator(hass, mock_config_entry)
-        coord._submitted_tracking_numbers = OrderedDict([("TN_A", None), ("TN_B", None)])
         with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
             await coord._async_save_store()
     debug_messages = " ".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
-    assert "Scheduled debounced save for 2 submitted tracking numbers" in debug_messages
+    assert (
+        "Scheduled debounced save for 0 persisted shipments and 0 pending posts" in debug_messages
+    )
 
 
 async def test_already_added_gmail_writes_dedup(hass, mock_config_entry):
@@ -2818,7 +2809,7 @@ async def test_already_added_gmail_writes_dedup(hass, mock_config_entry):
         await coord._async_load_store()
         data = await coord._async_update_data()
 
-    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+    assert coord._hub.is_submitted("1Z999AA10123456784")
     assert "msg1" not in data
     mock_store_cls.return_value.async_delay_save.assert_called()
 
@@ -2904,7 +2895,7 @@ async def test_already_added_imap_writes_dedup(hass, mock_imap_config_entry):
         await coord._async_load_store()
         data = await coord._async_update_data()
 
-    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+    assert coord._hub.is_submitted("1Z999AA10123456784")
     assert "100" not in data
     mock_store_cls.return_value.async_delay_save.assert_called()
 
@@ -2935,7 +2926,7 @@ async def test_imap_invalid_tracking_suppresses_retry(hass, mock_imap_config_ent
         await coord._async_load_store()
         await coord._async_update_data()
 
-    assert "1Z999AA10123456784" in coord._submitted_tracking_numbers
+    assert coord._hub.is_submitted("1Z999AA10123456784")
 
 
 async def test_already_added_imap_emits_scan_event(hass, mock_imap_config_entry):
@@ -2996,7 +2987,7 @@ async def test_load_store_with_null_submitted_tracking_numbers_does_not_crash(
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()  # must not raise
 
-    assert coord._submitted_tracking_numbers == OrderedDict()
+    assert coord._hub.submitted_count == 0
 
 
 async def test_load_store_filters_non_string_entries(hass, mock_config_entry):
@@ -3016,7 +3007,7 @@ async def test_load_store_filters_non_string_entries(hass, mock_config_entry):
         coord = GmailCoordinator(hass, mock_config_entry)
         await coord._async_load_store()
 
-    assert list(coord._submitted_tracking_numbers.keys()) == ["VALID"]
+    assert list(coord._hub._submitted_tracking_numbers.keys()) == ["VALID"]
 
 
 async def test_load_store_with_non_int_quota_exhausted_until(hass, mock_config_entry):
@@ -3613,8 +3604,8 @@ async def test_gmail_multi_shipment_creates_composite_keys(hass, mock_config_ent
     assert data["msg1"].tracking_number == "1Z111AA10123456784"
     assert data["msg1::9400111899223197428490"].tracking_number == "9400111899223197428490"
     assert mock_parcel_cls.return_value.async_add_delivery.call_count == 2
-    assert "1Z111AA10123456784" in coord._submitted_tracking_numbers
-    assert "9400111899223197428490" in coord._submitted_tracking_numbers
+    assert coord._hub.is_submitted("1Z111AA10123456784")
+    assert coord._hub.is_submitted("9400111899223197428490")
 
 
 async def test_imap_multi_shipment_creates_composite_keys(hass, mock_imap_config_entry):
@@ -3653,8 +3644,8 @@ async def test_imap_multi_shipment_creates_composite_keys(hass, mock_imap_config
     assert data["100"].tracking_number == "1Z111AA10123456784"
     assert data["100::9400111899223197428490"].tracking_number == "9400111899223197428490"
     assert mock_parcel_cls.return_value.async_add_delivery.call_count == 2
-    assert "1Z111AA10123456784" in coord._submitted_tracking_numbers
-    assert "9400111899223197428490" in coord._submitted_tracking_numbers
+    assert coord._hub.is_submitted("1Z111AA10123456784")
+    assert coord._hub.is_submitted("9400111899223197428490")
 
 
 async def test_cleanup_removes_delivered_composite_key_entity(hass, mock_config_entry):
@@ -3923,7 +3914,7 @@ async def test_load_store_oserror_starts_with_empty_state(hass, mock_config_entr
         with caplog.at_level(logging.ERROR):
             await coord._async_load_store()
 
-    assert coord._submitted_tracking_numbers == OrderedDict()
+    assert coord._hub.submitted_count == 0
     assert coord._restored_shipments == {}
     assert coord._store_loaded is True
 
@@ -5418,7 +5409,7 @@ async def test_fallback_skips_already_submitted_tracking(hass, mock_stage2_entry
         # Simulate a subsequent (non-bootstrap) poll so the first-refresh skip does not apply.
         coord._first_refresh_done = True
         # Tracking number already forwarded in a prior poll.
-        coord._submitted_tracking_numbers[normalize_tracking_number("1Z999AA10123456784")] = None
+        coord._hub.check_and_mark(normalize_tracking_number("1Z999AA10123456784"))
         await coord._async_update_data()
 
     # Already submitted: must NOT enqueue, but the message is terminal → marked seen.

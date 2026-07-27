@@ -198,11 +198,18 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         # A poll that raises stays "first" until one clean pass completes, so the bootstrap
         # window guard remains active across any transient first-poll failures.
         self._first_refresh_done = True
+        # D-01: persist the shared hub's dedup set at the end of every successful poll —
+        # unconditional (no dirty flag) so a crash/restart never loses a mark made this
+        # poll. This is the FINAL await of a successful poll (after all coordinator.py
+        # dedup writes for this poll have already happened via check_and_mark).
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
+        await self._hub.async_save()
         return result
 
     async def _async_update_data_inner(self) -> dict[str, ShipmentData]:
         """Inner implementation of the poll cycle (called from _async_update_data)."""
         assert self.config_entry is not None  # guaranteed by _async_update_data None check
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
 
         # WR-04: drain quota-deferred POSTs on EVERY poll, honouring the documented
         # _pending_posts contract ("drained on next quota-free poll"). Previously the
@@ -731,11 +738,11 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                             meta=email_meta,
                             outcome="stage2_no_data",
                         )
-                    elif fb_clean in self._submitted_tracking_numbers:
+                    elif self._hub.is_submitted(fb_clean):
                         # Finding #5: mirror the main shipment loop's dedup guard. An
                         # already-forwarded tracking number is terminal — mark seen and do
                         # not re-enqueue (the worker only checks the in-flight set, not
-                        # _submitted_tracking_numbers, so a re-POST would burn a quota slot).
+                        # the shared hub's dedup set, so a re-POST would burn a quota slot).
                         self._mark_message_seen(msg_id)
                         _LOGGER.debug(
                             "Gmail message %s: fallback tracking %s already submitted — skipping",
@@ -853,7 +860,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # DBG-03: skip dedup entirely in debug mode.
                 normalized = normalize_tracking_number(shipment.tracking_number)
                 if not debug_mode:
-                    if normalized in self._submitted_tracking_numbers:
+                    if self._hub.is_submitted(normalized):
                         d.last_poll_emails_skipped_dedup += 1
                         self._emit_scan_event(
                             message_id=f"gmail:{msg_id}",
@@ -1022,7 +1029,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     msg_pending_retry = True
                     continue
                 except ParcelAppAlreadyAddedError:
-                    self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
+                    self._hub.check_and_mark(normalized)  # DEDUP-01: shared dedup-write
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     self._emit_scan_event(
@@ -1041,8 +1048,8 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                         err,
                     )
                     # Record normalized tracking number to suppress infinite retries
-                    # (IN-01: shared dedup-write helper).
-                    self._record_submitted_tn(normalized)
+                    # (DEDUP-01: shared dedup-write).
+                    self._hub.check_and_mark(normalized)
                     self._pending_shipments = current_data
                     await self._async_save_store()
                     # C2/P11-CR-01: emit event for invalid tracking (permanent 400).
@@ -1078,7 +1085,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     continue
 
                 # 6. Success — record tracking number dedup, save immediately (D-10/D-03).
-                self._record_submitted_tn(normalized)  # IN-01: shared dedup-write helper
+                self._hub.check_and_mark(normalized)  # DEDUP-01: shared dedup-write
                 self._record_forward()  # Phase 26: forward counter (genuine 2xx POST only)
                 current_data[storage_key] = shipment
                 self._pending_shipments = current_data
@@ -1114,7 +1121,7 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         # Phase 7: capture per-poll timing (D-04, Specifics).
         d.last_poll_time = poll_start
         d.last_poll_duration_ms = (time.time() - poll_start) * 1000
-        d.submitted_tracking_count = len(self._submitted_tracking_numbers)
+        d.submitted_tracking_count = self._hub.submitted_count
 
         # DBG-06: show persistent notification in HA UI after each debug poll.
         if debug_mode:
