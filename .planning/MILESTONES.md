@@ -1,5 +1,29 @@
 # Milestones
 
+## v1.5 Shared Pools & IMAP Parity (Shipped: 2026-07-20)
+
+**Phases completed:** 6 phases (29–34), 26 plans
+
+**Key accomplishments:**
+
+1. `Shop2ParcelHub` singleton lifecycle in `hass.data[DOMAIN]["__shared__"]` — lock-guarded construction (race-free), refcounted attach/detach, hass-scoped worker task surviving single-entry removal (Phase 29)
+2. IMAP `_first_refresh_done` parity gap closed before any shared-state work began (Phase 29)
+3. Global shared submitted-tracking-number dedup set — `check_and_mark`/`is_submitted`, FIFO-capped at 1000, union-merge migration from per-account sets (Phase 30)
+4. Global shared parcelapp 20/day budget — synchronous race-free `try_consume()`, single shared per-poll POST cap, exactly 3 hub timers (no per-account storm), conservative max-merge migration (Phase 31)
+5. Global shared Stage-2 queue + one long-lived Ollama worker — per-account job routing via `entry_id`, per-account enqueue cap, worker survives single-account removal (Phase 32)
+6. Gmail↔IMAP full parity via shared `_run_inline_fallback()` base-class method — 17-test cross-parity module proves identical branch-matrix outcomes (Phase 33)
+7. Global `GlobalQuotaSensor`/`GlobalQueueSensor` + hub device, consolidated failure notification scaling to fleet size, entity re-home mechanism on owner-account removal, full multi-account lifecycle test suite (Phase 34)
+
+**Stats:** 39 files changed · +9,665 / -2,708 lines · 2026-07-09 → 2026-07-20 (11 days)
+
+**Requirements:** 24/24 complete. Milestone audit: `passed` (tech-debt only, no gaps) — see [.planning/milestones/v1.5-MILESTONE-AUDIT.md](./milestones/v1.5-MILESTONE-AUDIT.md).
+
+**Known deferred items at close:** 12 (see STATE.md Deferred Items — includes one genuinely open follow-up: Gmail Ollama fallback path missing poison-message quarantine)
+
+**Archive:** [.planning/milestones/v1.5-ROADMAP.md](./milestones/v1.5-ROADMAP.md)
+
+---
+
 ## v1.2 Debug Switch (Shipped: 2026-06-05)
 
 **Phases completed:** 3 phases (13, 13.1, 14), 9 plans

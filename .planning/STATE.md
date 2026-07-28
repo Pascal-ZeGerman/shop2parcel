@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.5
-milestone_name: Shared Pools & IMAP Parity
-current_phase: 35
-current_phase_name: MRG-05 Grounding Gate + Stage-1 Scoping Fix
-status: executing
-stopped_at: Completed 34-05-PLAN.md
-last_updated: "2026-07-20T22:49:43.264Z"
-last_activity: 2026-07-20
-last_activity_desc: Phase 34 complete, transitioned to Phase 35
+milestone: none
+milestone_name: none — v1.5 closed, v1.6 not yet defined
+current_phase: 36
+current_phase_name: DHL Carrier Support + USPS Digest Sender Extraction
+status: idle
+stopped_at: Completed 36-02-PLAN.md; milestone v1.5 archived; manifest bumped to 1.6.0-rc1 (tag pushed, PR #45 merged)
+last_updated: "2026-07-28T00:00:00.000Z"
+last_activity: 2026-07-28
+last_activity_desc: Reconciled STATE.md/ROADMAP.md/PROJECT.md with actual repo state (Phase 36 + release already shipped); closed and archived v1.5 milestone
 progress:
-  total_phases: 11
-  completed_phases: 11
-  total_plans: 45
-  completed_plans: 45
+  total_phases: 13
+  completed_phases: 13
+  total_plans: 51
+  completed_plans: 51
   percent: 100
 ---
 
@@ -21,17 +21,17 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-20)
+See: .planning/PROJECT.md (updated 2026-07-28)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** Phase 34 — Multi-Account Lifecycle Tests + Global Sensors
+**Current focus:** None active. v1.5 shipped and archived; Phases 35/36 (independent, spike-driven) also shipped; v1.6.0-rc1 tagged and merged to main. Next: `/gsd-new-milestone` to define v1.6 scope.
 
 ## Current Position
 
-Phase: 35 — MRG-05 Grounding Gate + Stage-1 Scoping Fix
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-07-20 — Phase 34 complete, transitioned to Phase 35
+Phase: 36 — DHL Carrier Support + USPS Digest Sender Extraction (complete, verified passed 8/8)
+Plan: All plans complete
+Status: No active phase — awaiting next milestone definition
+Last activity: 2026-07-28 — State reconciliation + v1.5 milestone close
 
 ```
 [████████████████████] 68/68 plans (100%)
@@ -317,16 +317,36 @@ Items acknowledged and deferred at v1.2 milestone close on 2026-06-05:
 
 Note: UAT gaps (phases 02-07) and verification gaps (phases 02-06) are continuing deferrals from v1.0/v1.1 (hardware-dependent live HA testing).
 
+Items acknowledged and deferred at v1.5 milestone close on 2026-07-28:
+
+| Category | Item | Status |
+|----------|------|--------|
+| debug_session | knowledge-base — false positive, not a debug session (GSD debugger's resolved-session index, no status frontmatter) | not_applicable |
+| debug_session | only-two-emails-sent-to-llm — primary question RESOLVED (correct dedup behavior); surfaced a real latent bug (below) | resolved_with_followup |
+| tech_debt | Gmail Ollama fallback path (gmail_coordinator.py:454-472) doesn't quarantine permanently-failing messages like the main worker path does (STAGE2_MSG_QUARANTINE_THRESHOLD) — a poison Stage-1-miss email can flood logs and consume MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL every cycle during an Ollama outage. Fix direction: mirror worker quarantine or mark seen/inflight on repeated fallback failure. | open_followup |
+| debug_session | oauth-token-rejected-after-update | root_cause_identified |
+| debug_session | stage2-queue-consumer-stall — RESOLVED 2026-06-22 (quota gate moved before extractor, stage2_quota_skipped_total added, 676 tests passing); status flag never flipped from awaiting_human_verify | resolved |
+| uat_gap | Phase 22: 22-UAT.md — 1 pending scenario | partial |
+| verification_gap | Phase 18: 18-VERIFICATION.md | human_needed |
+| verification_gap | Phase 26: 26-VERIFICATION.md | human_needed |
+| verification_gap | Phase 32: 32-VERIFICATION.md — WR-01 reload-race window open human-decision item, harm bounded by is_submitted() idempotency guard | human_needed |
+| todo | add-forwarded-email-sender-configuration — future capability, not blocking v1.5 | deferred |
+| seed | SEED-002-activity-log-human-readable-poll-summary — future feature | dormant |
+| quick_task | 16 quick tasks with missing summary files — administrative debt; work is completed | missing_summary |
+
+Note: UAT/verification gaps continue the hardware-dependent live HA testing deferral pattern from v1.0-v1.2. The Gmail Ollama fallback quarantine gap is genuinely open work, not administrative debt — worth a follow-up quick task or phase.
+
 ## Session Continuity
 
 **Resume file:** None
 
-Last session: 2026-07-20T22:06:12.235Z
-Stopped at: Completed 34-05-PLAN.md
-Next action: `/gsd-discuss-phase 34` — gather context before planning (no CONTEXT.md exists yet for Phase 34). Alternatively skip straight to `/gsd-plan-phase 34`.
+Last session: 2026-07-28T00:00:00.000Z
+Stopped at: v1.5 milestone closed and archived; Phase 36 verified complete; v1.6.0-rc1 tagged and merged
+Next action: `/gsd-new-milestone` to define v1.6 scope, or continue with ad-hoc spike-driven phases (Phase 37+) if no new milestone is started yet.
 
 ## Operator Next Steps
 
-- `/gsd-discuss-phase 34` — discuss Phase 34: Multi-Account Lifecycle Tests + Global Sensors before planning (recommended — no CONTEXT.md yet)
-- `/gsd-plan-phase 34` — skip discussion, plan Phase 34 directly
-- Full sequence: 29 ✓ → 30 ✓ → 31 ✓ → 32 ✓ → 33 ✓ → 34 (last phase of v1.5, not yet planned)
+- `/gsd-new-milestone` — start v1.6: requirements gathering → roadmap creation
+- Alternatively: `git tag -d v1.6.0-rc1 && git tag v1.6.0 origin/main && git push` once rc1 is confirmed stable, to cut the final v1.6.0 release
+- Follow-up worth tracking: Gmail Ollama fallback path missing poison-message quarantine (see Deferred Items above) — candidate for a v1.6 phase or standalone quick task
+- Full sequence: 29 ✓ → 30 ✓ → 31 ✓ → 32 ✓ → 33 ✓ → 34 ✓ (v1.5 complete) → 35 ✓ → 36 ✓ (independent phases complete)

@@ -8,22 +8,27 @@ Shop2Parcel is a Home Assistant custom integration that monitors Gmail (OAuth2) 
 
 Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
 
-## Current Milestone: v1.5 Shared Pools & IMAP Parity
+## Current Milestone: none active — v1.6.0-rc1 cut, next milestone not yet defined
 
-**Goal:** Let up to ~10 mixed Gmail/IMAP accounts on one HA instance share a single global parcelapp quota, one LLM queue+worker, and one dedup set — with full Gmail↔IMAP feature parity.
+v1.5 shipped 2026-07-20 and closed 2026-07-28. Two independent, milestone-agnostic phases (35: MRG-05 grounding gate, 36: DHL/USPS carrier work) landed afterward from spike findings, and `manifest.json` was bumped to `1.6.0-rc1` (tag pushed, PR #45 merged). Run `/gsd-new-milestone` to define v1.6 scope, or continue ad-hoc spike-driven phases.
 
-**Target features:**
-- Gmail↔IMAP full parity audit — close every Gmail-only divergence (startup inline-Ollama-fallback deferral, per-poll wall-clock budget, coordinator paths), backed by cross-parity tests
-- Global shared parcelapp 20/day budget across all accounts (first-come-first-served), persisted across restart
-- Single shared Stage-2 LLM queue + long-lived Ollama worker for the whole HA instance
-- Global shared submitted-tracking-number dedup set — same TN seen in two mailboxes is POSTed once
-- Multi-account lifecycle — support ~10 accounts, any mix of Gmail + IMAP; per-account add/remove never disrupts others; last account tears down shared singletons (10 is a support target, not an enforced cap)
+## Current State: v1.5 Shared Pools & IMAP Parity — SHIPPED 2026-07-20
 
-## Current State: v1.3 AI-based Email Analysis — SHIPPED 2026-06-17
-
-Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local Ollama LLM (Stage 2), always-on, with bounded async queue, LLM-authoritative merge, five quota-burn mitigations, loud failure surface, `Stage2Sensor` diagnostic entity, and complete README setup section.
+Single `Shop2ParcelHub` singleton shared across all Gmail/IMAP config entries: one dedup set, one 20/day parcelapp budget (FCFS), one asyncio queue + long-lived Ollama worker, global quota/queue-depth sensors, consolidated failure notification, and a lifecycle test suite covering add/remove/re-home across mixed fleets. 24/24 requirements complete, audit `passed` (tech-debt only, no gaps). Archived at [.planning/milestones/v1.5-ROADMAP.md](./milestones/v1.5-ROADMAP.md).
 
 ## Previous Milestones
+
+<details>
+<summary>v1.5 Shared Pools & IMAP Parity — shipped 2026-07-20</summary>
+
+- `Shop2ParcelHub` singleton in `hass.data[DOMAIN]["__shared__"]`, lock-guarded construction, refcounted attach/detach, hass-scoped worker task
+- Global shared dedup set (`check_and_mark`/`is_submitted`, FIFO-capped 1000), global shared 20/day parcelapp budget (`try_consume()`, synchronous/race-free), global shared Stage-2 queue + one long-lived Ollama worker with per-account job routing
+- Gmail↔IMAP full parity: shared `_run_inline_fallback()` base-class method, cross-parity test module
+- Global `GlobalQuotaSensor`/`GlobalQueueSensor` + hub device; consolidated failure notification (scales to fleet size) replacing per-account duplicates; entity re-home mechanism for owner-account removal
+- Multi-account lifecycle test suite: add→add→remove→add mixed Gmail/IMAP, remove-to-zero→re-add teardown/recreate
+- **Codebase:** phases 29-34, 26 plans, 39 files changed, +9,665/-2,708 lines, 2026-07-09 → 2026-07-20 (11 days)
+
+</details>
 
 <details>
 <summary>v1.3 AI-based Email Analysis — shipped 2026-06-17</summary>
@@ -108,12 +113,10 @@ Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local O
 - ✓ MRG-05 grounding gate: Stage-2 `order_name`/`order_summary` values discarded unless a content token is grounded in body-only prose (sender/subject headers never count); Stage-1 tracking-number recall broadened to `<div>`/`<span>` without the footer-boilerplate false positive — v1.5 (Phase 35, out-of-band spike-driven insert, not part of the original v1.5 requirement set)
 - ✓ Global shared parcelapp 20/day budget across all accounts (FCFS), persisted across restart — one hub-owned synchronous `try_consume()`/`refund_consume()` reserve, a single shared per-poll `MAX_STAGE2_POSTS_PER_POLL` cap, exactly 3 hub timers (no per-account storm), and conservative migration from per-account quota state (max-merge, no double-counting) — v1.5 (Phase 31, QUOTA-01..05)
 - ✓ Gmail↔IMAP feature parity: shared base-class inline Ollama fallback gatekeeper (`_run_inline_fallback()`) called identically by both coordinator types — same first-refresh skip, wall-clock budget, cap, and quarantine behavior; 17-test cross-parity module proves identical branch-matrix outcomes plus instance isolation — v1.5 (Phase 33, PAR-01/PAR-03/PAR-04)
-
-### Active (v1.5 — Shared Pools & IMAP Parity)
-
-- [ ] Single shared Stage-2 LLM queue + long-lived Ollama worker for the whole HA instance
-- [ ] Global shared submitted-tracking-number dedup set across all accounts
-- [ ] Multi-account lifecycle: ~10 mixed Gmail/IMAP accounts; clean per-account add/remove; last account tears down shared singletons
+- ✓ Single shared Stage-2 LLM queue + long-lived Ollama worker for the whole HA instance, per-account job routing via `entry_id`, per-account enqueue cap — v1.5 (Phase 32, WORK-01..04)
+- ✓ Global shared submitted-tracking-number dedup set across all accounts, union-merge migration — v1.5 (Phase 30, DEDUP-01..03)
+- ✓ Multi-account lifecycle: mixed Gmail/IMAP accounts; clean per-account add/remove; last account tears down shared singletons; global sensor re-home on owner-account removal — v1.5 (Phases 29, 34, LIFE-01..05/DIAG-01..03)
+- ✓ DHL carrier support (`_detect_dhl`/`_parse_dhl`) + USPS digest structural per-package sender extraction — v1.6-in-progress (Phase 36, spike-driven, not tied to a milestone requirement set)
 
 ### Active (v1.4+ backlog)
 
@@ -202,4 +205,4 @@ Full two-stage extraction pipeline shipped: template parsers (Stage 1) + local O
 5. Update Context with current state
 
 ---
-*Last updated: 2026-07-20 — Phase 33 complete (IMAP Parity, PAR-01/03/04); Phase 32 (Shared Queue+Worker) also complete; Phase 35 (MRG-05 grounding gate) also complete, out-of-band; v1.5 Phase 34 (Multi-Account Lifecycle Tests + Global Sensors) remains*
+*Last updated: 2026-07-28 — v1.5 milestone closed and archived (shipped 2026-07-20, 24/24 requirements, audit passed). Phases 35 (MRG-05 grounding gate) and 36 (DHL/USPS carrier work) shipped independently afterward; manifest bumped to 1.6.0-rc1. No milestone currently active — run `/gsd-new-milestone` to define v1.6.*
