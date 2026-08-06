@@ -161,6 +161,92 @@ def validate_carrier_format(value: str | None) -> tuple[str, bool, str | None]:
     return clean, True, None
 
 
+def build_keyword_matcher(query: str) -> tuple[re.Pattern[str] | None, list[str]]:
+    """Compile a stored gmail_query keyword string into a local narrowing filter.
+
+    Follow-up to gmail-query-drops-emails (.planning/debug/gmail-query-drops-emails.md):
+    Gmail's server-side search engine does not reliably return the full union of
+    results for a long chain of bare ``OR``-joined keyword terms, so keyword
+    narrowing was moved out of the Gmail List API call entirely. This function
+    re-implements that narrowing locally, applied to each fetched message's
+    subject + body right before the (comparatively expensive) EmailParser tiers
+    run — a CPU-cost pre-filter, not a correctness gate.
+
+    Deliberately coarse and over-inclusive: the failure this whole task follows
+    up on was silent UNDER-inclusion (real shipment emails dropped with no
+    trace), so every design choice below biases toward matching too much rather
+    than too little.
+
+    Algorithm:
+    1. Tokenise on any run of whitespace after stripping the input.
+    2. Discard the bare boolean joiner tokens "OR"/"AND" (case-sensitive,
+       matching Gmail's own uppercase-only operator convention) — they are
+       separators, not keywords. Gmail's space-as-AND semantics are
+       deliberately approximated as OR here; over-matching is the safe
+       direction for a pre-filter.
+    3. Strip surrounding parentheses and double-quote characters from each
+       remaining token.
+    4. Route to ``dropped`` (never ``keywords``) any token that: contains a
+       colon (a Gmail field operator such as ``from:`` or ``label:``), starts
+       with a hyphen (Gmail negation), or contains no word character at all.
+       A naive substring match on a field-operator token can never match plain
+       email text, so silently keeping it would blackhole that user's stored
+       customisation — the exact "silently drops everything" failure shape
+       this task follows up on.
+    5. Discard tokens that are empty after stripping — they belong in neither
+       list.
+    6. If no usable keyword remains, return ``(None, dropped)`` — the fail-open
+       contract: callers must treat ``None`` as "match everything", never as
+       "match nothing".
+    7. Otherwise compile ONE case-insensitive alternation with word-boundary
+       anchors on both sides, running ``re.escape`` over every keyword. A flat,
+       unnested, non-quantified alternation over escaped literals is linear in
+       input length regardless of the (attacker-controllable) email body it is
+       run against — see T-i5r-01 in this task's threat model. No new ReDoS
+       surface is introduced (ASVS V5).
+
+    Returns:
+        ``(pattern, dropped)`` where ``pattern`` is ``None`` when the query is
+        blank/whitespace-only or contains only operator/negation tokens
+        (fail-open — callers must treat this as "match everything"), and
+        ``dropped`` lists every token that was excluded from the compiled
+        pattern for operator/negation/empty reasons.
+    """
+    dropped: list[str] = []
+    keywords: list[str] = []
+    for raw_token in query.strip().split():
+        if raw_token in ("OR", "AND"):
+            continue
+        token = raw_token.strip("()").strip('"')
+        if not token:
+            continue
+        if ":" in token or token.startswith("-") or not re.search(r"\w", token):
+            dropped.append(token)
+            continue
+        keywords.append(token)
+
+    if not keywords:
+        return None, dropped
+
+    alternation = "|".join(re.escape(kw) for kw in keywords)
+    pattern = re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
+    return pattern, dropped
+
+
+def matches_keyword_filter(pattern: re.Pattern[str] | None, *texts: str) -> bool:
+    """Return True if any supplied text matches the compiled keyword pattern.
+
+    ``pattern is None`` is the fail-open contract from build_keyword_matcher —
+    always returns True regardless of ``texts`` (no keyword narrowing active).
+    Otherwise returns True as soon as the pattern matches inside any non-empty
+    text among ``texts`` (subject-only and body-only matches both pass);
+    ``None``/empty strings among ``texts`` are tolerated without raising.
+    """
+    if pattern is None:
+        return True
+    return any(text and pattern.search(text) for text in texts)
+
+
 def _infer_carrier(tracking: str) -> str:
     """Infer carrier from tracking number shape. Used by Tier 2 and href fallbacks."""
     if re.match(r"^1Z[A-Z0-9]{16}$", tracking):

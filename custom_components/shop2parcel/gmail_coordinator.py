@@ -299,17 +299,29 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         d.last_poll_keyword_hits = 0
         d.last_poll_time = poll_start  # record attempt time even if poll fails mid-cycle
         d.last_poll_duration_ms = None
+        # Diagnostics only — see gmail-query-drops-emails: the configured keyword
+        # OR-chain is recorded for UX/diagnostics visibility but is NOT sent to the
+        # Gmail List API (see below).
         d.last_poll_query = query
         _LOGGER.debug(
             "Gmail poll start — query: %s rescan_window_days: %s", query, rescan_window_days
         )
 
         try:
+            # gmail-query-drops-emails: Gmail's server-side search engine does not
+            # reliably return the full union of results for a long chain of bare
+            # `OR`-joined keyword terms — real shipment emails have been silently
+            # dropped by CONF_GMAIL_QUERY's default 8-term OR-chain (confirmed via
+            # direct Gmail UI reproduction). Pass an empty base query here so
+            # build_incremental_query() yields a date-only `after:` filter; content
+            # filtering happens locally in EmailParser's tiered pipeline (HTML
+            # template -> Tier 1 regex -> optional Tier 2 broad scan), which already
+            # runs on every fetched message regardless of how it was found.
             messages, effective_query = await self._gmail_call_with_stale_token_retry(
                 implementation,
                 lambda tok: gmail.async_list_messages(
                     tok,
-                    query,
+                    "",
                     rescan_window_days=rescan_window_days,
                 ),
             )

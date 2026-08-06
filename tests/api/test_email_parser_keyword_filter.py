@@ -60,7 +60,7 @@ class TestBuildKeywordMatcher:
         assert dropped == ["from:shopify.com"]
         assert pattern is not None
         assert pattern.search("has shipped")
-        assert ":" not in pattern.pattern
+        assert "shopify" not in pattern.pattern
 
     def test_negation_tokens_dropped_keeps_remaining_keyword(self) -> None:
         pattern, dropped = build_keyword_matcher("-label:spam shipped")
