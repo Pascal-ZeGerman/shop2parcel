@@ -17,6 +17,7 @@ from custom_components.shop2parcel.api.email_parser import (
     STRATEGY_FEDEX,
     STRATEGY_HTML,
     STRATEGY_REGEX,
+    STRATEGY_SHIPBOB,
     STRATEGY_UPS,
     STRATEGY_USPS,
     TRACKING_TAGS,
@@ -25,10 +26,13 @@ from custom_components.shop2parcel.api.email_parser import (
     ShipmentData,
     _detect_dhl,
     _detect_fedex,
+    _detect_shipbob,
     _detect_ups,
     _detect_usps,
     _extract_usps_shippers,
     _parse_dhl,
+    _parse_fedex,
+    _parse_shipbob,
 )
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
@@ -60,6 +64,11 @@ def fedex_html() -> str:
 @pytest.fixture
 def dhl_html() -> str:
     return (FIXTURE_DIR / "dhl_shipping.html").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def shipbob_html() -> str:
+    return (FIXTURE_DIR / "shipbob_shipping.html").read_text(encoding="utf-8")
 
 
 def test_extracts_all_fields_from_fixture(shopify_html: str) -> None:
@@ -1134,6 +1143,22 @@ def test_validate_carrier_format_regression_fedex_12() -> None:
     assert clean == "123456789012"
 
 
+def test_validate_carrier_format_regression_shipbob() -> None:
+    """ShipBob's real confirmed tracking-number sample passes the gate.
+
+    RED phase (shipbob-carrier-unsupported.md): SBAAAAQLCQ6U4P269 is the one
+    real sample confirmed live (IZIMINI/ShipBob shipment email, 2026-08-06).
+    Before this fix, _TRACKING_PATTERNS has zero coverage for the SB-prefixed
+    shape and this call returns ('SBAAAAQLCQ6U4P269', False, 'no_carrier_match').
+    """
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("SBAAAAQLCQ6U4P269")
+    assert ok is True
+    assert reason is None
+    assert clean == "SBAAAAQLCQ6U4P269"
+
+
 def test_dhl_template_extracts_tracking(dhl_html: str) -> None:
     """DHL-01: DHL Express template extracts waybill number, sets carrier_name='DHL Express'
     and strategy_used=STRATEGY_DHL."""
@@ -1182,7 +1207,99 @@ def test_strategy_dhl_constant() -> None:
     assert STRATEGY_DHL == "dhl_template"
 
 
-def test_carrier_registry_includes_dhl_last() -> None:
-    """DHL-01: CARRIER_REGISTRY has exactly 4 entries, DHL appended last after FedEx."""
-    assert CARRIER_REGISTRY[-1] == (_detect_dhl, _parse_dhl)
-    assert len(CARRIER_REGISTRY) == 4
+def test_carrier_registry_includes_dhl_before_shipbob() -> None:
+    """DHL-01: DHL is appended after FedEx (index 3) — ShipBob (SHIPBOB-01)
+    now follows it, so DHL is no longer last (see
+    test_carrier_registry_includes_shipbob_last below)."""
+    assert CARRIER_REGISTRY[2] == (_detect_fedex, _parse_fedex)
+    assert CARRIER_REGISTRY[3] == (_detect_dhl, _parse_dhl)
+
+
+# ---------------------------------------------------------------------------
+# ShipBob (.planning/debug/shipbob-carrier-unsupported.md) — mirrors the DHL
+# test block above.
+# ---------------------------------------------------------------------------
+
+
+def test_shipbob_template_extracts_tracking(shipbob_html: str) -> None:
+    """SHIPBOB-01: ShipBob template extracts the tracking number from body
+    prose, hardcodes carrier_name='ShipBob', and sets strategy_used=STRATEGY_SHIPBOB."""
+    parser = EmailParser()
+    result = parser.parse(shipbob_html, "shipbob_msg1", 1746000000)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "SBAAAAQLCQ6U4P269"
+    assert result.shipment.carrier_name == "ShipBob"
+    assert result.shipment.order_name == ""
+    assert result.strategy_used == STRATEGY_SHIPBOB
+    assert result.skip_reason is None
+
+
+def test_shipbob_detect_fn_not_triggered_on_other_fixtures(
+    ups_html: str, usps_html: str, fedex_html: str, dhl_html: str, shopify_html: str
+) -> None:
+    """SHIPBOB-01 / T-Spoof mitigation: _detect_shipbob must be False on every
+    existing UPS/USPS/FedEx/DHL/Shopify regression fixture (zero false
+    positives, WR-03) — despite deliberately NOT excluding 'shopify' in html,
+    unlike the four direct-carrier detectors."""
+    assert _detect_shipbob(ups_html) is False
+    assert _detect_shipbob(usps_html) is False
+    assert _detect_shipbob(fedex_html) is False
+    assert _detect_shipbob(dhl_html) is False
+    assert _detect_shipbob(shopify_html) is False
+
+
+def test_other_detect_fns_not_triggered_on_shipbob_fixture(shipbob_html: str) -> None:
+    """SHIPBOB-01: the ShipBob fixture body must route only to ShipBob — no
+    earlier UPS/USPS/FedEx/DHL detector steals it."""
+    assert _detect_ups(shipbob_html) is False
+    assert _detect_usps(shipbob_html) is False
+    assert _detect_fedex(shipbob_html) is False
+    assert _detect_dhl(shipbob_html) is False
+
+
+def test_strategy_shipbob_constant() -> None:
+    """SHIPBOB-01 / D-07: STRATEGY_SHIPBOB is importable with locked string value."""
+    assert STRATEGY_SHIPBOB == "shipbob_template"
+
+
+def test_carrier_registry_includes_shipbob_last() -> None:
+    """SHIPBOB-01: CARRIER_REGISTRY has exactly 5 entries, ShipBob appended
+    last after DHL."""
+    assert CARRIER_REGISTRY[-1] == (_detect_shipbob, _parse_shipbob)
+    assert len(CARRIER_REGISTRY) == 5
+
+
+def test_looks_like_tracking_shipbob() -> None:
+    """SHIPBOB-01: the real confirmed ShipBob sample (and shape variants
+    within the ^SB[A-Z0-9]{8,23}$ range) match; out-of-range shapes don't."""
+    from custom_components.shop2parcel.api.email_parser import _looks_like_tracking
+
+    assert _looks_like_tracking("SBAAAAQLCQ6U4P269") is True  # confirmed real sample, 17 chars
+    assert _looks_like_tracking("SB12345678") is True  # minimum length, 10 chars total
+    assert _looks_like_tracking("SB12345678901234567890123") is True  # maximum length, 25 chars
+    assert _looks_like_tracking("SB1234567") is False  # too short (9 chars total)
+    assert _looks_like_tracking("SB123456789012345678901234") is False  # too long (26 chars)
+    assert _looks_like_tracking("sbaaaaqlcq6u4p269") is False  # lowercase rejected
+
+
+def test_infer_carrier_shipbob() -> None:
+    """SHIPBOB-01: _infer_carrier returns 'ShipBob' for SB-prefixed shapes."""
+    from custom_components.shop2parcel.api.email_parser import _infer_carrier
+
+    assert _infer_carrier("SBAAAAQLCQ6U4P269") == "ShipBob"
+
+
+def test_shipbob_href_fallback() -> None:
+    """SHIPBOB-01: when body text has no bare SB-shaped token but the MSO
+    fallback anchor exposes one in the href, the href fallback path recovers
+    it (mirrors _parse_ups's href-fallback branch)."""
+    html = (
+        "<html><body><p>Your package is on its way, track it below.</p>"
+        '<a href="https://track.shipbob.com/SBAAAAQLCQ6U4P269">Track</a>'
+        "</body></html>"
+    )
+    result = _parse_shipbob(html, "shipbob_href_msg", 0)
+    assert result.shipment is not None
+    assert result.shipment.tracking_number == "SBAAAAQLCQ6U4P269"
+    assert result.shipment.carrier_name == "ShipBob"
+    assert result.strategy_used == STRATEGY_SHIPBOB

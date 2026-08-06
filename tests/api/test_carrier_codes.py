@@ -19,6 +19,8 @@ from custom_components.shop2parcel.api.carrier_codes import normalize_carrier
         ("DHL eCommerce", "dhl"),
         ("Royal Mail", "rm"),
         ("Australia Post", "au"),
+        ("ShipBob", "shipbob"),
+        ("shipbob", "shipbob"),
         ("Unknown Carrier XYZ", "pholder"),
         ("", "pholder"),
         ("completely unknown", "pholder"),

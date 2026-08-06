@@ -90,6 +90,15 @@ _TRACKING_PATTERNS = [
     re.compile(
         r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$"
     ),  # FedEx: Express=12, Ground=15, SmartPost=20
+    # ShipBob (.planning/debug/shipbob-carrier-unsupported.md): SB + 8-23
+    # alnum chars (10-25 total). Safe to add to this shared list — unlike
+    # DHL's deliberately-excluded bare-digit shape (Decision 1, 36-01-PLAN.md)
+    # — because the literal "SB" letter prefix is a low-collision anchor
+    # structurally analogous to UPS's "1Z" above, not a bare-digit shape.
+    # Range is a considered generalization from the one confirmed real sample
+    # (SBAAAAQLCQ6U4P269, SB+15=17 chars) — documented blind spot, no second
+    # independent sample was obtainable.
+    re.compile(r"^SB[A-Z0-9]{8,23}$"),
 ]
 
 
@@ -100,6 +109,7 @@ STRATEGY_UPS = "ups_template"
 STRATEGY_USPS = "usps_template"
 STRATEGY_FEDEX = "fedex_template"
 STRATEGY_DHL = "dhl_template"
+STRATEGY_SHIPBOB = "shipbob_template"
 STRATEGY_REGEX = "regex_fallback"
 STRATEGY_BROAD_REGEX = "broad_regex"
 
@@ -126,6 +136,10 @@ _FEDEX_TRACKING_RE = re.compile(
     r"(?:tracking\s+(?:number|#|no\.?|id\b)\s*:?\s*)([0-9]{12}|[0-9]{15}|[0-9]{20})\b",
     re.IGNORECASE,
 )
+# ShipBob (.planning/debug/shipbob-carrier-unsupported.md): bare bounded token
+# match (mirrors _UPS_TRACKING_RE's structure) — no label anchor required,
+# since the "SB" prefix itself is the low-collision anchor (like UPS's "1Z").
+_SHIPBOB_TRACKING_RE = re.compile(r"\b(SB[A-Z0-9]{8,23})\b")
 
 
 def _looks_like_tracking(s: str) -> bool:
@@ -257,6 +271,8 @@ def _infer_carrier(tracking: str) -> str:
         return "USPS"
     if re.match(r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$", tracking):
         return "FedEx"
+    if re.match(r"^SB[A-Z0-9]{8,23}$", tracking):
+        return "ShipBob"
     return "Unknown"
 
 
@@ -311,6 +327,11 @@ _UPS_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])ups\.com\b")
 _USPS_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])usps\.com\b")
 _FEDEX_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])fedex\.com\b")
 _DHL_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])dhl\.com\b")
+# ShipBob (.planning/debug/shipbob-carrier-unsupported.md): anchored on the
+# customer-facing tracking subdomain, not the bare apex domain — ShipBob is a
+# 3PL fulfillment platform, its marketing/merchant-portal domain is unrelated
+# to the tracking link merchants embed in shipment emails.
+_SHIPBOB_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])track\.shipbob\.com\b")
 
 # DHL Express waybill/AWB numbers are commonly 9-11 digits (10 in practice). NOT
 # covered by the shared _TRACKING_PATTERNS list (UPS/USPS/FedEx only — see R5
@@ -381,6 +402,21 @@ def _detect_dhl(html: str) -> bool:
     """
     html_lower = html.lower()
     return bool(_DHL_DOMAIN_RE.search(html_lower)) and "shopify" not in html_lower
+
+
+def _detect_shipbob(html: str) -> bool:
+    """Return True if html contains a ShipBob 3PL tracking link.
+
+    Marker: boundary-anchored 'track.shipbob.com' (WR-03) — deliberately
+    WITHOUT the "shopify not in html" exclusion _detect_ups/_detect_usps/
+    _detect_fedex/_detect_dhl apply. ShipBob is a fulfillment platform (3PL),
+    not a last-mile carrier that sends its own direct emails — its tracking
+    link legitimately co-occurs inside a merchant/Klaviyo/Shopify-templated
+    email (.planning/debug/shipbob-carrier-unsupported.md), unlike UPS/USPS/
+    FedEx/DHL's own direct carrier emails.
+    """
+    html_lower = html.lower()
+    return bool(_SHIPBOB_DOMAIN_RE.search(html_lower))
 
 
 def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
@@ -608,8 +644,68 @@ def _parse_dhl(html: str, message_id: str, email_date: int) -> ParseResult:
     )
 
 
-# Registry order: UPS -> USPS -> FedEx -> DHL -> (fallthrough to Shopify in
-# parse()). First match wins. Order matters per RESEARCH.md ordering analysis.
+def _parse_shipbob(html: str, message_id: str, email_date: int) -> ParseResult:
+    """Extract tracking number from a ShipBob 3PL shipping notification email.
+
+    Mirrors _parse_ups/_parse_dhl's structure exactly (text regex first, href
+    fallback second — the href fallback matters here since ShipBob's real
+    primary tracking button is often an obfuscated merchant click-tracking
+    redirect URL; only the MSO-fallback anchor or body prose expose the raw
+    tracking token — see shipbob-carrier-unsupported.md Evidence).
+
+    carrier_name is HARDCODED to "ShipBob" rather than derived from body
+    prose ("via X" extraction) — ShipBob's true underlying last-mile carrier
+    (e.g. OnTrac) is only ever exposed via authenticated ShipBob merchant API
+    access, never recoverable from the customer-facing email alone
+    (confirmed via developer.shipbob.com/guides/tracking). This deliberately
+    avoids re-introducing the carrier_name="Unknown" -> normalize_carrier()
+    -> "pholder" failure shape already resolved once in this codebase (see
+    .planning/debug/resolved/parcelapp-unknown-carrier-code.md).
+    """
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
+    m = _SHIPBOB_TRACKING_RE.search(text)
+    if m and _looks_like_tracking(m.group(1)):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=m.group(1),
+                carrier_name="ShipBob",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_SHIPBOB,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    tn = _extract_tracking_from_hrefs(soup)
+    if tn and _looks_like_tracking(tn):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=tn,
+                carrier_name="ShipBob",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_SHIPBOB,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    return ParseResult(
+        shipment=None,
+        skip_reason="no_template_match",
+        strategy_used=None,
+        keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+    )
+
+
+# Registry order: UPS -> USPS -> FedEx -> DHL -> ShipBob -> (fallthrough to
+# Shopify in parse()). First match wins. Order matters per RESEARCH.md
+# ordering analysis. ShipBob is appended last, after the four direct-carrier
+# detectors — its detect_fn deliberately has no "shopify not in html"
+# exclusion (see _detect_shipbob), so it must never shadow a more specific
+# direct-carrier match earlier in the list.
 _CarrierEntry = tuple[
     Callable[[str], bool],
     Callable[[str, str, int], ParseResult],
@@ -619,6 +715,7 @@ CARRIER_REGISTRY: list[_CarrierEntry] = [
     (_detect_usps, _parse_usps),
     (_detect_fedex, _parse_fedex),
     (_detect_dhl, _parse_dhl),
+    (_detect_shipbob, _parse_shipbob),
 ]
 
 
