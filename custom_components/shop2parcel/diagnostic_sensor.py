@@ -92,10 +92,16 @@ class EmailsScannedSensor(DiagnosticSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.diagnostics
         return {
-            "description": "Raw emails returned by Gmail/IMAP before dedup. Includes duplicates from previous polls.",
+            "description": (
+                "Raw emails returned by Gmail/IMAP before dedup. Includes duplicates from "
+                "previous polls. quick-260806-i5r: keyword narrowing (query_used) is now "
+                "applied LOCALLY after each message is fetched, not by the Gmail/IMAP "
+                "server-side search — see last_poll_capped for the Gmail per-poll fetch cap."
+            ),
             "last_poll_returned": d.last_poll_emails_returned,
             "last_poll_skipped_dedup": d.last_poll_emails_skipped_dedup,
             "last_poll_inspected": d.last_poll_emails_scanned,
+            "last_poll_capped": d.last_poll_emails_capped,
             "submitted_tracking_count": d.submitted_tracking_count,
             "last_poll_time": d.last_poll_time,
             "query_used": d.last_poll_query,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html as _html_stdlib
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace as dc_replace
@@ -21,7 +22,14 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api.carrier_codes import normalize_carrier
-from .api.email_parser import EmailParser, ParseResult, ShipmentData, validate_carrier_format
+from .api.email_parser import (
+    EmailParser,
+    ParseResult,
+    ShipmentData,
+    build_keyword_matcher,
+    matches_keyword_filter,
+    validate_carrier_format,
+)
 from .api.exceptions import (
     GmailAuthError,
     GmailStaleTokenError,
@@ -43,6 +51,7 @@ from .const import (
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_RESCAN_WINDOW_DAYS,
+    MAX_GMAIL_MESSAGES_PER_POLL,
     MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
     debug_mode_notification_id,
@@ -58,6 +67,17 @@ from .coordinator import (
 _LOGGER = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+# D-01 (quick-260806-i5r): last_poll_skip_reasons / _emit_scan_event outcome
+# string for a message skipped by the local keyword pre-filter — mirrors the
+# no_html_body pattern (reason == outcome). Exported (not a leading-underscore
+# secret; imported directly by tests/test_gmail_local_keyword_filter.py) so
+# the string lives in exactly one place.
+_LOCAL_FILTER_SKIP_REASON = "local_filter_no_match"
+
+# Sentinel that cannot equal any real stored gmail_query string — forces the
+# very first poll to always (re)build the keyword matcher.
+_KEYWORD_MATCHER_UNSET = object()
 
 
 def _extract_gmail_html(payload: dict) -> str | None:
@@ -90,6 +110,13 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         # stale-token force-refresh (self-healing retry) updates it so every subsequent
         # per-message async_get_message call in the same poll uses the refreshed token.
         self._gmail_access_token: str | None = None
+        # D-01: cache the compiled local keyword-filter pattern so it is
+        # rebuilt only when the stored gmail_query value actually changes
+        # across polls — compiles once per distinct value (not once per poll)
+        # and lets any dropped-operator-token warning fire once per distinct
+        # value rather than every poll cycle (Test 8).
+        self._keyword_matcher_query: object = _KEYWORD_MATCHER_UNSET
+        self._keyword_matcher_pattern: re.Pattern[str] | None = None
         if not entry.options.get(CONF_DEBUG_MODE, False):
             persistent_notification.async_dismiss(
                 hass, notification_id=debug_mode_notification_id(entry.entry_id)
@@ -297,12 +324,31 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         d.last_poll_skip_reasons = []
         d.last_poll_found = []
         d.last_poll_keyword_hits = 0
+        d.last_poll_emails_capped = 0  # D-02: reset every poll like its neighbours
         d.last_poll_time = poll_start  # record attempt time even if poll fails mid-cycle
         d.last_poll_duration_ms = None
-        # Diagnostics only — see gmail-query-drops-emails: the configured keyword
-        # OR-chain is recorded for UX/diagnostics visibility but is NOT sent to the
-        # Gmail List API (see below).
+        # Diagnostics AND the local keyword filter's keyword source (D-01) — see
+        # gmail-query-drops-emails: the configured keyword OR-chain is recorded
+        # here for UX/diagnostics visibility, and separately compiled below into
+        # a LOCAL narrowing filter. It is NOT sent to the Gmail List API (see below).
         d.last_poll_query = query
+        # D-01: rebuild the local keyword-filter pattern only when the stored
+        # query value differs from the cached key — compiles once per distinct
+        # value (not once per poll), and any dropped-operator-token warning
+        # fires once per distinct value, not every poll cycle (Test 8).
+        if query != self._keyword_matcher_query:
+            self._keyword_matcher_pattern, dropped_tokens = build_keyword_matcher(query)
+            self._keyword_matcher_query = query
+            if dropped_tokens:
+                _LOGGER.warning(
+                    "Gmail local keyword filter: dropped %d token(s) from the stored "
+                    "gmail_query that look like Gmail search operators and cannot be "
+                    "matched against plain email text: %s. Remaining keywords still "
+                    "apply; if ALL tokens were operators, every message passes the "
+                    "filter unfiltered (fail-open).",
+                    len(dropped_tokens),
+                    dropped_tokens,
+                )
         _LOGGER.debug(
             "Gmail poll start — query: %s rescan_window_days: %s", query, rescan_window_days
         )
@@ -385,6 +431,28 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     skipped_seen,
                 )
 
+        # D-02: bound the number of messages.get() full-body fetches per poll.
+        # Applied AFTER the seen/in-flight filter above (not before it) — a
+        # before-filter cap could spend its whole budget on already-seen IDs and
+        # reach no new message at all. Applies in BOTH debug and non-debug mode
+        # (debug mode forces a 365-day rescan window — the worst case this cap
+        # exists to bound). Gmail messages.list() returns results NEWEST-FIRST,
+        # so the front slice is kept — the OPPOSITE of api/imap_client.py, where
+        # ascending UIDs make the TAIL the newest.
+        if len(messages) > MAX_GMAIL_MESSAGES_PER_POLL:
+            overflow = len(messages) - MAX_GMAIL_MESSAGES_PER_POLL
+            _LOGGER.warning(
+                "Gmail poll: %d messages after dedup filtering exceeds the per-poll cap "
+                "of %d — processing the newest %d, %d will be picked up on a later poll. "
+                "Consider narrowing rescan_window_days.",
+                len(messages),
+                MAX_GMAIL_MESSAGES_PER_POLL,
+                MAX_GMAIL_MESSAGES_PER_POLL,
+                overflow,
+            )
+            d.last_poll_emails_capped = overflow
+            messages = messages[:MAX_GMAIL_MESSAGES_PER_POLL]
+
         # 4. Iterate messages — fetch body, parse, then dedup on tracking number.
         for msg_meta in messages:
             msg_id = msg_meta["id"]
@@ -465,6 +533,49 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # later parser fix can still recover the shipment instead of losing it forever.
                 self._mark_inflight(msg_id)
                 continue
+
+            # D-01 (quick-260806-i5r): local keyword pre-filter — follow-up to
+            # gmail-query-drops-emails. Gmail's server-side keyword OR-chain
+            # search was removed because it silently dropped real shipment
+            # emails; this coarse, fail-open local check restores the CPU-saving
+            # intent (skip the expensive parser tiers below on messages that
+            # plainly contain none of the configured keywords) without
+            # reintroducing that server-side failure mode. self._keyword_matcher_pattern
+            # is None when the stored query is blank or operator-only — matches_keyword_filter
+            # fails open (returns True) in that case, so every message still reaches parser.parse.
+            if not matches_keyword_filter(
+                self._keyword_matcher_pattern, email_meta.get("subject", ""), html
+            ):
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": msg_id, "reason": _LOCAL_FILTER_SKIP_REASON, **email_meta}
+                )
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome=_LOCAL_FILTER_SKIP_REASON,
+                )
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        email_meta.get("subject", ""),
+                        email_meta.get("from", ""),
+                        None,
+                        _LOCAL_FILTER_SKIP_REASON,
+                    )
+                else:
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, _LOCAL_FILTER_SKIP_REASON)
+                    # D-01: a keyword non-match is a deterministic terminal decision —
+                    # every future poll produces the identical answer — so use the
+                    # persisted seen cache, NOT the in-flight cache (which would
+                    # re-fetch and re-run this filter every poll forever, destroying
+                    # the CPU saving that is the entire point of the filter). Skipped
+                    # in debug mode, which re-evaluates every message every cycle
+                    # (DBG-02/DBG-03 intent).
+                    self._mark_message_seen(msg_id)
+                continue
+
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
             # WR-06: parser.parse performs up to six BeautifulSoup/lxml passes per

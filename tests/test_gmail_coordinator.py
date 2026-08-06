@@ -234,7 +234,7 @@ async def test_fallback_gate_pass_spaced_usps_uses_clean_form(hass, mock_stage2_
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>usps body</html>",
+            return_value="<html>usps body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -379,7 +379,7 @@ async def test_gmail_inline_rejects_malformed_tracking_no_post(hass, mock_no_sta
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -445,7 +445,7 @@ async def test_gmail_inline_posts_clean_canonical_form(hass, mock_no_stage2_entr
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -501,7 +501,7 @@ async def test_gmail_stage1_inline_post_description_falls_back_to_order_name(
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -580,7 +580,7 @@ async def test_fallback_cache_hit_skips_extractor_and_cap(hass, mock_stage2_entr
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -648,7 +648,7 @@ async def test_fallback_enqueue_counts_matched_found_diagnostics(hass, mock_stag
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -704,7 +704,7 @@ async def test_first_refresh_skips_inline_fallback(hass, mock_stage2_entry):
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>first refresh body</html>",
+            return_value="<html>first refresh body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -770,7 +770,7 @@ async def test_second_poll_runs_inline_fallback(hass, mock_stage2_entry):
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>second poll body</html>",
+            return_value="<html>second poll body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -830,7 +830,7 @@ async def test_wall_clock_budget_stops_inline_fallback(hass, mock_stage2_entry):
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>budget body</html>",
+            return_value="<html>budget body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -910,7 +910,7 @@ async def _run_inline_fallback_polls(
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>unparseable digest body</html>",
+            return_value="<html>unparseable digest body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -1433,7 +1433,7 @@ async def test_gmail_inline_transient_error_refunds_reserved_slot(hass, mock_no_
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -1483,7 +1483,7 @@ async def test_gmail_inline_429_blocks_shared_hub(hass, mock_no_stage2_entry):
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -1535,7 +1535,7 @@ async def test_gmail_inline_already_added_keeps_reserve(hass, mock_no_stage2_ent
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,

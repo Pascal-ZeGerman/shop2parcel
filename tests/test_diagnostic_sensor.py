@@ -56,7 +56,7 @@ async def _setup_integration(hass, mock_config_entry, *, with_message: bool = Fa
         ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>" if with_message else "",
+            return_value="<html>body shipped</html>" if with_message else "",
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()

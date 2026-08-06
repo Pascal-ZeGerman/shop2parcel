@@ -263,6 +263,13 @@ class PollStats:
     keyword_hits_total: int = 0
     last_poll_emails_returned: int = 0
     last_poll_emails_skipped_dedup: int = 0
+    # D-02 (quick-260806-i5r): Gmail-only per-poll cap-overflow counter — the
+    # number of post-seen-filter messages dropped by MAX_GMAIL_MESSAGES_PER_POLL
+    # this poll. api/imap_client.py's own cap logs its drop silently; this
+    # counter deliberately does better — an invisible-unless-you-read-logs
+    # drop is the exact failure shape gmail-query-drops-emails follows up on.
+    # In-memory only, reset at the top of every poll (D-06), like its neighbours.
+    last_poll_emails_capped: int = 0
     submitted_tracking_count: int = 0
     last_poll_effective_query: str | None = None
     last_poll_emails_scanned: int = 0

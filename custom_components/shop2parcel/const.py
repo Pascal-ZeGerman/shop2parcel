@@ -39,6 +39,20 @@ DEFAULT_RESCAN_WINDOW_DAYS = 30
 MIN_RESCAN_WINDOW_DAYS = 7
 MAX_RESCAN_WINDOW_DAYS = 365
 
+# Gmail-side per-poll message volume cap (D-02, quick-260806-i5r): the
+# server-side keyword narrowing removed by gmail-query-drops-emails used to
+# bound how many messages a poll fetched in practice; now a broad
+# date-only after: window over a busy mailbox decides how many
+# messages.get() full-body fetches a single poll performs — unbounded on a
+# Raspberry-Pi-class host, and worse in debug mode which forces a 365-day
+# window (MAX_RESCAN_WINDOW_DAYS above). Mirrors api/imap_client.py's own
+# same-purpose MAX_MESSAGES_PER_POLL, deliberately named differently so the
+# two never get confused across modules — that constant stays untouched, in
+# its own module. Gmail messages.list() returns results newest-first
+# (opposite of IMAP's ascending UIDs), so the coordinator keeps the FRONT
+# slice, not the tail.
+MAX_GMAIL_MESSAGES_PER_POLL: int = 100
+
 # Phase 9: IMAP connection + multi-account constants
 CONF_CONNECTION_TYPE = "connection_type"  # str: "gmail" | "imap"
 CONNECTION_TYPE_GMAIL = "gmail"

@@ -43,7 +43,9 @@ def _no_match_result() -> ParseResult:
     )
 
 
-def _msg(msg_id: str, subject: str, html_content: str, internal_date_ms: str = "1700000000000") -> dict:
+def _msg(
+    msg_id: str, subject: str, html_content: str, internal_date_ms: str = "1700000000000"
+) -> dict:
     """Build a Gmail message dict. ``html_content`` is read by the patched
     extract_html_body side effect below (real base64 body data is unused).
     """
@@ -145,9 +147,7 @@ async def test_no_keyword_match_skips_parse(hass, mock_config_entry) -> None:
     mock_parser_cls.return_value.parse.assert_not_called()
 
 
-async def test_no_keyword_match_records_skip_reason_and_scan_event(
-    hass, mock_config_entry
-) -> None:
+async def test_no_keyword_match_records_skip_reason_and_scan_event(hass, mock_config_entry) -> None:
     """Test 2: the skip appends a last_poll_skip_reasons entry, increments
     last_poll_emails_scanned + emails_scanned_total, and emits a matching
     scan event outcome.
