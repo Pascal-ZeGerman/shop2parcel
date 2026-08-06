@@ -42,11 +42,15 @@ def test_strings_settings_step(strings):
 
 
 def test_strings_settings_data_keys(strings):
-    """Test 3: settings.data has all ten field labels."""
+    """Test 3: settings.data has all nine field labels.
+
+    quick-260806-i5r (D-03): gmail_query is no longer a user-editable field —
+    keyword narrowing is now applied locally (gmail_coordinator.py), not via a
+    Gmail-search-query the user tunes here — so it drops from ten keys to nine.
+    """
     data = strings["options"]["step"]["settings"]["data"]
     expected_keys = {
         "poll_interval",
-        "gmail_query",
         "imap_search",
         "imap_verify_tls",
         "rescan_window_days",

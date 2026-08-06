@@ -910,8 +910,14 @@ async def test_options_flow_imap_search_rejects_control_chars(hass, mock_imap_co
     assert result["errors"] == {CONF_IMAP_SEARCH: "invalid_imap_search"}
 
 
-async def test_options_flow_gmail_still_shows_gmail_query(hass, mock_config_entry):
-    """Phase 9 backwards compatibility: Gmail entry options form still shows gmail_query field."""
+async def test_options_flow_gmail_hides_gmail_query(hass, mock_config_entry):
+    """quick-260806-i5r (D-03): Gmail entry options form no longer shows gmail_query —
+    it stops being a user-editable field; keyword narrowing is now applied locally
+    (see gmail_coordinator.py), not via a Gmail-search-query the user tunes here.
+
+    Inverted from the old test_options_flow_gmail_still_shows_gmail_query, which
+    asserted the opposite (Phase 9 backwards-compatibility intent, since superseded).
+    """
     handler, fake_entry = _make_handler_with_options(options={})
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
@@ -919,8 +925,43 @@ async def test_options_flow_gmail_still_shows_gmail_query(hass, mock_config_entr
         result = await handler.async_step_settings(user_input=None)
     schema = result["data_schema"]
     schema_keys = [str(k) for k in schema.schema]
-    assert CONF_GMAIL_QUERY in schema_keys, "Gmail entry must still show gmail_query field"
+    assert CONF_GMAIL_QUERY not in schema_keys, "Gmail entry must NOT show gmail_query field"
     assert CONF_IMAP_SEARCH not in schema_keys, "Gmail entry must NOT show imap_search field"
+
+
+async def test_options_flow_gmail_query_stored_value_survives_settings_save(
+    hass, mock_config_entry
+):
+    """D-04: an entry with an existing custom gmail_query value keeps it, verbatim
+    and unchanged, after a settings save whose user_input has no gmail_query key.
+
+    Proves the "no migration needed" claim: the options-merge
+    (new_options = dict(self.config_entry.options); new_options.update(user_input))
+    is the mechanism — because gmail_query is no longer submittable through this
+    form, it is never touched, so an already-stored value survives untouched and
+    keeps driving the local keyword filter (gmail_coordinator.py) as before.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_GMAIL_QUERY: "from:custom-legacy"}
+    )
+    user_input = {
+        CONF_POLL_INTERVAL: 45,
+        CONF_RESCAN_WINDOW_DAYS: 30,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "",
+        CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_GMAIL_QUERY] == "from:custom-legacy", (
+        "Stored gmail_query must survive a settings save untouched even though the "
+        "field is no longer present in user_input (D-04 — options merge, no migration)"
+    )
 
 
 # ---------------------------------------------------------------------------
