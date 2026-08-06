@@ -94,9 +94,10 @@ class EmailsScannedSensor(DiagnosticSensor):
         return {
             "description": (
                 "Raw emails returned by Gmail/IMAP before dedup. Includes duplicates from "
-                "previous polls. quick-260806-i5r: keyword narrowing (query_used) is now "
-                "applied LOCALLY after each message is fetched, not by the Gmail/IMAP "
-                "server-side search — see last_poll_capped for the Gmail per-poll fetch cap."
+                "previous polls. For Gmail entries, keyword narrowing (query_used) is now "
+                "applied LOCALLY after each message is fetched, not by Gmail's server-side "
+                "search — see last_poll_capped for the Gmail per-poll fetch cap. IMAP "
+                "entries are unaffected and continue to narrow server-side via imap_search."
             ),
             "last_poll_returned": d.last_poll_emails_returned,
             "last_poll_skipped_dedup": d.last_poll_emails_skipped_dedup,

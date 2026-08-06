@@ -19,7 +19,8 @@ DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
 # wider net safe — non-shipment mail that slips through the query is rejected
 # before burning a parcelapp quota slot.  Gmail already excludes Spam/Trash,
 # so no -label:spam guard is needed.
-# User can override via Options flow at any time (CONF_GMAIL_QUERY).
+# User can override the stored per-entry value at any time (CONF_GMAIL_QUERY) —
+# see the quick-260806-i5r note below for how that value is consumed today.
 #
 # Residual FedEx risk (T-N3K-02): the FedEx carrier pattern in _TRACKING_PATTERNS
 # matches ANY bare 12-, 15-, or 20-digit number.  An email body containing an
@@ -27,6 +28,17 @@ DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
 # pass the carrier-format gate and burn a parcelapp quota slot.  The wider query
 # above increases the email volume exposed to this risk.  Tightening the FedEx
 # pattern to a known-prefix anchor is deferred to a future phase.
+#
+# quick-260806-i5r (gmail-query-drops-emails follow-up, D-01): this string is no
+# longer sent to the Gmail List API at all — gmail_coordinator.py always passes
+# an empty base query there (Gmail's server-side OR-chain search silently
+# dropped real shipment emails). DEFAULT_GMAIL_QUERY is now consumed exclusively
+# by api/email_parser.py's build_keyword_matcher(), which compiles it into a
+# LOCAL post-fetch narrowing filter applied to each message's subject/body
+# before the expensive EmailParser.parse() call. The options-flow field that
+# used to expose this value for editing was removed (D-03); a stored per-entry
+# override still works and still feeds the local filter (D-04), it just has no
+# form to change it from.
 DEFAULT_GMAIL_QUERY = (
     "tracking OR shipped OR shipment OR delivery OR delivered OR parcel OR package OR order"
 )

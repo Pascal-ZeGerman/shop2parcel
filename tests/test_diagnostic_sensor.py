@@ -156,6 +156,36 @@ async def test_emails_scanned_state_after_poll(hass, mock_config_entry):
     assert state.attributes["last_poll_returned"] == 1
 
 
+async def test_emails_scanned_sensor_description_scopes_local_filter_claim_to_gmail(
+    hass, mock_config_entry
+):
+    """WR-02 (i5r follow-up): the description must not claim keyword narrowing moved
+    LOCAL for BOTH Gmail and IMAP — imap_coordinator.py is unchanged and still filters
+    server-side via CONF_IMAP_SEARCH (only Gmail's narrowing moved client-side).
+    EmailsScannedSensor is registered unconditionally for both connection types
+    (sensor.py has no connection_type gate), so the same static description text is
+    read by IMAP-connected users too — it must not mislead them.
+    """
+    from custom_components.shop2parcel.diagnostic_sensor import EmailsScannedSensor
+
+    coordinator = await _setup_integration(hass, mock_config_entry)
+    sensor = EmailsScannedSensor(coordinator, mock_config_entry)
+    description = sensor.extra_state_attributes["description"]
+
+    # Pre-fix wording asserted client-side filtering for "the Gmail/IMAP server-side
+    # search" as one blanket claim — false for IMAP. That phrase must be gone.
+    assert "not by the Gmail/IMAP server-side search" not in description
+    # The LOCALLY-applied claim must be scoped to Gmail specifically...
+    assert "Gmail's server-side search" in description
+    # ...and IMAP's continued server-side behaviour must be stated explicitly, not
+    # left implied, so an IMAP-connected reader cannot conclude their own filtering
+    # moved client-side.
+    assert "IMAP" in description
+    assert "server-side" in description.split("IMAP", 1)[1], (
+        "expected the IMAP mention to explicitly say it stays server-side"
+    )
+
+
 async def test_tracking_numbers_found_attributes_after_poll(hass, mock_config_entry):
     """DIAG-09: tracking_numbers_found state and last_poll_found attribute after a poll.
 
