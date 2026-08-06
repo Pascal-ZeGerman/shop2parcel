@@ -31,6 +31,23 @@ _LOGGER = logging.getLogger(__name__)
 # 3-4 levels; 10 is generous headroom.
 _MAX_MIME_DEPTH = 10
 
+# WR-01 (quick-260806-i5r follow-up): pagination page-count bound for
+# async_list_messages. The base query sent to Gmail's List API is now always
+# "" (gmail_coordinator.py passes an empty base query; server-side keyword
+# narrowing was removed by gmail-query-drops-emails), so on a busy mailbox —
+# or in debug mode, which forces the rescan window to MAX_RESCAN_WINDOW_DAYS
+# (365 days) — this loop could otherwise page through the ENTIRE date-window
+# result set on every single poll, well before gmail_coordinator.py's
+# MAX_GMAIL_MESSAGES_PER_POLL cap is ever applied downstream. Each Gmail page
+# holds at most 100 message IDs, so this bounds worst-case messages.list()
+# calls per poll to a small constant regardless of mailbox size or rescan
+# window. The headroom above MAX_GMAIL_MESSAGES_PER_POLL (100) exists so the
+# coordinator's seen/in-flight filter still has candidates to work with when
+# the newest IDs are mostly already-processed. Kept as a module-private
+# constant (not in const.py) — this module intentionally has no HA/config
+# imports (see module docstring), mirroring _MAX_MIME_DEPTH above.
+_MAX_LIST_PAGES = 5  # ~500 raw message IDs max per poll
+
 
 class GmailClient:
     """Wraps Gmail API for async use in HA. No HA imports — executor callable injected.
@@ -72,6 +89,7 @@ class GmailClient:
             service = await self._get_service(access_token)
             all_messages: list[dict[str, Any]] = []
             page_token: str | None = None
+            page_count = 0
             while True:
                 kwargs: dict[str, Any] = {"userId": "me", "q": full_query}
                 if page_token:
@@ -79,8 +97,22 @@ class GmailClient:
                 request = service.users().messages().list(**kwargs)
                 result = await self._executor(request.execute)
                 all_messages.extend(result.get("messages", []))
+                page_count += 1
                 page_token = result.get("nextPageToken")
                 if not page_token:
+                    break
+                if page_count >= _MAX_LIST_PAGES:
+                    # WR-01: more results are available (nextPageToken present) but
+                    # we stop here — see _MAX_LIST_PAGES rationale above.
+                    _LOGGER.warning(
+                        "Gmail messages.list() pagination hit the %d-page cap "
+                        "(%d message IDs collected) with more results still "
+                        "available. Stopping early to bound worst-case API call "
+                        "volume — consider narrowing rescan_window_days if this "
+                        "recurs every poll.",
+                        _MAX_LIST_PAGES,
+                        len(all_messages),
+                    )
                     break
             _LOGGER.debug("Gmail returned %d messages", len(all_messages))
             return all_messages, full_query
