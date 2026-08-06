@@ -50,7 +50,6 @@ from .const import (
     CONF_DEBUG_MODE,
     CONF_FIELD_DESCRIPTION,
     CONF_FIELD_NAME,
-    CONF_GMAIL_QUERY,
     CONF_IMAP_SEARCH,
     CONF_IMAP_VERIFY_TLS,
     CONF_OLLAMA_MODEL,
@@ -62,7 +61,6 @@ from .const import (
     CONF_STAGE2_ENABLED,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
-    DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_IMAP_VERIFY_TLS,
     DEFAULT_OLLAMA_MODEL,
@@ -259,16 +257,12 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                             CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
                         ),
                     ): vol.All(int, vol.Range(min=5, max=1440)),
-                    vol.Optional(
-                        CONF_GMAIL_QUERY,
-                        default=self.config_entry.options.get(
-                            CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY
-                        ),
-                        # Empty/whitespace submissions are coerced to DEFAULT_GMAIL_QUERY
-                        # in the submit handler (see below) — preventing the full-inbox scan
-                        # (DoS against Gmail API quota and HA event loop) at write time rather
-                        # than schema time. max=500 mirrors Gmail's practical query length limit.
-                    ): vol.All(str, vol.Length(max=500)),
+                    # quick-260806-i5r (D-03): gmail_query is no longer a user-editable
+                    # field here — keyword narrowing now happens locally, after the
+                    # message fetch, in gmail_coordinator.py. An already-stored value
+                    # (CONF_GMAIL_QUERY, read via .get() in gmail_coordinator.py) is
+                    # never touched by this form and keeps driving the local filter
+                    # (D-04) — see the options-merge in the submit handler below.
                     # QF-02: Gmail-only rescan window. Allows widening the after: filter
                     # without clearing forwarded_ids — already-forwarded shipments are
                     # deduplicated before any ParcelApp POST, so increasing this value
@@ -351,13 +345,10 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             if not errors:
                 # Strip whitespace from URL before persisting (WR-01).
                 user_input[CONF_OLLAMA_URL] = user_input.get(CONF_OLLAMA_URL, "").strip()
-                # T-tfz-01: Coerce empty/whitespace gmail_query to DEFAULT_GMAIL_QUERY.
-                # build_incremental_query("", n) yields " after:..." which scans the entire
-                # inbox — exhausting Gmail API quota and blocking the HA event loop.
-                # Only fires on the Gmail branch (IMAP submit path has no gmail_query key).
-                if CONF_GMAIL_QUERY in user_input and not user_input[CONF_GMAIL_QUERY].strip():
-                    user_input[CONF_GMAIL_QUERY] = DEFAULT_GMAIL_QUERY
                 # Merge with existing options so CONF_CUSTOM_FIELDS is preserved (CR-01).
+                # quick-260806-i5r (D-04): gmail_query is no longer in user_input (removed
+                # from the schema above), so an already-stored value is simply never
+                # touched by this update() — it survives untouched. No migration step.
                 new_options = dict(self.config_entry.options)
                 new_options.update(user_input)
                 # IN-01: drop the dead stage2_enabled key seeded by pre-1.5 entry

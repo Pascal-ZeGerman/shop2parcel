@@ -23,7 +23,6 @@ from custom_components.shop2parcel.const import (
     CONF_POLL_INTERVAL,
     CONF_QUEUE_MAXLEN,
     CONF_RESCAN_WINDOW_DAYS,
-    DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT,
@@ -114,7 +113,7 @@ async def test_settings_shows_form(hass, mock_config_entry):
     for key in (CONF_OLLAMA_URL, CONF_OLLAMA_MODEL, CONF_OLLAMA_TIMEOUT, CONF_QUEUE_MAXLEN):
         assert key in schema_keys, f"Expected '{key}' in settings schema"
     # Existing fields must also be present
-    for key in (CONF_POLL_INTERVAL, CONF_GMAIL_QUERY, CONF_DEBUG_MODE):
+    for key in (CONF_POLL_INTERVAL, CONF_DEBUG_MODE):
         assert key in schema_keys, f"Expected '{key}' in settings schema"
 
 
@@ -407,7 +406,6 @@ async def test_settings_error_rerender_preserves_user_input(hass, mock_config_en
     )
     user_input = {
         CONF_POLL_INTERVAL: 45,
-        CONF_GMAIL_QUERY: "from:etsy",
         CONF_RESCAN_WINDOW_DAYS: 60,
         CONF_DEBUG_MODE: True,
         CONF_OLLAMA_URL: "http://10.0.0.9:11434",
@@ -438,7 +436,6 @@ async def test_settings_error_rerender_preserves_user_input(hass, mock_config_en
     schema_dict = {str(k): k for k in schema.schema}
     for key, expected in (
         (CONF_POLL_INTERVAL, 45),
-        (CONF_GMAIL_QUERY, "from:etsy"),
         (CONF_RESCAN_WINDOW_DAYS, 60),
         (CONF_DEBUG_MODE, True),
         (CONF_OLLAMA_URL, "http://10.0.0.9:11434"),
@@ -494,7 +491,6 @@ async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -505,7 +501,6 @@ async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -519,7 +514,6 @@ async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -533,7 +527,6 @@ async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -556,7 +549,6 @@ async def test_settings_queue_maxlen_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -567,7 +559,6 @@ async def test_settings_queue_maxlen_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -581,7 +572,6 @@ async def test_settings_queue_maxlen_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -595,7 +585,6 @@ async def test_settings_queue_maxlen_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -681,9 +670,7 @@ async def test_options_flow_shows_form_with_defaults(hass, mock_config_entry):
     # vol.Schema stores defaults on each Required key
     schema_dict = {str(k): k for k in schema.schema}
     poll_key = schema_dict[CONF_POLL_INTERVAL]
-    query_key = schema_dict[CONF_GMAIL_QUERY]
     assert poll_key.default() == DEFAULT_POLL_INTERVAL
-    assert query_key.default() == DEFAULT_GMAIL_QUERY
 
 
 async def test_options_flow_saves_valid_input(hass, mock_config_entry):
@@ -720,7 +707,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -731,7 +717,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 5,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -742,7 +727,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 1440,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -756,7 +740,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 4,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -770,7 +753,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 1441,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -778,30 +760,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
                 CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
             }
         )
-
-
-async def test_gmail_query_default(hass, mock_config_entry):
-    """EMAIL-05: Form default for CONF_GMAIL_QUERY equals DEFAULT_GMAIL_QUERY when no override."""
-    handler, fake_entry = _make_handler_with_options(options={})
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=None)
-    schema = result["data_schema"]
-    schema_dict = {str(k): k for k in schema.schema}
-    query_key = schema_dict[CONF_GMAIL_QUERY]
-    assert query_key.default() == DEFAULT_GMAIL_QUERY
-
-    # When entry.options has an override, default reflects it
-    handler2, fake_entry2 = _make_handler_with_options(options={CONF_GMAIL_QUERY: "from:custom"})
-    with patch.object(
-        type(handler2), "config_entry", new_callable=PropertyMock, return_value=fake_entry2
-    ):
-        result2 = await handler2.async_step_settings(user_input=None)
-    schema2 = result2["data_schema"]
-    schema2_dict = {str(k): k for k in schema2.schema}
-    query_key2 = schema2_dict[CONF_GMAIL_QUERY]
-    assert query_key2.default() == "from:custom"
 
 
 # ---------------------------------------------------------------------------
@@ -991,7 +949,6 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: MIN_RESCAN_WINDOW_DAYS - 1,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -1004,7 +961,6 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: MAX_RESCAN_WINDOW_DAYS + 1,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -1016,7 +972,6 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: MIN_RESCAN_WINDOW_DAYS,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -1027,7 +982,6 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: MAX_RESCAN_WINDOW_DAYS,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -1655,101 +1609,10 @@ async def test_model_field_dropdown_includes_stored_model_not_in_tags(hass, mock
 
 
 # ---------------------------------------------------------------------------
-# QUICK-260630-tfz: gmail_query optional — empty/whitespace coerced to DEFAULT_GMAIL_QUERY
+# quick-260806-i5r (D-03/D-04): the QUICK-260630-tfz gmail_query
+# empty/whitespace-coercion tests that used to live here asserted schema and
+# coercion behavior that no longer exists now that the field is not
+# submittable through this form at all — deleted. The one surviving intent
+# (a stored value keeps working) is covered by
+# test_options_flow_gmail_query_stored_value_survives_settings_save above.
 # ---------------------------------------------------------------------------
-
-_GMAIL_BASE_INPUT = {
-    CONF_POLL_INTERVAL: 30,
-    CONF_RESCAN_WINDOW_DAYS: DEFAULT_RESCAN_WINDOW_DAYS,
-    CONF_DEBUG_MODE: False,
-    CONF_OLLAMA_URL: "",  # empty URL skips async_get_tags call
-    CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
-    CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
-    CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
-}
-
-
-async def test_gmail_query_empty_string_persists_default(hass, mock_config_entry):
-    """Test A (QUICK-260630-tfz): submitting gmail_query="" persists DEFAULT_GMAIL_QUERY, not "".
-
-    An empty string matches ALL Gmail messages, causing a full-inbox scan
-    (DoS against Gmail API quota and the HA event loop — T-tfz-01).
-    The submit handler must coerce "" to DEFAULT_GMAIL_QUERY before create_entry.
-    """
-    handler, fake_entry = _make_handler_with_options(options={})
-    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: ""}
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=user_input)
-    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
-    assert result["data"][CONF_GMAIL_QUERY] == DEFAULT_GMAIL_QUERY, (
-        f"Empty gmail_query must be coerced to DEFAULT_GMAIL_QUERY ({DEFAULT_GMAIL_QUERY!r}), "
-        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
-    )
-
-
-async def test_gmail_query_whitespace_persists_default(hass, mock_config_entry):
-    """Test B (QUICK-260630-tfz): submitting gmail_query="   " persists DEFAULT_GMAIL_QUERY.
-
-    Whitespace-only strings are semantically empty and would produce a broken
-    Gmail query — they must be coerced to DEFAULT_GMAIL_QUERY at write time.
-    """
-    handler, fake_entry = _make_handler_with_options(options={})
-    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: "   "}
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=user_input)
-    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
-    assert result["data"][CONF_GMAIL_QUERY] == DEFAULT_GMAIL_QUERY, (
-        f"Whitespace-only gmail_query must be coerced to DEFAULT_GMAIL_QUERY ({DEFAULT_GMAIL_QUERY!r}), "
-        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
-    )
-
-
-async def test_gmail_query_non_empty_preserved_verbatim(hass, mock_config_entry):
-    """Test C (QUICK-260630-tfz): submitting a non-empty gmail_query persists it unchanged.
-
-    The coercion must only fire for empty/whitespace inputs — real user queries
-    must not be silently replaced with the default.
-    """
-    handler, fake_entry = _make_handler_with_options(options={})
-    custom_query = "from:shopify"
-    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: custom_query}
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=user_input)
-    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
-    assert result["data"][CONF_GMAIL_QUERY] == custom_query, (
-        f"Non-empty gmail_query must be persisted verbatim ({custom_query!r}), "
-        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
-    )
-
-
-async def test_gmail_query_schema_accepts_empty_string(hass, mock_config_entry):
-    """Test D (QUICK-260630-tfz): the schema must accept gmail_query="" (no vol.Invalid raised).
-
-    The current schema uses vol.Required + vol.Length(min=1) which rejects "".
-    After the change, vol.Optional + vol.Length(max=500) (no min=1) must allow
-    it through — the DoS risk is handled by write-time coercion, not schema rejection.
-    """
-    handler, fake_entry = _make_handler_with_options(options={})
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=None)
-    schema = result["data_schema"]
-    # Calling the schema with gmail_query="" must NOT raise vol.Invalid.
-    schema(
-        {
-            CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "",
-            CONF_RESCAN_WINDOW_DAYS: DEFAULT_RESCAN_WINDOW_DAYS,
-            CONF_OLLAMA_URL: "",
-            CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
-            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
-            CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
-        }
-    )
