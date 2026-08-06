@@ -577,6 +577,79 @@ async def test_list_messages_paginates_across_pages():
 
 
 # ---------------------------------------------------------------------------
+# WR-01 (quick-260806-i5r follow-up): pagination page-count cap.
+#
+# The base query sent to Gmail's List API is now always "" (server-side
+# keyword narrowing was removed by gmail-query-drops-emails), so on a busy
+# mailbox — or in debug mode, which forces MAX_RESCAN_WINDOW_DAYS=365 — this
+# loop could otherwise page through the entire date-window result set every
+# poll, well before MAX_GMAIL_MESSAGES_PER_POLL is ever applied downstream in
+# gmail_coordinator.py. These tests lock the hard page-count bound
+# (gmail_client.py's ``_MAX_LIST_PAGES = 5``).
+# ---------------------------------------------------------------------------
+
+
+async def test_list_messages_pagination_stops_at_page_cap():
+    """Pagination halts at the page cap even when Gmail keeps returning
+    nextPageToken — no code path may page through an entire busy mailbox."""
+    captured_kwargs: list[dict] = []
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.side_effect = lambda **kw: (
+        captured_kwargs.append(kw) or MagicMock()
+    )
+
+    # 8 pages available, each still advertising a nextPageToken — simulates a
+    # busy mailbox / 365-day debug window with far more results than the cap.
+    pages = [{"messages": [{"id": f"m{i}"}], "nextPageToken": f"PAGE{i + 1}"} for i in range(8)]
+    executor = _SequencedExecutor(service, pages=pages)
+    client = GmailClient(executor)
+    messages, _ = await client.async_list_messages("fake-token", "from:shopify")
+
+    assert len(captured_kwargs) == 5, (
+        f"expected exactly 5 list() calls (the page cap), got {len(captured_kwargs)}"
+    )
+    assert messages == [{"id": "m0"}, {"id": "m1"}, {"id": "m2"}, {"id": "m3"}, {"id": "m4"}]
+
+
+async def test_list_messages_pagination_cap_logs_warning(caplog):
+    """Hitting the page cap logs a WARNING naming the page count and message total,
+    mirroring the style of the existing MAX_GMAIL_MESSAGES_PER_POLL / IMAP warnings."""
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.side_effect = lambda **kw: MagicMock()
+    pages = [{"messages": [{"id": f"m{i}"}], "nextPageToken": f"PAGE{i + 1}"} for i in range(6)]
+    executor = _SequencedExecutor(service, pages=pages)
+    client = GmailClient(executor)
+
+    with caplog.at_level(logging.WARNING):
+        await client.async_list_messages("fake-token", "from:shopify")
+
+    assert any("5" in r.getMessage() and "pag" in r.getMessage().lower() for r in caplog.records), (
+        f"expected a WARNING naming the page cap; got: {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+async def test_list_messages_pagination_under_cap_unchanged(caplog):
+    """A mailbox with fewer pages than the cap paginates to completion exactly as
+    before, and does NOT log the cap warning (regression guard)."""
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.side_effect = lambda **kw: MagicMock()
+    executor = _SequencedExecutor(
+        service,
+        pages=[
+            {"messages": [{"id": "a"}], "nextPageToken": "PAGE2"},
+            {"messages": [{"id": "b"}]},
+        ],
+    )
+    client = GmailClient(executor)
+
+    with caplog.at_level(logging.WARNING):
+        messages, _ = await client.async_list_messages("fake-token", "from:shopify")
+
+    assert messages == [{"id": "a"}, {"id": "b"}]
+    assert not any("pag" in r.getMessage().lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # async_get_message error classification (covers the get error path)
 # ---------------------------------------------------------------------------
 
