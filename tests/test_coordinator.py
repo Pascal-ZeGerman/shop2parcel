@@ -5960,6 +5960,88 @@ async def test_worker_merge_path_carrier_gate_rejects_order_number(hass, mock_st
     )
 
 
+async def test_mrg04_promotion_reject_debug_log_includes_subject_and_sender(
+    hass, mock_stage2_entry, caplog
+):
+    """Quick task 260806-v2j (LOG-03): the MRG-04 promotion-rejection DEBUG
+    line names the offending email's subject and sender, and never leaks
+    them above DEBUG (T-v2j-01)."""
+    from custom_components.shop2parcel.coordinator import Stage2Job
+    from custom_components.shop2parcel.extractors.types import Stage2Result
+
+    mock_stage2_entry.add_to_hass(hass)
+    subject = "Your IZIMINI order has shipped"
+    sender = "noreply@izimini.example"
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body shipped</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor") as mock_extractor_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        stage2_result = Stage2Result(
+            locked={"tracking_number": "ORDER-12345", "carrier_name": "UPS", "order_name": "#1"},
+            custom={},
+            passes_used=1,
+            latency_ms=10.0,
+        )
+        mock_extractor_cls.return_value.async_extract = AsyncMock(return_value=stage2_result)
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+        await coord.async_setup_stage2_extractor()
+
+        # Stage-1 tracking_number=None triggers the promotion path (mirrors the
+        # neighbouring test above), so the MRG-04 gate fires inside merge.py.
+        shipment = ShipmentData(
+            tracking_number=None,
+            carrier_name="UPS",
+            order_name="#1",
+            message_id="msg-gate-reject-debug",
+            email_date=1700000000,
+        )
+        job = Stage2Job(
+            storage_key="order-12345-key-debug",
+            normalized_tn="ORDER12345",
+            shipment=shipment,
+            html_body="<html/>",
+            message_id="test-gate-msg-debug",
+            meta={"subject": subject, "from": sender},
+            entry_id=coord.config_entry.entry_id,
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
+            try:
+                await coord._async_process_stage2_job(job)
+            except AssertionError:
+                pass
+
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    matching = [r for r in debug_records if subject in r.getMessage() and sender in r.getMessage()]
+    assert matching, (
+        "Expected a DEBUG record carrying both subject and sender for the "
+        f"MRG-04 promotion rejection; got: {[r.getMessage() for r in debug_records]}"
+    )
+
+    above_debug = [r for r in caplog.records if r.levelno > logging.DEBUG]
+    for record in above_debug:
+        message = record.getMessage()
+        assert subject not in message, "Subject leaked above DEBUG level"
+        assert sender not in message, "Sender leaked above DEBUG level"
+
+
 # ---------------------------------------------------------------------------
 # Phase 31 Plan 04: D-01 gate order — Stage-2 worker POST path reserve/refund (QUOTA-01/QUOTA-02)
 # ---------------------------------------------------------------------------
@@ -6179,6 +6261,59 @@ async def test_drain_defensive_regate_drops_gate_failing_item(hass, mock_stage2_
     info_plus_records = [r for r in caplog.records if r.levelno >= logging.INFO]
     assert not any(rejected_clean in r.getMessage() for r in info_plus_records), (
         f"Rejected value '{rejected_clean}' must not appear in INFO+ logs (DEBUG only)"
+    )
+
+
+async def test_drain_reject_debug_log_includes_storage_key(hass, mock_stage2_entry, caplog):
+    """Quick task 260806-v2j (LOG-04): the drain re-gate rejection DEBUG line
+    names the pending item's storage_key.
+
+    Subject and sender are intentionally ABSENT on this path: `_pending_posts`
+    stores `ShipmentData` values only (tracking_number/carrier_name/order_name/
+    message_id/email_date/custom_attributes/order_summary — see
+    api/email_parser.py), which carries no subject or sender field, and no
+    email re-fetch is performed to obtain them (T-v2j-03, accepted). The
+    storage_key is therefore the strongest triage handle free in scope.
+    """
+    mock_stage2_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body shipped</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+
+        gate_failing_shipment = ShipmentData(
+            tracking_number="ORDER-12345",
+            carrier_name="UPS",
+            order_name="#fail",
+            message_id="msg-drain-gate-debug",
+            email_date=1700000001,
+        )
+        coord._pending_posts = {"drain_gate_fail_key": gate_failing_shipment}
+        coord._quota_exhausted_until = None
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
+            await coord._async_drain_pending_posts()
+
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    matching = [r for r in debug_records if "drain_gate_fail_key" in r.getMessage()]
+    assert matching, (
+        "Expected a DEBUG record naming the pending item's storage_key; got: "
+        f"{[r.getMessage() for r in debug_records]}"
     )
 
 

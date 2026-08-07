@@ -21,6 +21,7 @@ intentional and pre-existing, not something parity should paper over.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -211,6 +212,53 @@ async def test_carrier_reject_no_enqueue_identical(
         "A carrier-format-rejected fallback result must be marked seen (terminal) "
         "identically for both coordinators"
     )
+
+
+@pytest.mark.parametrize("coordinator_cls,entry_fixture,prefix,email_date", COORDINATOR_PARAMS)
+async def test_carrier_reject_debug_log_includes_subject_and_sender(
+    hass, request, coordinator_cls, entry_fixture, prefix, email_date, caplog
+):
+    """Quick task 260806-v2j (LOG-01): the inline-fallback carrier-format
+    rejection DEBUG line names the offending email's subject and sender —
+    triageable straight from the log without a Gmail API lookup — and those
+    values never leak to INFO or above (T-v2j-01)."""
+    coord = await _build_ready_coordinator(hass, request, coordinator_cls, entry_fixture)
+    mock_extractor = AsyncMock()
+    mock_extractor.async_extract = AsyncMock(
+        return_value=_valid_stage2_result(tn="ORDER-12345")  # fails no_carrier_match
+    )
+    coord._extractor = mock_extractor
+
+    subject = "Your IZIMINI order has shipped"
+    sender = "noreply@izimini.example"
+    msg_key = "parity-carrier-reject-debug"
+    with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
+        with patch.object(coordinator_cls, "_enqueue_stage2"):
+            await coord._run_inline_fallback(
+                msg_key=msg_key,
+                prefix=prefix,
+                html="<html>shipping body</html>",
+                meta={"subject": subject, "from": sender},
+                email_date=email_date,
+                candidate_tokens=[],
+                debug_mode=False,
+            )
+
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    matching = [r for r in debug_records if subject in r.getMessage() and sender in r.getMessage()]
+    assert matching, (
+        "Expected a DEBUG record carrying both the subject and sender "
+        f"for the carrier-format rejection; got: {[r.getMessage() for r in debug_records]}"
+    )
+    assert any("no_carrier_match" in r.getMessage() for r in matching), (
+        "The enriched DEBUG line must still carry the pre-existing reason token"
+    )
+
+    above_debug = [r for r in caplog.records if r.levelno > logging.DEBUG]
+    for record in above_debug:
+        message = record.getMessage()
+        assert subject not in message, "Subject leaked above DEBUG level"
+        assert sender not in message, "Sender leaked above DEBUG level"
 
 
 @pytest.mark.parametrize("coordinator_cls,entry_fixture,prefix,email_date", COORDINATOR_PARAMS)
