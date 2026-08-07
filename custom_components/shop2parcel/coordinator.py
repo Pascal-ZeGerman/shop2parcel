@@ -1459,11 +1459,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
                 _LOGGER.debug(
                     "%s %s: fallback carrier-format gate rejected '%s' "
-                    "(reason=%s) — cached as rejected",
+                    "(reason=%s) subject=%r sender=%r — cached as rejected",
                     log_label,
                     msg_key,
                     fb_clean,
                     fb_reason,
+                    meta.get("subject", ""),
+                    meta.get("from", ""),
                 )
                 self._mark_message_seen(msg_key)
                 self._emit_scan_event(
@@ -1673,11 +1675,15 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             drain_tn_raw = merged_shipment.tracking_number or ""
             drain_clean, drain_ok, drain_reject_reason = validate_carrier_format(drain_tn_raw)
             if not drain_ok:
+                # _pending_posts stores ShipmentData only (no subject/from fields) and no
+                # email re-fetch is performed on this path, so subject/sender cannot be
+                # logged here — storage_key is the triage handle instead (quick task 260806-v2j).
                 _LOGGER.debug(
                     "Stage-2 drain: carrier-format gate rejected pending tn='%s' (reason=%s)"
-                    " — removing from _pending_posts without POST",
+                    " storage_key=%s — removing from _pending_posts without POST",
                     drain_clean,
                     drain_reject_reason,
+                    storage_key,
                 )
                 self._diagnostics.record_carrier_format_rejection(
                     drain_clean, drain_reject_reason or "no_carrier_match"
@@ -1917,9 +1923,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             for rej in gate_rejections:
                 self._diagnostics.record_carrier_format_rejection(rej["clean"], rej["reason"])
                 _LOGGER.debug(
-                    "Stage-2 worker: carrier-format gate rejected promotion of '%s' (reason=%s)",
+                    "Stage-2 worker: carrier-format gate rejected promotion of '%s' "
+                    "(reason=%s) subject=%r sender=%r",
                     rej["clean"],
                     rej["reason"],
+                    job.meta.get("subject", ""),
+                    job.meta.get("from", ""),
                 )
 
             # Phase 35 Plan 03 (MRG-05, SC-1): record grounding rejections on a
@@ -2001,9 +2010,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not wk_ok:
             _LOGGER.debug(
                 "Stage-2 worker: carrier-format gate rejected tn='%s' (reason=%s)"
-                " — discarding job without POST (terminal)",
+                " subject=%r sender=%r — discarding job without POST (terminal)",
                 wk_clean,
                 wk_reason,
+                job.meta.get("subject", ""),
+                job.meta.get("from", ""),
             )
             self._diagnostics.record_carrier_format_rejection(
                 wk_clean, wk_reason or "no_carrier_match"
