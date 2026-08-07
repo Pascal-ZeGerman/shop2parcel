@@ -261,6 +261,70 @@ def matches_keyword_filter(pattern: re.Pattern[str] | None, *texts: str) -> bool
     return any(text and pattern.search(text) for text in texts)
 
 
+def extract_sender_domain(sender: str) -> str:
+    """Extract the lowercased domain from an email 'From' header value.
+
+    Sibling of build_sender_exclusion_matcher below — together they form the
+    EXCLUDE-biased half of sender filtering, deliberately the opposite safety
+    direction of build_keyword_matcher/matches_keyword_filter above (which
+    bias toward matching too much because their own failure mode was silent
+    under-matching).
+
+    Handles both a bare address ("no-reply@shopify.com") and a
+    ``Display Name <addr@domain>`` header value — ``re.search`` finds the
+    first ``@`` wherever it occurs. Returns "" for a sender with no "@" and
+    for an empty/None input (the ``sender or ""`` guard), so callers can
+    treat "" as "never excluded" — build_sender_exclusion_matcher never
+    stores the empty string as a configured domain (blank entries are
+    dropped), so "" can never accidentally match a configured exclusion.
+
+    T-qw1-01 (ASVS V5): ``@([\\w.-]+)`` is a single bounded character class
+    with one non-nested quantifier — linear in input length even against an
+    attacker-controllable From header. No ReDoS surface added.
+    """
+    m = re.search(r"@([\w.-]+)", sender or "")
+    return m.group(1).lower() if m else ""
+
+
+def build_sender_exclusion_matcher(excluded_domains: list[str]) -> Callable[[str], bool]:
+    """Compile a stored sender-exclusion domain list into a matcher closure.
+
+    EXCLUDE-biased — the deliberate opposite safety direction of
+    build_keyword_matcher/matches_keyword_filter above. Those functions
+    correctly bias toward matching too much (their failure mode was silent
+    under-matching, dropping real shipment emails). This filter must bias
+    the opposite way, toward excluding too little: an over-eager exclusion
+    here silently and permanently drops real data with no visible error,
+    which is strictly worse than the wasted Stage-1/Stage-2 pass it exists
+    to avoid.
+
+    Membership is an EXACT ``set`` lookup — never a suffix, substring, or
+    ``endswith`` check. This is not a style preference: a suffix match on an
+    entry like "usps.com" would also match
+    "email.informeddelivery.usps.com" and silently, permanently drop USPS
+    Informed Delivery digests, which send a legitimate daily email
+    regardless of whether any package is actually arriving (D-01). Because
+    membership is exact, a short parent-domain entry can never reach a
+    longer subdomain.
+
+    An empty or all-blank ``excluded_domains`` list means exclude nothing
+    (D-03 fail-open) — the default, unconfigured behaviour, and the only
+    behaviour byte-for-byte-identical polling depends on.
+    """
+    normalized = {d.strip().lower().lstrip("@") for d in excluded_domains if d.strip()}
+    if not normalized:
+
+        def _exclude_nothing(_sender: str) -> bool:
+            return False
+
+        return _exclude_nothing
+
+    def _matcher(sender: str) -> bool:
+        return extract_sender_domain(sender) in normalized
+
+    return _matcher
+
+
 def _infer_carrier(tracking: str) -> str:
     """Infer carrier from tracking number shape. Used by Tier 2 and href fallbacks."""
     if re.match(r"^1Z[A-Z0-9]{16}$", tracking):

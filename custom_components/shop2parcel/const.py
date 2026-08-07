@@ -313,6 +313,17 @@ DEFAULT_OLLAMA_TIMEOUT = 60  # seconds
 CONF_QUEUE_MAXLEN = "queue_maxlen"
 DEFAULT_QUEUE_MAXLEN = 32
 CONF_CUSTOM_FIELDS = "custom_fields"  # list[dict]: {"name": str, "description": str | None}
+
+# Quick task 260807-qw1 (spike 027): user-configurable EXCLUDE-biased
+# sender-domain filter. Stored value is list[str] — lowercased, exact-match
+# domains. An empty or absent list means exclude nothing (fail-open, D-03).
+# See api/email_parser.py build_sender_exclusion_matcher and
+# .claude/skills/spike-findings-shop2parcel/references/sender-filtering.md.
+CONF_SENDER_EXCLUSIONS = "sender_exclusions"  # list[str]
+# D-07: shared skip/outcome string — both gmail_coordinator.py and
+# imap_coordinator.py use it for last_poll_skip_reasons entries and
+# _emit_scan_event outcomes, so it lives here rather than in either module.
+SENDER_EXCLUDED_SKIP_REASON = "sender_excluded"
 # CONF_STAGE2_ENABLED: derived boolean; set in async_setup_entry from CONF_OLLAMA_URL presence.
 # Never exposed as a user-editable form field (D-05, T-17-02-03).
 CONF_STAGE2_ENABLED = "stage2_enabled"
