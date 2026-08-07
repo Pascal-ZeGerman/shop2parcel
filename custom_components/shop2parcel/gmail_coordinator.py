@@ -27,6 +27,7 @@ from .api.email_parser import (
     ParseResult,
     ShipmentData,
     build_keyword_matcher,
+    build_sender_exclusion_matcher,
     matches_keyword_filter,
     validate_carrier_format,
 )
@@ -48,12 +49,14 @@ from .const import (
     CONF_ENABLE_BROAD_SCAN,
     CONF_GMAIL_QUERY,
     CONF_RESCAN_WINDOW_DAYS,
+    CONF_SENDER_EXCLUSIONS,
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_RESCAN_WINDOW_DAYS,
     MAX_GMAIL_MESSAGES_PER_POLL,
     MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    SENDER_EXCLUDED_SKIP_REASON,
     debug_mode_notification_id,
     normalize_tracking_number,
 )
@@ -349,6 +352,15 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     len(dropped_tokens),
                     dropped_tokens,
                 )
+        # quick-260807-qw1 (D-06): rebuild the exclude-biased sender matcher
+        # every poll, unconditionally — it is a small `set` build, not a regex
+        # compile, so (unlike the keyword matcher above) no cache key is
+        # warranted. Reads CONF_SENDER_EXCLUSIONS fresh each poll so a
+        # just-saved options change (OptionsFlowWithReload reload) takes
+        # effect on the very next poll.
+        sender_is_excluded = build_sender_exclusion_matcher(
+            self.config_entry.options.get(CONF_SENDER_EXCLUSIONS, [])
+        )
         _LOGGER.debug(
             "Gmail poll start — query: %s rescan_window_days: %s", query, rescan_window_days
         )
@@ -474,6 +486,46 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 raise UpdateFailed(f"Gmail transient error: {err}") from err
 
             email_meta = _extract_email_meta(msg)
+
+            # quick-260807-qw1 (spike 027): sender-exclusion gate — the
+            # earliest point sender metadata exists on this path, ahead of
+            # the internalDate parse, the _extract_gmail_html executor job,
+            # the local keyword filter, and parser.parse. build_sender_
+            # exclusion_matcher is EXCLUDE-biased and fails open (returns
+            # False for every sender) when CONF_SENDER_EXCLUSIONS is empty
+            # or absent — D-03, byte-for-byte-identical behaviour to before
+            # this feature in that case.
+            if sender_is_excluded(email_meta.get("from", "")):
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": msg_id, "reason": SENDER_EXCLUDED_SKIP_REASON, **email_meta}
+                )
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome=SENDER_EXCLUDED_SKIP_REASON,
+                )
+                _LOGGER.debug(
+                    "Gmail message %s sender-excluded — subject=%r sender=%r",
+                    msg_id,
+                    email_meta.get("subject", ""),
+                    email_meta.get("from", ""),
+                )
+                # D-05: this is the one place this plan deliberately diverges
+                # from the local-keyword-filter branch below, which correctly
+                # uses the persisted seen cache because its answer never
+                # changes for a given stored query. The exclusion decision IS
+                # configuration-dependent — OptionsFlowWithReload reloads the
+                # entry (and rebuilds this coordinator, clearing the in-flight
+                # set) on save, so removing a domain from the list must take
+                # effect on the very next poll. Do NOT "fix" this into parity
+                # with _mark_message_seen — that would make a mis-typed
+                # exclusion permanently unrecoverable, exactly the failure
+                # mode this filter's exclude-too-little safety bias exists to
+                # prevent.
+                self._mark_inflight(msg_id)
+                continue
 
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
