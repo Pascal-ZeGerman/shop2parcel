@@ -23,6 +23,7 @@ from custom_components.shop2parcel.const import (
     CONF_POLL_INTERVAL,
     CONF_QUEUE_MAXLEN,
     CONF_RESCAN_WINDOW_DAYS,
+    CONF_SENDER_EXCLUSIONS,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT,
@@ -87,7 +88,12 @@ def no_localhost_probe():
 
 
 async def test_init_returns_menu(hass, mock_config_entry):
-    """D-01: async_step_init returns a top-level menu with 'settings' and 'custom_fields'."""
+    """D-01: async_step_init returns a top-level menu with 'settings' and 'custom_fields'.
+
+    quick-260807-qw1: also asserts 'sender_exclusions', the third menu entry
+    added by the sender-exclusion feature (extends this assertion in place —
+    does not replace the pre-existing checks).
+    """
     handler, fake_entry = _make_handler_with_options(options={})
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
@@ -97,6 +103,7 @@ async def test_init_returns_menu(hass, mock_config_entry):
     assert result["step_id"] == "init"
     assert "settings" in result["menu_options"]
     assert "custom_fields" in result["menu_options"]
+    assert "sender_exclusions" in result["menu_options"]
 
 
 async def test_settings_shows_form(hass, mock_config_entry):
@@ -1312,6 +1319,154 @@ async def test_add_custom_field_locked_collision_is_field_scoped(hass, mock_conf
     assert CONF_FIELD_NAME in result["errors"], "Error must be field-scoped to CONF_FIELD_NAME"
     assert "base" not in result["errors"], "Error must NOT be on 'base' (must be field-scoped)"
     assert result["errors"][CONF_FIELD_NAME] == "locked_field_collision"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (quick-260807-qw1, spike 027): sender-exclusion CRUD. Mirrors the
+# custom-fields CRUD block above (test_custom_fields_menu_empty through
+# test_remove_custom_field_happy_path) structurally.
+# ---------------------------------------------------------------------------
+
+
+async def test_sender_exclusions_menu_empty(hass, mock_config_entry):
+    """Empty options → menu with only add_sender_exclusion + current_exclusions='none'."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_sender_exclusions(user_input=None)
+    assert result["type"] == "menu"
+    assert result["step_id"] == "sender_exclusions"
+    assert result["menu_options"] == ["add_sender_exclusion"]
+    assert result["description_placeholders"]["current_exclusions"] == "none"
+
+
+async def test_sender_exclusions_menu_with_existing(hass, mock_config_entry):
+    """One stored exclusion → menu includes remove_sender_exclusion + placeholder."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com"]}
+    )
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_sender_exclusions(user_input=None)
+    assert result["type"] == "menu"
+    assert result["menu_options"] == ["add_sender_exclusion", "remove_sender_exclusion"]
+    assert result["description_placeholders"]["current_exclusions"] == "substack.com"
+
+
+async def test_add_sender_exclusion_shows_form(hass, mock_config_entry):
+    """async_step_add_sender_exclusion(None) returns a form at step_id='add_sender_exclusion'."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_sender_exclusion(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "add_sender_exclusion"
+    schema_keys = [str(k) for k in result["data_schema"].schema]
+    assert "domain" in schema_keys
+
+
+async def test_add_sender_exclusion_normalises_and_stores(hass, mock_config_entry):
+    """Write-side normalisation: strip, lower, leading '@' removed before storage."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {"domain": "  @SubStack.COM "}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_sender_exclusion(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SENDER_EXCLUSIONS] == ["substack.com"]
+
+
+async def test_add_sender_exclusion_duplicate_is_noop(hass, mock_config_entry):
+    """Submitting an already-present domain leaves the list with one entry, not two."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com"]}
+    )
+    user_input = {"domain": "substack.com"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_sender_exclusion(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SENDER_EXCLUSIONS] == ["substack.com"]
+
+
+async def test_add_sender_exclusion_preserves_other_options(hass, mock_config_entry):
+    """Adding a sender exclusion leaves unrelated stored options (custom_fields,
+    poll_interval) untouched — CR-01-style merge-preserve.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_CUSTOM_FIELDS: [{"name": "estimated_delivery", "description": None}],
+            CONF_POLL_INTERVAL: 45,
+        }
+    )
+    user_input = {"domain": "substack.com"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_sender_exclusion(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_CUSTOM_FIELDS] == [
+        {"name": "estimated_delivery", "description": None}
+    ]
+    assert result["data"][CONF_POLL_INTERVAL] == 45
+    assert result["data"][CONF_SENDER_EXCLUSIONS] == ["substack.com"]
+
+
+async def test_remove_sender_exclusion_shows_selector(hass, mock_config_entry):
+    """Remove step shows a vol.In selector constrained to existing stored domains."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com", "github.com"]}
+    )
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_remove_sender_exclusion(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "remove_sender_exclusion"
+    schema = result["data_schema"]
+    schema({"domain": "substack.com"})
+    schema({"domain": "github.com"})
+    with pytest.raises(vol.Invalid):
+        schema({"domain": "nonexistent.com"})
+
+
+async def test_remove_sender_exclusion_happy_path(hass, mock_config_entry):
+    """Removing one of two stored domains leaves exactly the other."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com", "github.com"]}
+    )
+    user_input = {"domain": "substack.com"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_remove_sender_exclusion(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SENDER_EXCLUSIONS] == ["github.com"]
+
+
+async def test_remove_sender_exclusion_invalid_value_reshows_form_with_error(
+    hass, mock_config_entry
+):
+    """T-qw1-05 / WR-02-style guard: a value outside the stored set re-shows the
+    form with errors['base'] == 'invalid_sender_exclusion' rather than writing.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com"]}
+    )
+    user_input = {"domain": "not-in-list.com"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_remove_sender_exclusion(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "invalid_sender_exclusion"
+    # Entry must NOT have been updated.
+    assert fake_entry.options[CONF_SENDER_EXCLUSIONS] == ["substack.com"]
 
 
 # ---------------------------------------------------------------------------

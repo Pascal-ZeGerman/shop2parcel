@@ -159,8 +159,10 @@ def test_new_error_keys_present(strings):
     # WR-01: control-character rejection for the IMAP search string.
     assert "invalid_imap_search" in errors
     assert len(errors["invalid_imap_search"]) > 0
-    # Plan 03 keys + Plan 04 keys + WR-01 key — 5 total
-    assert len(errors) == 5, f"Expected 5 error keys total, got {sorted(errors.keys())}"
+    # Plan 03 keys + Plan 04 keys + WR-01 key + quick-260807-qw1's
+    # invalid_sender_exclusion key — 6 total (Rule 1 fix: this count is a
+    # deliberate regression guard, updated in lockstep with new error keys).
+    assert len(errors) == 6, f"Expected 6 error keys total, got {sorted(errors.keys())}"
 
 
 def test_not_implemented_abort_absent(strings):
@@ -178,6 +180,56 @@ def test_en_json_identical_to_strings():
     assert result.returncode == 0, (
         "strings.json and translations/en.json are NOT identical after Plan 04 edit"
     )
+
+
+# ---------------------------------------------------------------------------
+# quick-260807-qw1 (spike 027): sender-exclusion CRUD translation keys.
+# Mirrors test_custom_fields_menu_keys / test_add_custom_field_data_keys.
+# ---------------------------------------------------------------------------
+
+
+def test_init_menu_options_sender_exclusions_label(strings):
+    """init.menu_options carries a 'sender_exclusions' label alongside the
+    pre-existing 'settings'/'custom_fields' labels.
+    """
+    opts = strings["options"]["step"]["init"]["menu_options"]
+    assert opts["sender_exclusions"] == "Manage excluded sender domains"
+
+
+def test_sender_exclusions_menu_keys(strings):
+    """sender_exclusions.menu_options exposes both add_ and remove_ labels."""
+    menu_opts = strings["options"]["step"]["sender_exclusions"]["menu_options"]
+    assert "add_sender_exclusion" in menu_opts
+    assert len(menu_opts["add_sender_exclusion"]) > 0
+    assert "remove_sender_exclusion" in menu_opts
+    assert len(menu_opts["remove_sender_exclusion"]) > 0
+
+
+def test_sender_exclusions_menu_description_placeholder(strings):
+    """sender_exclusions.description contains the {current_exclusions} placeholder."""
+    desc = strings["options"]["step"]["sender_exclusions"]["description"]
+    assert "{current_exclusions}" in desc
+
+
+def test_add_sender_exclusion_data_key(strings):
+    """add_sender_exclusion.data.domain is present and non-empty."""
+    step = strings["options"]["step"]["add_sender_exclusion"]
+    assert "domain" in step["data"]
+    assert len(step["data"]["domain"]) > 0
+
+
+def test_remove_sender_exclusion_data_key(strings):
+    """remove_sender_exclusion.data.domain is present and non-empty."""
+    step = strings["options"]["step"]["remove_sender_exclusion"]
+    assert "domain" in step["data"]
+    assert len(step["data"]["domain"]) > 0
+
+
+def test_invalid_sender_exclusion_error_key(strings):
+    """options.error carries the new invalid_sender_exclusion key (T-qw1-05)."""
+    errors = strings["options"]["error"]
+    assert "invalid_sender_exclusion" in errors
+    assert len(errors["invalid_sender_exclusion"]) > 0
 
 
 def test_plan03_keys_preserved(strings):
