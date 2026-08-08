@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html as _html_stdlib
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace as dc_replace
@@ -21,7 +22,15 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api.carrier_codes import normalize_carrier
-from .api.email_parser import EmailParser, ParseResult, ShipmentData, validate_carrier_format
+from .api.email_parser import (
+    EmailParser,
+    ParseResult,
+    ShipmentData,
+    build_keyword_matcher,
+    build_sender_exclusion_matcher,
+    matches_keyword_filter,
+    validate_carrier_format,
+)
 from .api.exceptions import (
     GmailAuthError,
     GmailStaleTokenError,
@@ -40,11 +49,14 @@ from .const import (
     CONF_ENABLE_BROAD_SCAN,
     CONF_GMAIL_QUERY,
     CONF_RESCAN_WINDOW_DAYS,
+    CONF_SENDER_EXCLUSIONS,
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_GMAIL_QUERY,
     DEFAULT_RESCAN_WINDOW_DAYS,
+    MAX_GMAIL_MESSAGES_PER_POLL,
     MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    SENDER_EXCLUDED_SKIP_REASON,
     debug_mode_notification_id,
     normalize_tracking_number,
 )
@@ -58,6 +70,17 @@ from .coordinator import (
 _LOGGER = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+# D-01 (quick-260806-i5r): last_poll_skip_reasons / _emit_scan_event outcome
+# string for a message skipped by the local keyword pre-filter — mirrors the
+# no_html_body pattern (reason == outcome). Exported (not a leading-underscore
+# secret; imported directly by tests/test_gmail_local_keyword_filter.py) so
+# the string lives in exactly one place.
+_LOCAL_FILTER_SKIP_REASON = "local_filter_no_match"
+
+# Sentinel that cannot equal any real stored gmail_query string — forces the
+# very first poll to always (re)build the keyword matcher.
+_KEYWORD_MATCHER_UNSET = object()
 
 
 def _extract_gmail_html(payload: dict) -> str | None:
@@ -90,6 +113,13 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         # stale-token force-refresh (self-healing retry) updates it so every subsequent
         # per-message async_get_message call in the same poll uses the refreshed token.
         self._gmail_access_token: str | None = None
+        # D-01: cache the compiled local keyword-filter pattern so it is
+        # rebuilt only when the stored gmail_query value actually changes
+        # across polls — compiles once per distinct value (not once per poll)
+        # and lets any dropped-operator-token warning fire once per distinct
+        # value rather than every poll cycle (Test 8).
+        self._keyword_matcher_query: object = _KEYWORD_MATCHER_UNSET
+        self._keyword_matcher_pattern: re.Pattern[str] | None = None
         if not entry.options.get(CONF_DEBUG_MODE, False):
             persistent_notification.async_dismiss(
                 hass, notification_id=debug_mode_notification_id(entry.entry_id)
@@ -297,19 +327,59 @@ class GmailCoordinator(Shop2ParcelCoordinator):
         d.last_poll_skip_reasons = []
         d.last_poll_found = []
         d.last_poll_keyword_hits = 0
+        d.last_poll_emails_capped = 0  # D-02: reset every poll like its neighbours
         d.last_poll_time = poll_start  # record attempt time even if poll fails mid-cycle
         d.last_poll_duration_ms = None
+        # Diagnostics AND the local keyword filter's keyword source (D-01) — see
+        # gmail-query-drops-emails: the configured keyword OR-chain is recorded
+        # here for UX/diagnostics visibility, and separately compiled below into
+        # a LOCAL narrowing filter. It is NOT sent to the Gmail List API (see below).
         d.last_poll_query = query
+        # D-01: rebuild the local keyword-filter pattern only when the stored
+        # query value differs from the cached key — compiles once per distinct
+        # value (not once per poll), and any dropped-operator-token warning
+        # fires once per distinct value, not every poll cycle (Test 8).
+        if query != self._keyword_matcher_query:
+            self._keyword_matcher_pattern, dropped_tokens = build_keyword_matcher(query)
+            self._keyword_matcher_query = query
+            if dropped_tokens:
+                _LOGGER.warning(
+                    "Gmail local keyword filter: dropped %d token(s) from the stored "
+                    "gmail_query that look like Gmail search operators and cannot be "
+                    "matched against plain email text: %s. Remaining keywords still "
+                    "apply; if ALL tokens were operators, every message passes the "
+                    "filter unfiltered (fail-open).",
+                    len(dropped_tokens),
+                    dropped_tokens,
+                )
+        # quick-260807-qw1 (D-06): rebuild the exclude-biased sender matcher
+        # every poll, unconditionally — it is a small `set` build, not a regex
+        # compile, so (unlike the keyword matcher above) no cache key is
+        # warranted. Reads CONF_SENDER_EXCLUSIONS fresh each poll so a
+        # just-saved options change (OptionsFlowWithReload reload) takes
+        # effect on the very next poll.
+        sender_is_excluded = build_sender_exclusion_matcher(
+            self.config_entry.options.get(CONF_SENDER_EXCLUSIONS, [])
+        )
         _LOGGER.debug(
             "Gmail poll start — query: %s rescan_window_days: %s", query, rescan_window_days
         )
 
         try:
+            # gmail-query-drops-emails: Gmail's server-side search engine does not
+            # reliably return the full union of results for a long chain of bare
+            # `OR`-joined keyword terms — real shipment emails have been silently
+            # dropped by CONF_GMAIL_QUERY's default 8-term OR-chain (confirmed via
+            # direct Gmail UI reproduction). Pass an empty base query here so
+            # build_incremental_query() yields a date-only `after:` filter; content
+            # filtering happens locally in EmailParser's tiered pipeline (HTML
+            # template -> Tier 1 regex -> optional Tier 2 broad scan), which already
+            # runs on every fetched message regardless of how it was found.
             messages, effective_query = await self._gmail_call_with_stale_token_retry(
                 implementation,
                 lambda tok: gmail.async_list_messages(
                     tok,
-                    query,
+                    "",
                     rescan_window_days=rescan_window_days,
                 ),
             )
@@ -373,6 +443,28 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                     skipped_seen,
                 )
 
+        # D-02: bound the number of messages.get() full-body fetches per poll.
+        # Applied AFTER the seen/in-flight filter above (not before it) — a
+        # before-filter cap could spend its whole budget on already-seen IDs and
+        # reach no new message at all. Applies in BOTH debug and non-debug mode
+        # (debug mode forces a 365-day rescan window — the worst case this cap
+        # exists to bound). Gmail messages.list() returns results NEWEST-FIRST,
+        # so the front slice is kept — the OPPOSITE of api/imap_client.py, where
+        # ascending UIDs make the TAIL the newest.
+        if len(messages) > MAX_GMAIL_MESSAGES_PER_POLL:
+            overflow = len(messages) - MAX_GMAIL_MESSAGES_PER_POLL
+            _LOGGER.warning(
+                "Gmail poll: %d messages after dedup filtering exceeds the per-poll cap "
+                "of %d — processing the newest %d, %d will be picked up on a later poll. "
+                "Consider narrowing rescan_window_days.",
+                len(messages),
+                MAX_GMAIL_MESSAGES_PER_POLL,
+                MAX_GMAIL_MESSAGES_PER_POLL,
+                overflow,
+            )
+            d.last_poll_emails_capped = overflow
+            messages = messages[:MAX_GMAIL_MESSAGES_PER_POLL]
+
         # 4. Iterate messages — fetch body, parse, then dedup on tracking number.
         for msg_meta in messages:
             msg_id = msg_meta["id"]
@@ -394,6 +486,46 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 raise UpdateFailed(f"Gmail transient error: {err}") from err
 
             email_meta = _extract_email_meta(msg)
+
+            # quick-260807-qw1 (spike 027): sender-exclusion gate — the
+            # earliest point sender metadata exists on this path, ahead of
+            # the internalDate parse, the _extract_gmail_html executor job,
+            # the local keyword filter, and parser.parse. build_sender_
+            # exclusion_matcher is EXCLUDE-biased and fails open (returns
+            # False for every sender) when CONF_SENDER_EXCLUSIONS is empty
+            # or absent — D-03, byte-for-byte-identical behaviour to before
+            # this feature in that case.
+            if sender_is_excluded(email_meta.get("from", "")):
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": msg_id, "reason": SENDER_EXCLUDED_SKIP_REASON, **email_meta}
+                )
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome=SENDER_EXCLUDED_SKIP_REASON,
+                )
+                _LOGGER.debug(
+                    "Gmail message %s sender-excluded — subject=%r sender=%r",
+                    msg_id,
+                    email_meta.get("subject", ""),
+                    email_meta.get("from", ""),
+                )
+                # D-05: this is the one place this plan deliberately diverges
+                # from the local-keyword-filter branch below, which correctly
+                # uses the persisted seen cache because its answer never
+                # changes for a given stored query. The exclusion decision IS
+                # configuration-dependent — OptionsFlowWithReload reloads the
+                # entry (and rebuilds this coordinator, clearing the in-flight
+                # set) on save, so removing a domain from the list must take
+                # effect on the very next poll. Do NOT "fix" this into parity
+                # with _mark_message_seen — that would make a mis-typed
+                # exclusion permanently unrecoverable, exactly the failure
+                # mode this filter's exclude-too-little safety bias exists to
+                # prevent.
+                self._mark_inflight(msg_id)
+                continue
 
             try:
                 email_date = int(msg.get("internalDate", "0")) // 1000
@@ -453,6 +585,49 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # later parser fix can still recover the shipment instead of losing it forever.
                 self._mark_inflight(msg_id)
                 continue
+
+            # D-01 (quick-260806-i5r): local keyword pre-filter — follow-up to
+            # gmail-query-drops-emails. Gmail's server-side keyword OR-chain
+            # search was removed because it silently dropped real shipment
+            # emails; this coarse, fail-open local check restores the CPU-saving
+            # intent (skip the expensive parser tiers below on messages that
+            # plainly contain none of the configured keywords) without
+            # reintroducing that server-side failure mode. self._keyword_matcher_pattern
+            # is None when the stored query is blank or operator-only — matches_keyword_filter
+            # fails open (returns True) in that case, so every message still reaches parser.parse.
+            if not matches_keyword_filter(
+                self._keyword_matcher_pattern, email_meta.get("subject", ""), html
+            ):
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": msg_id, "reason": _LOCAL_FILTER_SKIP_REASON, **email_meta}
+                )
+                self._emit_scan_event(
+                    message_id=f"gmail:{msg_id}",
+                    meta=email_meta,
+                    outcome=_LOCAL_FILTER_SKIP_REASON,
+                )
+                if debug_mode:
+                    _LOGGER.debug(
+                        "[Shop2Parcel DEBUG] subject=%r from=%r candidates=%s outcome=%s",
+                        email_meta.get("subject", ""),
+                        email_meta.get("from", ""),
+                        None,
+                        _LOCAL_FILTER_SKIP_REASON,
+                    )
+                else:
+                    _LOGGER.debug("Gmail message %s outcome: %s", msg_id, _LOCAL_FILTER_SKIP_REASON)
+                    # D-01: a keyword non-match is a deterministic terminal decision —
+                    # every future poll produces the identical answer — so use the
+                    # persisted seen cache, NOT the in-flight cache (which would
+                    # re-fetch and re-run this filter every poll forever, destroying
+                    # the CPU saving that is the entire point of the filter). Skipped
+                    # in debug mode, which re-evaluates every message every cycle
+                    # (DBG-02/DBG-03 intent).
+                    self._mark_message_seen(msg_id)
+                continue
+
             # Phase 7 (D-03): parse returns ParseResult; accumulate stats then continue
             # the existing forwarding flow with the unwrapped ShipmentData.
             # WR-06: parser.parse performs up to six BeautifulSoup/lxml passes per
@@ -679,7 +854,12 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # number, so a body order/invoice/phone number of those lengths that Stage-1 matches
                 # as FedEx WILL pass this gate and burn a quota slot. Tightening the FedEx pattern
                 # is deferred to a future phase.
-                gm_clean, gm_ok, gm_reason = validate_carrier_format(shipment.tracking_number)
+                # quick-260807-tpu Task 3: carrier context is the Stage-1 shipment's
+                # own carrier — this branch runs only when Stage-2 is disabled, so the
+                # value is pure Stage-1 output with no LLM involvement.
+                gm_clean, gm_ok, gm_reason = validate_carrier_format(
+                    shipment.tracking_number, carrier_name=shipment.carrier_name
+                )
                 if not gm_ok:
                     self._diagnostics.record_carrier_format_rejection(
                         gm_clean, gm_reason or "no_carrier_match"

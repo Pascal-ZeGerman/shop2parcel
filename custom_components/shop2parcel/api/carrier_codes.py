@@ -26,6 +26,11 @@ _SHOPIFY_TO_PARCEL: dict[str, str] = {
     "gls": "gls",
     "dpd": "dpd",
     "poste italiane": "it",
+    # ShipBob (.planning/debug/shipbob-carrier-unsupported.md): confirmed
+    # "shipbob" is a native, first-class parcelapp carrier code (live fetch of
+    # api.parcel.app/external/supported_carriers.json), not requiring
+    # underlying-last-mile-carrier resolution.
+    "shipbob": "shipbob",
 }
 
 

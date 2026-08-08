@@ -50,7 +50,6 @@ from .const import (
     CONF_DEBUG_MODE,
     CONF_FIELD_DESCRIPTION,
     CONF_FIELD_NAME,
-    CONF_GMAIL_QUERY,
     CONF_IMAP_SEARCH,
     CONF_IMAP_VERIFY_TLS,
     CONF_OLLAMA_MODEL,
@@ -59,10 +58,10 @@ from .const import (
     CONF_POLL_INTERVAL,
     CONF_QUEUE_MAXLEN,
     CONF_RESCAN_WINDOW_DAYS,
+    CONF_SENDER_EXCLUSIONS,
     CONF_STAGE2_ENABLED,
     CONNECTION_TYPE_GMAIL,
     CONNECTION_TYPE_IMAP,
-    DEFAULT_GMAIL_QUERY,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_IMAP_VERIFY_TLS,
     DEFAULT_OLLAMA_MODEL,
@@ -160,7 +159,7 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         """Top-level menu: route to settings or custom fields CRUD."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["settings", "custom_fields"],
+            menu_options=["settings", "custom_fields", "sender_exclusions"],
         )
 
     async def async_step_settings(
@@ -259,16 +258,12 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                             CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
                         ),
                     ): vol.All(int, vol.Range(min=5, max=1440)),
-                    vol.Optional(
-                        CONF_GMAIL_QUERY,
-                        default=self.config_entry.options.get(
-                            CONF_GMAIL_QUERY, DEFAULT_GMAIL_QUERY
-                        ),
-                        # Empty/whitespace submissions are coerced to DEFAULT_GMAIL_QUERY
-                        # in the submit handler (see below) — preventing the full-inbox scan
-                        # (DoS against Gmail API quota and HA event loop) at write time rather
-                        # than schema time. max=500 mirrors Gmail's practical query length limit.
-                    ): vol.All(str, vol.Length(max=500)),
+                    # quick-260806-i5r (D-03): gmail_query is no longer a user-editable
+                    # field here — keyword narrowing now happens locally, after the
+                    # message fetch, in gmail_coordinator.py. An already-stored value
+                    # (CONF_GMAIL_QUERY, read via .get() in gmail_coordinator.py) is
+                    # never touched by this form and keeps driving the local filter
+                    # (D-04) — see the options-merge in the submit handler below.
                     # QF-02: Gmail-only rescan window. Allows widening the after: filter
                     # without clearing forwarded_ids — already-forwarded shipments are
                     # deduplicated before any ParcelApp POST, so increasing this value
@@ -351,13 +346,10 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             if not errors:
                 # Strip whitespace from URL before persisting (WR-01).
                 user_input[CONF_OLLAMA_URL] = user_input.get(CONF_OLLAMA_URL, "").strip()
-                # T-tfz-01: Coerce empty/whitespace gmail_query to DEFAULT_GMAIL_QUERY.
-                # build_incremental_query("", n) yields " after:..." which scans the entire
-                # inbox — exhausting Gmail API quota and blocking the HA event loop.
-                # Only fires on the Gmail branch (IMAP submit path has no gmail_query key).
-                if CONF_GMAIL_QUERY in user_input and not user_input[CONF_GMAIL_QUERY].strip():
-                    user_input[CONF_GMAIL_QUERY] = DEFAULT_GMAIL_QUERY
                 # Merge with existing options so CONF_CUSTOM_FIELDS is preserved (CR-01).
+                # quick-260806-i5r (D-04): gmail_query is no longer in user_input (removed
+                # from the schema above), so an already-stored value is simply never
+                # touched by this update() — it survives untouched. No migration step.
                 new_options = dict(self.config_entry.options)
                 new_options.update(user_input)
                 # IN-01: drop the dead stage2_enabled key seeded by pre-1.5 entry
@@ -468,6 +460,96 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_FIELD_NAME): vol.In(existing_names),
+                }
+            ),
+        )
+
+    async def async_step_sender_exclusions(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Sub-menu: list current sender-domain exclusions; route to add or remove.
+
+        quick-260807-qw1 (spike 027): this filter is EXCLUDE-biased — the
+        stored value is compared as a whole domain via an exact set lookup
+        (D-01), so entering a parent domain will never affect any of its
+        subdomains. See build_sender_exclusion_matcher in api/email_parser.py
+        for the matcher this list feeds. 'Remove sender exclusion' is only
+        shown when at least one exclusion exists, mirroring
+        async_step_custom_fields above.
+        """
+        existing = self.config_entry.options.get(CONF_SENDER_EXCLUSIONS, [])
+        menu_options = ["add_sender_exclusion"]
+        if existing:
+            menu_options.append("remove_sender_exclusion")
+        description_placeholders = {
+            "current_exclusions": ", ".join(existing) or "none",
+        }
+        return self.async_show_menu(
+            step_id="sender_exclusions",
+            menu_options=menu_options,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_add_sender_exclusion(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Add a sender domain to the exclusion list.
+
+        quick-260807-qw1 (spike 027): EXCLUDE-biased (D-01) — the stored
+        value is matched as a whole domain via an exact set lookup, so a
+        parent-domain entry here can never affect any of its subdomains
+        (the concrete stake is USPS Informed Delivery,
+        email.informeddelivery.usps.com, which must never be excludable by
+        a plausible short entry like "usps.com"). Normalises the submitted
+        value (strip, lower, leading '@' removed) to match
+        build_sender_exclusion_matcher's read-side normalisation. Adding an
+        already-present domain is a no-op, not a duplicate.
+        """
+        if user_input is not None:
+            domain = user_input["domain"].strip().lower().lstrip("@")
+            new_options = dict(self.config_entry.options)
+            exclusions = list(new_options.get(CONF_SENDER_EXCLUSIONS, []))
+            if domain not in exclusions:
+                exclusions.append(domain)
+            new_options[CONF_SENDER_EXCLUSIONS] = exclusions
+            return self.async_create_entry(title="", data=new_options)
+
+        return self.async_show_form(
+            step_id="add_sender_exclusion",
+            data_schema=vol.Schema({vol.Required("domain"): str}),
+        )
+
+    async def async_step_remove_sender_exclusion(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Remove an existing sender-domain exclusion.
+
+        quick-260807-qw1 (spike 027): EXCLUDE-biased (D-01) — removing a
+        domain never affects any other stored entry, by construction of the
+        exact-match matcher. Server-side membership guard mirrors the WR-02
+        guard already present in async_step_remove_custom_field above
+        (T-qw1-05): a submitted value outside the stored set re-shows the
+        form with an error rather than silently writing an unvalidated list.
+        """
+        existing = self.config_entry.options.get(CONF_SENDER_EXCLUSIONS, [])
+
+        if user_input is not None:
+            domain = user_input.get("domain")
+            if domain not in existing:
+                return self.async_show_form(
+                    step_id="remove_sender_exclusion",
+                    data_schema=vol.Schema({vol.Required("domain"): vol.In(existing)}),
+                    errors={"base": "invalid_sender_exclusion"},
+                )
+            new_options = dict(self.config_entry.options)
+            new_options[CONF_SENDER_EXCLUSIONS] = [d for d in existing if d != domain]
+            return self.async_create_entry(title="", data=new_options)
+
+        return self.async_show_form(
+            step_id="remove_sender_exclusion",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("domain"): vol.In(existing),
                 }
             ),
         )

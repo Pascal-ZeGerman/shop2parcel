@@ -23,7 +23,7 @@ from custom_components.shop2parcel.const import (
     CONF_POLL_INTERVAL,
     CONF_QUEUE_MAXLEN,
     CONF_RESCAN_WINDOW_DAYS,
-    DEFAULT_GMAIL_QUERY,
+    CONF_SENDER_EXCLUSIONS,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT,
@@ -88,7 +88,12 @@ def no_localhost_probe():
 
 
 async def test_init_returns_menu(hass, mock_config_entry):
-    """D-01: async_step_init returns a top-level menu with 'settings' and 'custom_fields'."""
+    """D-01: async_step_init returns a top-level menu with 'settings' and 'custom_fields'.
+
+    quick-260807-qw1: also asserts 'sender_exclusions', the third menu entry
+    added by the sender-exclusion feature (extends this assertion in place —
+    does not replace the pre-existing checks).
+    """
     handler, fake_entry = _make_handler_with_options(options={})
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
@@ -98,6 +103,7 @@ async def test_init_returns_menu(hass, mock_config_entry):
     assert result["step_id"] == "init"
     assert "settings" in result["menu_options"]
     assert "custom_fields" in result["menu_options"]
+    assert "sender_exclusions" in result["menu_options"]
 
 
 async def test_settings_shows_form(hass, mock_config_entry):
@@ -114,7 +120,7 @@ async def test_settings_shows_form(hass, mock_config_entry):
     for key in (CONF_OLLAMA_URL, CONF_OLLAMA_MODEL, CONF_OLLAMA_TIMEOUT, CONF_QUEUE_MAXLEN):
         assert key in schema_keys, f"Expected '{key}' in settings schema"
     # Existing fields must also be present
-    for key in (CONF_POLL_INTERVAL, CONF_GMAIL_QUERY, CONF_DEBUG_MODE):
+    for key in (CONF_POLL_INTERVAL, CONF_DEBUG_MODE):
         assert key in schema_keys, f"Expected '{key}' in settings schema"
 
 
@@ -407,7 +413,6 @@ async def test_settings_error_rerender_preserves_user_input(hass, mock_config_en
     )
     user_input = {
         CONF_POLL_INTERVAL: 45,
-        CONF_GMAIL_QUERY: "from:etsy",
         CONF_RESCAN_WINDOW_DAYS: 60,
         CONF_DEBUG_MODE: True,
         CONF_OLLAMA_URL: "http://10.0.0.9:11434",
@@ -438,7 +443,6 @@ async def test_settings_error_rerender_preserves_user_input(hass, mock_config_en
     schema_dict = {str(k): k for k in schema.schema}
     for key, expected in (
         (CONF_POLL_INTERVAL, 45),
-        (CONF_GMAIL_QUERY, "from:etsy"),
         (CONF_RESCAN_WINDOW_DAYS, 60),
         (CONF_DEBUG_MODE, True),
         (CONF_OLLAMA_URL, "http://10.0.0.9:11434"),
@@ -494,7 +498,6 @@ async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -505,7 +508,6 @@ async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -519,7 +521,6 @@ async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -533,7 +534,6 @@ async def test_settings_ollama_timeout_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -556,7 +556,6 @@ async def test_settings_queue_maxlen_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -567,7 +566,6 @@ async def test_settings_queue_maxlen_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -581,7 +579,6 @@ async def test_settings_queue_maxlen_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -595,7 +592,6 @@ async def test_settings_queue_maxlen_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -681,9 +677,7 @@ async def test_options_flow_shows_form_with_defaults(hass, mock_config_entry):
     # vol.Schema stores defaults on each Required key
     schema_dict = {str(k): k for k in schema.schema}
     poll_key = schema_dict[CONF_POLL_INTERVAL]
-    query_key = schema_dict[CONF_GMAIL_QUERY]
     assert poll_key.default() == DEFAULT_POLL_INTERVAL
-    assert query_key.default() == DEFAULT_GMAIL_QUERY
 
 
 async def test_options_flow_saves_valid_input(hass, mock_config_entry):
@@ -720,7 +714,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -731,7 +724,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 5,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -742,7 +734,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
     schema(
         {
             CONF_POLL_INTERVAL: 1440,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: 30,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -756,7 +747,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 4,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -770,7 +760,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
         schema(
             {
                 CONF_POLL_INTERVAL: 1441,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: 30,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -778,30 +767,6 @@ async def test_poll_interval_validation(hass, mock_config_entry):
                 CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
             }
         )
-
-
-async def test_gmail_query_default(hass, mock_config_entry):
-    """EMAIL-05: Form default for CONF_GMAIL_QUERY equals DEFAULT_GMAIL_QUERY when no override."""
-    handler, fake_entry = _make_handler_with_options(options={})
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=None)
-    schema = result["data_schema"]
-    schema_dict = {str(k): k for k in schema.schema}
-    query_key = schema_dict[CONF_GMAIL_QUERY]
-    assert query_key.default() == DEFAULT_GMAIL_QUERY
-
-    # When entry.options has an override, default reflects it
-    handler2, fake_entry2 = _make_handler_with_options(options={CONF_GMAIL_QUERY: "from:custom"})
-    with patch.object(
-        type(handler2), "config_entry", new_callable=PropertyMock, return_value=fake_entry2
-    ):
-        result2 = await handler2.async_step_settings(user_input=None)
-    schema2 = result2["data_schema"]
-    schema2_dict = {str(k): k for k in schema2.schema}
-    query_key2 = schema2_dict[CONF_GMAIL_QUERY]
-    assert query_key2.default() == "from:custom"
 
 
 # ---------------------------------------------------------------------------
@@ -910,8 +875,14 @@ async def test_options_flow_imap_search_rejects_control_chars(hass, mock_imap_co
     assert result["errors"] == {CONF_IMAP_SEARCH: "invalid_imap_search"}
 
 
-async def test_options_flow_gmail_still_shows_gmail_query(hass, mock_config_entry):
-    """Phase 9 backwards compatibility: Gmail entry options form still shows gmail_query field."""
+async def test_options_flow_gmail_hides_gmail_query(hass, mock_config_entry):
+    """quick-260806-i5r (D-03): Gmail entry options form no longer shows gmail_query —
+    it stops being a user-editable field; keyword narrowing is now applied locally
+    (see gmail_coordinator.py), not via a Gmail-search-query the user tunes here.
+
+    Inverted from the old test_options_flow_gmail_still_shows_gmail_query, which
+    asserted the opposite (Phase 9 backwards-compatibility intent, since superseded).
+    """
     handler, fake_entry = _make_handler_with_options(options={})
     with patch.object(
         type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
@@ -919,8 +890,43 @@ async def test_options_flow_gmail_still_shows_gmail_query(hass, mock_config_entr
         result = await handler.async_step_settings(user_input=None)
     schema = result["data_schema"]
     schema_keys = [str(k) for k in schema.schema]
-    assert CONF_GMAIL_QUERY in schema_keys, "Gmail entry must still show gmail_query field"
+    assert CONF_GMAIL_QUERY not in schema_keys, "Gmail entry must NOT show gmail_query field"
     assert CONF_IMAP_SEARCH not in schema_keys, "Gmail entry must NOT show imap_search field"
+
+
+async def test_options_flow_gmail_query_stored_value_survives_settings_save(
+    hass, mock_config_entry
+):
+    """D-04: an entry with an existing custom gmail_query value keeps it, verbatim
+    and unchanged, after a settings save whose user_input has no gmail_query key.
+
+    Proves the "no migration needed" claim: the options-merge
+    (new_options = dict(self.config_entry.options); new_options.update(user_input))
+    is the mechanism — because gmail_query is no longer submittable through this
+    form, it is never touched, so an already-stored value survives untouched and
+    keeps driving the local keyword filter (gmail_coordinator.py) as before.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_GMAIL_QUERY: "from:custom-legacy"}
+    )
+    user_input = {
+        CONF_POLL_INTERVAL: 45,
+        CONF_RESCAN_WINDOW_DAYS: 30,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "",
+        CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_GMAIL_QUERY] == "from:custom-legacy", (
+        "Stored gmail_query must survive a settings save untouched even though the "
+        "field is no longer present in user_input (D-04 — options merge, no migration)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +956,6 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: MIN_RESCAN_WINDOW_DAYS - 1,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -963,7 +968,6 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
         schema(
             {
                 CONF_POLL_INTERVAL: 30,
-                CONF_GMAIL_QUERY: "from:test",
                 CONF_RESCAN_WINDOW_DAYS: MAX_RESCAN_WINDOW_DAYS + 1,
                 CONF_OLLAMA_URL: "",
                 CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -975,7 +979,6 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: MIN_RESCAN_WINDOW_DAYS,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -986,7 +989,6 @@ async def test_gmail_options_flow_includes_rescan_window(hass, mock_config_entry
     schema(
         {
             CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "from:test",
             CONF_RESCAN_WINDOW_DAYS: MAX_RESCAN_WINDOW_DAYS,
             CONF_OLLAMA_URL: "",
             CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
@@ -1320,6 +1322,154 @@ async def test_add_custom_field_locked_collision_is_field_scoped(hass, mock_conf
 
 
 # ---------------------------------------------------------------------------
+# Task 2 (quick-260807-qw1, spike 027): sender-exclusion CRUD. Mirrors the
+# custom-fields CRUD block above (test_custom_fields_menu_empty through
+# test_remove_custom_field_happy_path) structurally.
+# ---------------------------------------------------------------------------
+
+
+async def test_sender_exclusions_menu_empty(hass, mock_config_entry):
+    """Empty options → menu with only add_sender_exclusion + current_exclusions='none'."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_sender_exclusions(user_input=None)
+    assert result["type"] == "menu"
+    assert result["step_id"] == "sender_exclusions"
+    assert result["menu_options"] == ["add_sender_exclusion"]
+    assert result["description_placeholders"]["current_exclusions"] == "none"
+
+
+async def test_sender_exclusions_menu_with_existing(hass, mock_config_entry):
+    """One stored exclusion → menu includes remove_sender_exclusion + placeholder."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com"]}
+    )
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_sender_exclusions(user_input=None)
+    assert result["type"] == "menu"
+    assert result["menu_options"] == ["add_sender_exclusion", "remove_sender_exclusion"]
+    assert result["description_placeholders"]["current_exclusions"] == "substack.com"
+
+
+async def test_add_sender_exclusion_shows_form(hass, mock_config_entry):
+    """async_step_add_sender_exclusion(None) returns a form at step_id='add_sender_exclusion'."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_sender_exclusion(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "add_sender_exclusion"
+    schema_keys = [str(k) for k in result["data_schema"].schema]
+    assert "domain" in schema_keys
+
+
+async def test_add_sender_exclusion_normalises_and_stores(hass, mock_config_entry):
+    """Write-side normalisation: strip, lower, leading '@' removed before storage."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    user_input = {"domain": "  @SubStack.COM "}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_sender_exclusion(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SENDER_EXCLUSIONS] == ["substack.com"]
+
+
+async def test_add_sender_exclusion_duplicate_is_noop(hass, mock_config_entry):
+    """Submitting an already-present domain leaves the list with one entry, not two."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com"]}
+    )
+    user_input = {"domain": "substack.com"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_sender_exclusion(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SENDER_EXCLUSIONS] == ["substack.com"]
+
+
+async def test_add_sender_exclusion_preserves_other_options(hass, mock_config_entry):
+    """Adding a sender exclusion leaves unrelated stored options (custom_fields,
+    poll_interval) untouched — CR-01-style merge-preserve.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={
+            CONF_CUSTOM_FIELDS: [{"name": "estimated_delivery", "description": None}],
+            CONF_POLL_INTERVAL: 45,
+        }
+    )
+    user_input = {"domain": "substack.com"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_add_sender_exclusion(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_CUSTOM_FIELDS] == [
+        {"name": "estimated_delivery", "description": None}
+    ]
+    assert result["data"][CONF_POLL_INTERVAL] == 45
+    assert result["data"][CONF_SENDER_EXCLUSIONS] == ["substack.com"]
+
+
+async def test_remove_sender_exclusion_shows_selector(hass, mock_config_entry):
+    """Remove step shows a vol.In selector constrained to existing stored domains."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com", "github.com"]}
+    )
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_remove_sender_exclusion(user_input=None)
+    assert result["type"] == "form"
+    assert result["step_id"] == "remove_sender_exclusion"
+    schema = result["data_schema"]
+    schema({"domain": "substack.com"})
+    schema({"domain": "github.com"})
+    with pytest.raises(vol.Invalid):
+        schema({"domain": "nonexistent.com"})
+
+
+async def test_remove_sender_exclusion_happy_path(hass, mock_config_entry):
+    """Removing one of two stored domains leaves exactly the other."""
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com", "github.com"]}
+    )
+    user_input = {"domain": "substack.com"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_remove_sender_exclusion(user_input=user_input)
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SENDER_EXCLUSIONS] == ["github.com"]
+
+
+async def test_remove_sender_exclusion_invalid_value_reshows_form_with_error(
+    hass, mock_config_entry
+):
+    """T-qw1-05 / WR-02-style guard: a value outside the stored set re-shows the
+    form with errors['base'] == 'invalid_sender_exclusion' rather than writing.
+    """
+    handler, fake_entry = _make_handler_with_options(
+        options={CONF_SENDER_EXCLUSIONS: ["substack.com"]}
+    )
+    user_input = {"domain": "not-in-list.com"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_remove_sender_exclusion(user_input=user_input)
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "invalid_sender_exclusion"
+    # Entry must NOT have been updated.
+    assert fake_entry.options[CONF_SENDER_EXCLUSIONS] == ["substack.com"]
+
+
+# ---------------------------------------------------------------------------
 # Localhost probe tests (T-probe-01 / T-probe-02 / T-probe-03)
 # ---------------------------------------------------------------------------
 
@@ -1614,101 +1764,10 @@ async def test_model_field_dropdown_includes_stored_model_not_in_tags(hass, mock
 
 
 # ---------------------------------------------------------------------------
-# QUICK-260630-tfz: gmail_query optional — empty/whitespace coerced to DEFAULT_GMAIL_QUERY
+# quick-260806-i5r (D-03/D-04): the QUICK-260630-tfz gmail_query
+# empty/whitespace-coercion tests that used to live here asserted schema and
+# coercion behavior that no longer exists now that the field is not
+# submittable through this form at all — deleted. The one surviving intent
+# (a stored value keeps working) is covered by
+# test_options_flow_gmail_query_stored_value_survives_settings_save above.
 # ---------------------------------------------------------------------------
-
-_GMAIL_BASE_INPUT = {
-    CONF_POLL_INTERVAL: 30,
-    CONF_RESCAN_WINDOW_DAYS: DEFAULT_RESCAN_WINDOW_DAYS,
-    CONF_DEBUG_MODE: False,
-    CONF_OLLAMA_URL: "",  # empty URL skips async_get_tags call
-    CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
-    CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
-    CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
-}
-
-
-async def test_gmail_query_empty_string_persists_default(hass, mock_config_entry):
-    """Test A (QUICK-260630-tfz): submitting gmail_query="" persists DEFAULT_GMAIL_QUERY, not "".
-
-    An empty string matches ALL Gmail messages, causing a full-inbox scan
-    (DoS against Gmail API quota and the HA event loop — T-tfz-01).
-    The submit handler must coerce "" to DEFAULT_GMAIL_QUERY before create_entry.
-    """
-    handler, fake_entry = _make_handler_with_options(options={})
-    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: ""}
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=user_input)
-    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
-    assert result["data"][CONF_GMAIL_QUERY] == DEFAULT_GMAIL_QUERY, (
-        f"Empty gmail_query must be coerced to DEFAULT_GMAIL_QUERY ({DEFAULT_GMAIL_QUERY!r}), "
-        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
-    )
-
-
-async def test_gmail_query_whitespace_persists_default(hass, mock_config_entry):
-    """Test B (QUICK-260630-tfz): submitting gmail_query="   " persists DEFAULT_GMAIL_QUERY.
-
-    Whitespace-only strings are semantically empty and would produce a broken
-    Gmail query — they must be coerced to DEFAULT_GMAIL_QUERY at write time.
-    """
-    handler, fake_entry = _make_handler_with_options(options={})
-    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: "   "}
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=user_input)
-    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
-    assert result["data"][CONF_GMAIL_QUERY] == DEFAULT_GMAIL_QUERY, (
-        f"Whitespace-only gmail_query must be coerced to DEFAULT_GMAIL_QUERY ({DEFAULT_GMAIL_QUERY!r}), "
-        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
-    )
-
-
-async def test_gmail_query_non_empty_preserved_verbatim(hass, mock_config_entry):
-    """Test C (QUICK-260630-tfz): submitting a non-empty gmail_query persists it unchanged.
-
-    The coercion must only fire for empty/whitespace inputs — real user queries
-    must not be silently replaced with the default.
-    """
-    handler, fake_entry = _make_handler_with_options(options={})
-    custom_query = "from:shopify"
-    user_input = {**_GMAIL_BASE_INPUT, CONF_GMAIL_QUERY: custom_query}
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=user_input)
-    assert result["type"] == "create_entry", f"Expected create_entry, got {result['type']}"
-    assert result["data"][CONF_GMAIL_QUERY] == custom_query, (
-        f"Non-empty gmail_query must be persisted verbatim ({custom_query!r}), "
-        f"got {result['data'][CONF_GMAIL_QUERY]!r}"
-    )
-
-
-async def test_gmail_query_schema_accepts_empty_string(hass, mock_config_entry):
-    """Test D (QUICK-260630-tfz): the schema must accept gmail_query="" (no vol.Invalid raised).
-
-    The current schema uses vol.Required + vol.Length(min=1) which rejects "".
-    After the change, vol.Optional + vol.Length(max=500) (no min=1) must allow
-    it through — the DoS risk is handled by write-time coercion, not schema rejection.
-    """
-    handler, fake_entry = _make_handler_with_options(options={})
-    with patch.object(
-        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
-    ):
-        result = await handler.async_step_settings(user_input=None)
-    schema = result["data_schema"]
-    # Calling the schema with gmail_query="" must NOT raise vol.Invalid.
-    schema(
-        {
-            CONF_POLL_INTERVAL: 30,
-            CONF_GMAIL_QUERY: "",
-            CONF_RESCAN_WINDOW_DAYS: DEFAULT_RESCAN_WINDOW_DAYS,
-            CONF_OLLAMA_URL: "",
-            CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
-            CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
-            CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
-        }
-    )

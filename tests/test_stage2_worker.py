@@ -3842,6 +3842,81 @@ async def test_worker_rejects_malformed_tracking_no_post(hass, mock_stage2_confi
     assert len(coord._pending_posts) == 0
 
 
+async def test_worker_regate_debug_log_includes_subject_and_sender(
+    hass, mock_stage2_config_entry, caplog
+):
+    """Quick task 260806-v2j (LOG-02): the worker pre-POST re-gate rejection
+    DEBUG line names the offending email's subject and sender, and the
+    carrier_format_rejected_total diagnostics call is left intact alongside
+    the log change (LOG-05)."""
+    mock_stage2_config_entry.add_to_hass(hass)
+
+    malformed_shipment = ShipmentData(
+        tracking_number="NOTATRACKINGNUM",
+        carrier_name="UPS",
+        order_name="#9999",
+        message_id="msg_wr02_reject_debug",
+        email_date=1700000000,
+    )
+
+    subject = "Your IZIMINI order has shipped"
+    sender = "noreply@izimini.example"
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        job = Stage2Job(
+            storage_key="msg_wr02_reject_debug",
+            normalized_tn="NOTATRACKINGNUM",
+            shipment=malformed_shipment,
+            html_body="<html/>",
+            message_id="gmail:msg_wr02_reject_debug",
+            meta={"subject": subject, "from": sender},
+            entry_id=coord.config_entry.entry_id,
+            prefetched_result=MagicMock(),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.shop2parcel.coordinator"):
+            await coord._async_process_stage2_job(job)
+
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    matching = [r for r in debug_records if subject in r.getMessage() and sender in r.getMessage()]
+    assert matching, (
+        "Expected a DEBUG record carrying both subject and sender for the "
+        f"worker re-gate rejection; got: {[r.getMessage() for r in debug_records]}"
+    )
+
+    above_debug = [r for r in caplog.records if r.levelno > logging.DEBUG]
+    for record in above_debug:
+        message = record.getMessage()
+        assert subject not in message, "Subject leaked above DEBUG level"
+        assert sender not in message, "Sender leaked above DEBUG level"
+
+    assert coord._diagnostics.carrier_format_rejected_total == 1, (
+        f"Expected carrier_format_rejected_total=1, got "
+        f"{coord._diagnostics.carrier_format_rejected_total}"
+    )
+
+
 async def test_worker_posts_clean_canonical_form(hass, mock_stage2_config_entry):
     """WR-02 / D-03 RED: When merged_shipment.tracking_number passes the gate but carries a
     strippable separator, async_add_delivery must receive the clean canonical form (no spaces).
@@ -3902,6 +3977,70 @@ async def test_worker_posts_clean_canonical_form(hass, mock_stage2_config_entry)
     call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args[1]
     assert call_kwargs["tracking_number"] == expected_clean, (
         f"Expected tracking_number='{expected_clean}', got {call_kwargs['tracking_number']!r}"
+    )
+
+
+async def test_worker_dhl_shipment_survives_pre_post_regate(hass, mock_stage2_config_entry):
+    """quick-260807-tpu Task 3 RED: a DHL Stage-1 shipment (bare 9-11-digit waybill,
+    carrier_name='DHL Express') must survive the worker pre-POST re-gate and reach
+    async_add_delivery with carrier code 'dhl'. record_carrier_format_rejection must
+    NOT be called. The carrier context passed to the gate is job.shipment.carrier_name
+    (the ORIGINAL Stage-1 carrier), never merged_shipment.carrier_name.
+
+    RED: before Task 3, validate_carrier_format(merged_shipment.tracking_number) is
+    called with no carrier context, so the bare DHL digit shape is rejected.
+    """
+    mock_stage2_config_entry.add_to_hass(hass)
+
+    dhl_shipment = ShipmentData(
+        tracking_number="4212345678",
+        carrier_name="DHL Express",
+        order_name="",
+        message_id="msg_dhl_worker",
+        email_date=1700000000,
+    )
+
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body</html>",
+        ),
+        patch("custom_components.shop2parcel.coordinator.OllamaClient"),
+        patch("custom_components.shop2parcel.coordinator.OllamaExtractor"),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_config_entry)
+        await coord._async_load_store()
+
+        job = Stage2Job(
+            storage_key="msg_dhl_worker",
+            normalized_tn="4212345678",
+            shipment=dhl_shipment,
+            html_body="<html/>",
+            message_id="gmail:msg_dhl_worker",
+            meta={"subject": "test", "from": "test@example.com"},
+            entry_id=coord.config_entry.entry_id,
+            prefetched_result=MagicMock(),  # skip Ollama re-extract path
+        )
+
+        await coord._async_process_stage2_job(job)
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args[1]
+    assert call_kwargs["tracking_number"] == "4212345678"
+    assert call_kwargs["carrier_code"] == "dhl"
+    assert coord._diagnostics.carrier_format_rejected_total == 0, (
+        "DHL shipment must not be recorded as a carrier-format rejection"
     )
 
 

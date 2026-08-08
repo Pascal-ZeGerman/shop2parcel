@@ -12,14 +12,19 @@ Maps to Phase 20 requirements:
   Any divergence between two REAL values keeps Stage-1 and records a conflict
   entry in the returned ``conflicts`` list.
 
-- **MRG-04** (Phase 28 Plan 03): Before promoting a Stage-2-sourced ``tracking_number``
-  (Stage-1 is ``None``), validate it against the strict carrier-format gate
-  ``validate_carrier_format`` from ``api/email_parser.py``.  Fails → treat as
-  ``None``; no conflict emitted; a gate-rejection entry is appended to the returned
-  ``gate_rejections`` list for the HA-holding caller to count (D-02 seam — counter
-  increment stays in coordinator.py, NOT here).  On pass, ``s2_val`` is replaced
-  with the CLEANED canonical form (separator-stripped, uppercased) per D-03.
-  The strict gate does NOT apply to the conflict path (Stage-1 non-``None``).
+- **MRG-04** (Phase 28 Plan 03; carrier-aware since quick-260807-tpu): Before
+  promoting a Stage-2-sourced ``tracking_number`` (Stage-1 is ``None``), validate
+  it against the strict carrier-format gate ``validate_carrier_format`` from
+  ``api/email_parser.py``, passing ``stage1.carrier_name`` as carrier context
+  (option a — Stage-1's own value, never the LLM's own carrier claim; see the
+  inline comment at the call site for the full anti-circularity argument). This
+  additively widens the gate to accept a DHL bare-digit waybill ONLY when
+  Stage-1's own carrier says DHL.  Fails → treat as ``None``; no conflict
+  emitted; a gate-rejection entry is appended to the returned ``gate_rejections``
+  list for the HA-holding caller to count (D-02 seam — counter increment stays
+  in coordinator.py, NOT here).  On pass, ``s2_val`` is replaced with the
+  CLEANED canonical form (separator-stripped, uppercased) per D-03.  The strict
+  gate does NOT apply to the conflict path (Stage-1 non-``None``).
 
 The function returns a ``tuple[ShipmentData, list[dict], list[dict]]`` so the
 caller (the coordinator, which holds ``self.hass``) can:
@@ -85,14 +90,17 @@ def merge_llm_authoritative(
     4. **Mismatch** — keep Stage-1, append
        ``{"field": ..., "stage1": ..., "stage2": ...}`` to ``conflicts``.
 
-    **MRG-04 strict carrier-format gate** (Phase 28 Plan 03): applied ONLY to
-    ``tracking_number`` on the Stage-1 ``None`` promotion path.  Calls
-    ``validate_carrier_format`` from ``api/email_parser.py``.  On pass, ``s2_val``
-    is replaced with the CLEAN canonical form (separator-stripped, uppercased) per
-    D-03.  On fail, value is silently discarded (treated as ``None``); no conflict
-    entry is emitted.  A gate-rejection entry is appended to ``gate_rejections``
-    so the HA-holding caller can count it (D-02 seam — the counter increment stays
-    in ``coordinator.py``).  The strict gate does NOT apply to the conflict path
+    **MRG-04 strict carrier-format gate** (Phase 28 Plan 03; carrier-aware since
+    quick-260807-tpu): applied ONLY to ``tracking_number`` on the Stage-1 ``None``
+    promotion path.  Calls ``validate_carrier_format`` from ``api/email_parser.py``
+    with ``carrier_name=stage1.carrier_name`` — Stage-1-sourced by design, never
+    the LLM's own carrier claim (the merge loop reads ``getattr(stage1, field_name)``
+    for this, never ``result.locked``).  On pass, ``s2_val`` is replaced with the
+    CLEAN canonical form (separator-stripped, uppercased) per D-03.  On fail, value
+    is silently discarded (treated as ``None``); no conflict entry is emitted.  A
+    gate-rejection entry is appended to ``gate_rejections`` so the HA-holding
+    caller can count it (D-02 seam — the counter increment stays in
+    ``coordinator.py``).  The strict gate does NOT apply to the conflict path
     (Stage-1 non-``None``).
 
     Returns:
@@ -132,7 +140,30 @@ def merge_llm_authoritative(
         # promotion path.  The conflict path (s1_val non-None) is exempt — a carrier-format-
         # invalid Stage-2 value is still a conflict against Stage-1, not silently discarded.
         if field_name == "tracking_number" and s1_val is None and s2_val is not None:
-            clean, ok, reason = validate_carrier_format(s2_val)
+            # quick-260807-tpu Task 2: carrier context is Stage-1's OWN carrier_name
+            # (option a), never result.locked["carrier_name"] (option b, rejected).
+            #
+            # Half one — why Stage-1's carrier and not the LLM's: gating the
+            # validator applied to the LLM's own tracking-number guess on the LLM's
+            # own carrier guess is circular — a model that hallucinates a DHL
+            # carrier would face a strictly weaker shape check for the number it
+            # hallucinated alongside it. stage1.carrier_name is never LLM-influenced
+            # at this point in the function (read from the `stage1` dataclass
+            # directly, not from `result.locked` or any merged/partially-merged
+            # value). Proven by test_mrg04_rejects_dhl_when_only_the_llm_claims_dhl.
+            #
+            # Half two — the reachability finding (Finding 1, quick-260807-tpu-PLAN.md):
+            # this branch currently has NO production traffic. The only production
+            # caller is coordinator.py's Stage-2 worker; it always passes a
+            # job.shipment whose tracking_number is non-blank (both Stage-1 enqueue
+            # sites pass a parsed shipment, and the inline-fallback enqueue sets
+            # prefetched_result, which makes the worker short-circuit before the
+            # merge). So `_stage1_missing` never returns True for tracking_number in
+            # production, and this gate is exercised only by unit tests today. Wiring
+            # it correctly is defence for the day that changes — it is not the thing
+            # that unblocks DHL. See the four reachable pre-POST re-gates in
+            # coordinator.py / gmail_coordinator.py / imap_coordinator.py for that.
+            clean, ok, reason = validate_carrier_format(s2_val, carrier_name=stage1.carrier_name)
             if ok:
                 # Gate passed: use the CLEAN canonical form (D-03).
                 s2_val = clean

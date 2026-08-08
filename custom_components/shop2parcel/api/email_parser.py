@@ -26,6 +26,8 @@ from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
 
+from .carrier_codes import normalize_carrier
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -90,6 +92,15 @@ _TRACKING_PATTERNS = [
     re.compile(
         r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$"
     ),  # FedEx: Express=12, Ground=15, SmartPost=20
+    # ShipBob (.planning/debug/shipbob-carrier-unsupported.md): SB + 8-23
+    # alnum chars (10-25 total). Safe to add to this shared list — unlike
+    # DHL's deliberately-excluded bare-digit shape (Decision 1, 36-01-PLAN.md)
+    # — because the literal "SB" letter prefix is a low-collision anchor
+    # structurally analogous to UPS's "1Z" above, not a bare-digit shape.
+    # Range is a considered generalization from the one confirmed real sample
+    # (SBAAAAQLCQ6U4P269, SB+15=17 chars) — documented blind spot, no second
+    # independent sample was obtainable.
+    re.compile(r"^SB[A-Z0-9]{8,23}$"),
 ]
 
 
@@ -100,6 +111,7 @@ STRATEGY_UPS = "ups_template"
 STRATEGY_USPS = "usps_template"
 STRATEGY_FEDEX = "fedex_template"
 STRATEGY_DHL = "dhl_template"
+STRATEGY_SHIPBOB = "shipbob_template"
 STRATEGY_REGEX = "regex_fallback"
 STRATEGY_BROAD_REGEX = "broad_regex"
 
@@ -126,6 +138,10 @@ _FEDEX_TRACKING_RE = re.compile(
     r"(?:tracking\s+(?:number|#|no\.?|id\b)\s*:?\s*)([0-9]{12}|[0-9]{15}|[0-9]{20})\b",
     re.IGNORECASE,
 )
+# ShipBob (.planning/debug/shipbob-carrier-unsupported.md): bare bounded token
+# match (mirrors _UPS_TRACKING_RE's structure) — no label anchor required,
+# since the "SB" prefix itself is the low-collision anchor (like UPS's "1Z").
+_SHIPBOB_TRACKING_RE = re.compile(r"\b(SB[A-Z0-9]{8,23})\b")
 
 
 def _looks_like_tracking(s: str) -> bool:
@@ -133,32 +149,210 @@ def _looks_like_tracking(s: str) -> bool:
     return any(p.match(s) for p in _TRACKING_PATTERNS)
 
 
-def validate_carrier_format(value: str | None) -> tuple[str, bool, str | None]:
+def validate_carrier_format(
+    value: str | None, *, carrier_name: str | None = None
+) -> tuple[str, bool, str | None]:
     """Validate a carrier tracking number against all known carrier patterns.
 
     Strips internal ``[ -]`` separators and uppercases the input to produce the
     single canonical clean form (D-03). This clean form is the value used for
     validation, dedup, and the parcelapp POST — callers must not normalise further.
 
+    ``carrier_name`` (quick-260807-tpu, additive/optional, keyword-only): the
+    default ``None`` preserves the EXACT prior carrier-agnostic behaviour for
+    every existing caller and every existing test — this call path is
+    byte-identical to the pre-change function for every input. When supplied
+    and it resolves to DHL (``_is_dhl_carrier``), an additional OR-branch also
+    accepts DHL's bare 9-11-digit waybill shape via ``_dhl_looks_like_tracking``.
+    That shape is deliberately absent from the shared ``_TRACKING_PATTERNS``
+    list (Decision 1, 36-01-PLAN.md — it's too broad to trust without carrier
+    context); carrier context is what makes accepting it safe here, and without
+    carrier context it stays rejected. Finding 2 (36-quick-tpu-PLAN.md): this
+    shared gate is the sole reason a Phase 36 DHL shipment could not previously
+    be POSTed — every production POST path re-gates through this function.
+
     Returns:
         ``(clean_value, ok, reason)`` where:
 
         * ``clean_value`` — separator-stripped, uppercased form (always returned,
           even on failure, so callers can log the cleaned value per D-06).
-        * ``ok`` — ``True`` if the clean form matches a carrier pattern.
+        * ``ok`` — ``True`` if the clean form matches a carrier pattern (the
+          shared carrier-agnostic list, OR — additively — the DHL shape when
+          carrier context says DHL).
         * ``reason`` — ``"empty"`` when the input is blank/None,
           ``"no_carrier_match"`` when no pattern matches, or ``None`` on success.
 
-    Reuses ``_looks_like_tracking()`` internally — no parallel reimplementation
-    of pattern logic (D-01). The separator strip uses a bounded char class
-    ``re.sub(r"[ -]", "", ...)``; no unbounded quantifier is introduced (ASVS V5).
+    Reuses ``_looks_like_tracking()`` and ``_dhl_looks_like_tracking()``
+    internally — no parallel reimplementation of pattern logic (D-01); no
+    second DHL regex is introduced. The DHL branch is expressed as a single
+    boolean OR, never a switch: it can only ever convert a rejection into an
+    acceptance, so a valid UPS/USPS/FedEx/ShipBob number still passes even when
+    ``carrier_name`` says DHL — a switch would instead regress a real UPS
+    number carried on a shipment whose carrier field says DHL, which is
+    explicitly forbidden. The separator strip uses a bounded char class
+    ``re.sub(r"[ -]", "", ...)``; the reused DHL regex (``_dhl_looks_like_tracking``)
+    already has bounded quantifiers — no new ReDoS surface is introduced
+    (ASVS V5).
     """
     clean = re.sub(r"[ -]", "", value or "").upper()
     if not clean:
         return clean, False, "empty"
-    if not _looks_like_tracking(clean):
+    ok = _looks_like_tracking(clean) or (
+        _is_dhl_carrier(carrier_name) and _dhl_looks_like_tracking(clean)
+    )
+    if not ok:
         return clean, False, "no_carrier_match"
     return clean, True, None
+
+
+def build_keyword_matcher(query: str) -> tuple[re.Pattern[str] | None, list[str]]:
+    """Compile a stored gmail_query keyword string into a local narrowing filter.
+
+    Follow-up to gmail-query-drops-emails (.planning/debug/gmail-query-drops-emails.md):
+    Gmail's server-side search engine does not reliably return the full union of
+    results for a long chain of bare ``OR``-joined keyword terms, so keyword
+    narrowing was moved out of the Gmail List API call entirely. This function
+    re-implements that narrowing locally, applied to each fetched message's
+    subject + body right before the (comparatively expensive) EmailParser tiers
+    run — a CPU-cost pre-filter, not a correctness gate.
+
+    Deliberately coarse and over-inclusive: the failure this whole task follows
+    up on was silent UNDER-inclusion (real shipment emails dropped with no
+    trace), so every design choice below biases toward matching too much rather
+    than too little.
+
+    Algorithm:
+    1. Tokenise on any run of whitespace after stripping the input.
+    2. Discard the bare boolean joiner tokens "OR"/"AND" (case-sensitive,
+       matching Gmail's own uppercase-only operator convention) — they are
+       separators, not keywords. Gmail's space-as-AND semantics are
+       deliberately approximated as OR here; over-matching is the safe
+       direction for a pre-filter.
+    3. Strip surrounding parentheses and double-quote characters from each
+       remaining token.
+    4. Route to ``dropped`` (never ``keywords``) any token that: contains a
+       colon (a Gmail field operator such as ``from:`` or ``label:``), starts
+       with a hyphen (Gmail negation), or contains no word character at all.
+       A naive substring match on a field-operator token can never match plain
+       email text, so silently keeping it would blackhole that user's stored
+       customisation — the exact "silently drops everything" failure shape
+       this task follows up on.
+    5. Discard tokens that are empty after stripping — they belong in neither
+       list.
+    6. If no usable keyword remains, return ``(None, dropped)`` — the fail-open
+       contract: callers must treat ``None`` as "match everything", never as
+       "match nothing".
+    7. Otherwise compile ONE case-insensitive alternation with word-boundary
+       anchors on both sides, running ``re.escape`` over every keyword. A flat,
+       unnested, non-quantified alternation over escaped literals is linear in
+       input length regardless of the (attacker-controllable) email body it is
+       run against — see T-i5r-01 in this task's threat model. No new ReDoS
+       surface is introduced (ASVS V5).
+
+    Returns:
+        ``(pattern, dropped)`` where ``pattern`` is ``None`` when the query is
+        blank/whitespace-only or contains only operator/negation tokens
+        (fail-open — callers must treat this as "match everything"), and
+        ``dropped`` lists every token that was excluded from the compiled
+        pattern for operator/negation/empty reasons.
+    """
+    dropped: list[str] = []
+    keywords: list[str] = []
+    for raw_token in query.strip().split():
+        if raw_token in ("OR", "AND"):
+            continue
+        token = raw_token.strip("()").strip('"')
+        if not token:
+            continue
+        if ":" in token or token.startswith("-") or not re.search(r"\w", token):
+            dropped.append(token)
+            continue
+        keywords.append(token)
+
+    if not keywords:
+        return None, dropped
+
+    alternation = "|".join(re.escape(kw) for kw in keywords)
+    pattern = re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
+    return pattern, dropped
+
+
+def matches_keyword_filter(pattern: re.Pattern[str] | None, *texts: str) -> bool:
+    """Return True if any supplied text matches the compiled keyword pattern.
+
+    ``pattern is None`` is the fail-open contract from build_keyword_matcher —
+    always returns True regardless of ``texts`` (no keyword narrowing active).
+    Otherwise returns True as soon as the pattern matches inside any non-empty
+    text among ``texts`` (subject-only and body-only matches both pass);
+    ``None``/empty strings among ``texts`` are tolerated without raising.
+    """
+    if pattern is None:
+        return True
+    return any(text and pattern.search(text) for text in texts)
+
+
+def extract_sender_domain(sender: str) -> str:
+    """Extract the lowercased domain from an email 'From' header value.
+
+    Sibling of build_sender_exclusion_matcher below — together they form the
+    EXCLUDE-biased half of sender filtering, deliberately the opposite safety
+    direction of build_keyword_matcher/matches_keyword_filter above (which
+    bias toward matching too much because their own failure mode was silent
+    under-matching).
+
+    Handles both a bare address ("no-reply@shopify.com") and a
+    ``Display Name <addr@domain>`` header value — ``re.search`` finds the
+    first ``@`` wherever it occurs. Returns "" for a sender with no "@" and
+    for an empty/None input (the ``sender or ""`` guard), so callers can
+    treat "" as "never excluded" — build_sender_exclusion_matcher never
+    stores the empty string as a configured domain (blank entries are
+    dropped), so "" can never accidentally match a configured exclusion.
+
+    T-qw1-01 (ASVS V5): ``@([\\w.-]+)`` is a single bounded character class
+    with one non-nested quantifier — linear in input length even against an
+    attacker-controllable From header. No ReDoS surface added.
+    """
+    m = re.search(r"@([\w.-]+)", sender or "")
+    return m.group(1).lower() if m else ""
+
+
+def build_sender_exclusion_matcher(excluded_domains: list[str]) -> Callable[[str], bool]:
+    """Compile a stored sender-exclusion domain list into a matcher closure.
+
+    EXCLUDE-biased — the deliberate opposite safety direction of
+    build_keyword_matcher/matches_keyword_filter above. Those functions
+    correctly bias toward matching too much (their failure mode was silent
+    under-matching, dropping real shipment emails). This filter must bias
+    the opposite way, toward excluding too little: an over-eager exclusion
+    here silently and permanently drops real data with no visible error,
+    which is strictly worse than the wasted Stage-1/Stage-2 pass it exists
+    to avoid.
+
+    Membership is an EXACT ``set`` lookup — never a suffix, substring, or
+    ``endswith`` check. This is not a style preference: a suffix match on an
+    entry like "usps.com" would also match
+    "email.informeddelivery.usps.com" and silently, permanently drop USPS
+    Informed Delivery digests, which send a legitimate daily email
+    regardless of whether any package is actually arriving (D-01). Because
+    membership is exact, a short parent-domain entry can never reach a
+    longer subdomain.
+
+    An empty or all-blank ``excluded_domains`` list means exclude nothing
+    (D-03 fail-open) — the default, unconfigured behaviour, and the only
+    behaviour byte-for-byte-identical polling depends on.
+    """
+    normalized = {d.strip().lower().lstrip("@") for d in excluded_domains if d.strip()}
+    if not normalized:
+
+        def _exclude_nothing(_sender: str) -> bool:
+            return False
+
+        return _exclude_nothing
+
+    def _matcher(sender: str) -> bool:
+        return extract_sender_domain(sender) in normalized
+
+    return _matcher
 
 
 def _infer_carrier(tracking: str) -> str:
@@ -171,6 +365,8 @@ def _infer_carrier(tracking: str) -> str:
         return "USPS"
     if re.match(r"^(?:[0-9]{12}|[0-9]{15}|[0-9]{20})$", tracking):
         return "FedEx"
+    if re.match(r"^SB[A-Z0-9]{8,23}$", tracking):
+        return "ShipBob"
     return "Unknown"
 
 
@@ -225,6 +421,11 @@ _UPS_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])ups\.com\b")
 _USPS_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])usps\.com\b")
 _FEDEX_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])fedex\.com\b")
 _DHL_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])dhl\.com\b")
+# ShipBob (.planning/debug/shipbob-carrier-unsupported.md): anchored on the
+# customer-facing tracking subdomain, not the bare apex domain — ShipBob is a
+# 3PL fulfillment platform, its marketing/merchant-portal domain is unrelated
+# to the tracking link merchants embed in shipment emails.
+_SHIPBOB_DOMAIN_RE = re.compile(r"(?:^|[\s\"'/@.=(>])track\.shipbob\.com\b")
 
 # DHL Express waybill/AWB numbers are commonly 9-11 digits (10 in practice). NOT
 # covered by the shared _TRACKING_PATTERNS list (UPS/USPS/FedEx only — see R5
@@ -247,6 +448,21 @@ def _dhl_looks_like_tracking(s: str) -> bool:
     from the Stage-2 path.
     """
     return bool(re.match(r"^\d{9,11}$", s))
+
+
+def _is_dhl_carrier(carrier_name: str | None) -> bool:
+    """True when carrier_name resolves to DHL via the single source of truth
+    (api/carrier_codes.py::normalize_carrier — same package, no HA imports,
+    and carrier_codes.py imports nothing from this module, so no import cycle).
+
+    Guards the ``None`` case before calling ``normalize_carrier``, which calls
+    ``.strip()`` internally and would raise on ``None``. Shared by all five
+    carrier-aware gate call sites (Task 1-3, quick-260807-tpu) so DHL
+    recognition has exactly one definition.
+    """
+    if carrier_name is None:
+        return False
+    return normalize_carrier(carrier_name) == "dhl"
 
 
 def _detect_ups(html: str) -> bool:
@@ -295,6 +511,21 @@ def _detect_dhl(html: str) -> bool:
     """
     html_lower = html.lower()
     return bool(_DHL_DOMAIN_RE.search(html_lower)) and "shopify" not in html_lower
+
+
+def _detect_shipbob(html: str) -> bool:
+    """Return True if html contains a ShipBob 3PL tracking link.
+
+    Marker: boundary-anchored 'track.shipbob.com' (WR-03) — deliberately
+    WITHOUT the "shopify not in html" exclusion _detect_ups/_detect_usps/
+    _detect_fedex/_detect_dhl apply. ShipBob is a fulfillment platform (3PL),
+    not a last-mile carrier that sends its own direct emails — its tracking
+    link legitimately co-occurs inside a merchant/Klaviyo/Shopify-templated
+    email (.planning/debug/shipbob-carrier-unsupported.md), unlike UPS/USPS/
+    FedEx/DHL's own direct carrier emails.
+    """
+    html_lower = html.lower()
+    return bool(_SHIPBOB_DOMAIN_RE.search(html_lower))
 
 
 def _parse_ups(html: str, message_id: str, email_date: int) -> ParseResult:
@@ -497,6 +728,13 @@ def _parse_dhl(html: str, message_id: str, email_date: int) -> ParseResult:
     carrier emails (no Shopify order number present). Uses the local
     _dhl_looks_like_tracking() validator, NOT the shared _looks_like_tracking()
     (Decision 1, 36-01-PLAN.md).
+
+    quick-260807-tpu: this DHL waybill can only reach parcelapp because the four
+    production pre-POST re-gates (coordinator.py's worker + drain, gmail_coordinator.py's
+    and imap_coordinator.py's inline POST gates) now pass carrier context into
+    validate_carrier_format(). A future change that drops the carrier_name argument
+    at any of those call sites silently re-breaks DHL end to end — this comment is
+    the back-reference that makes that coupling discoverable from the parser side.
     """
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text(separator=" ")
@@ -522,8 +760,68 @@ def _parse_dhl(html: str, message_id: str, email_date: int) -> ParseResult:
     )
 
 
-# Registry order: UPS -> USPS -> FedEx -> DHL -> (fallthrough to Shopify in
-# parse()). First match wins. Order matters per RESEARCH.md ordering analysis.
+def _parse_shipbob(html: str, message_id: str, email_date: int) -> ParseResult:
+    """Extract tracking number from a ShipBob 3PL shipping notification email.
+
+    Mirrors _parse_ups/_parse_dhl's structure exactly (text regex first, href
+    fallback second — the href fallback matters here since ShipBob's real
+    primary tracking button is often an obfuscated merchant click-tracking
+    redirect URL; only the MSO-fallback anchor or body prose expose the raw
+    tracking token — see shipbob-carrier-unsupported.md Evidence).
+
+    carrier_name is HARDCODED to "ShipBob" rather than derived from body
+    prose ("via X" extraction) — ShipBob's true underlying last-mile carrier
+    (e.g. OnTrac) is only ever exposed via authenticated ShipBob merchant API
+    access, never recoverable from the customer-facing email alone
+    (confirmed via developer.shipbob.com/guides/tracking). This deliberately
+    avoids re-introducing the carrier_name="Unknown" -> normalize_carrier()
+    -> "pholder" failure shape already resolved once in this codebase (see
+    .planning/debug/resolved/parcelapp-unknown-carrier-code.md).
+    """
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator=" ")
+    m = _SHIPBOB_TRACKING_RE.search(text)
+    if m and _looks_like_tracking(m.group(1)):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=m.group(1),
+                carrier_name="ShipBob",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_SHIPBOB,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    tn = _extract_tracking_from_hrefs(soup)
+    if tn and _looks_like_tracking(tn):
+        return ParseResult(
+            shipment=ShipmentData(
+                tracking_number=tn,
+                carrier_name="ShipBob",
+                order_name="",
+                message_id=message_id,
+                email_date=email_date,
+            ),
+            skip_reason=None,
+            strategy_used=STRATEGY_SHIPBOB,
+            keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+        )
+    return ParseResult(
+        shipment=None,
+        skip_reason="no_template_match",
+        strategy_used=None,
+        keyword_hits={"tracking_regex": False, "order_regex": False, "carrier_regex": False},
+    )
+
+
+# Registry order: UPS -> USPS -> FedEx -> DHL -> ShipBob -> (fallthrough to
+# Shopify in parse()). First match wins. Order matters per RESEARCH.md
+# ordering analysis. ShipBob is appended last, after the four direct-carrier
+# detectors — its detect_fn deliberately has no "shopify not in html"
+# exclusion (see _detect_shipbob), so it must never shadow a more specific
+# direct-carrier match earlier in the list.
 _CarrierEntry = tuple[
     Callable[[str], bool],
     Callable[[str, str, int], ParseResult],
@@ -533,6 +831,7 @@ CARRIER_REGISTRY: list[_CarrierEntry] = [
     (_detect_usps, _parse_usps),
     (_detect_fedex, _parse_fedex),
     (_detect_dhl, _parse_dhl),
+    (_detect_shipbob, _parse_shipbob),
 ]
 
 
