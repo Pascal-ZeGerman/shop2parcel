@@ -687,3 +687,70 @@ def test_mrg04_strict_gate_passes_usps_with_separators() -> None:
     )
     assert gate_rejections == [], "Passing USPS number must produce no gate rejections"
     assert conflicts == []
+
+
+# ---------------------------------------------------------------------------
+# quick-260807-tpu Task 2: MRG-04 gate wired to stage1.carrier_name (option a)
+# ---------------------------------------------------------------------------
+
+
+def test_mrg04_promotes_dhl_bare_digits_when_stage1_carrier_is_dhl() -> None:
+    """A bare DHL waybill promotes when Stage-1's OWN carrier says DHL."""
+    stage1 = _make_shipment(tracking_number="", carrier_name="DHL Express")
+    result = _make_result(locked={"tracking_number": "4212345678"})
+
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
+
+    assert merged.tracking_number == "4212345678"
+    assert conflicts == []
+    assert gate_rejections == []
+
+
+@pytest.mark.parametrize("stage1_carrier", ["Unknown", ""])
+def test_mrg04_rejects_dhl_bare_digits_when_stage1_carrier_is_blank(
+    stage1_carrier: str,
+) -> None:
+    """Without a real Stage-1 DHL carrier, the bare-digit shape stays rejected
+    and the Stage-1 sentinel ("") is preserved (WR-02)."""
+    stage1 = _make_shipment(tracking_number="", carrier_name=stage1_carrier)
+    result = _make_result(locked={"tracking_number": "4212345678"})
+
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
+
+    assert merged.tracking_number == ""
+    assert conflicts == []
+    assert len(gate_rejections) == 1
+    assert gate_rejections[0]["reason"] == "no_carrier_match"
+
+
+def test_mrg04_rejects_dhl_when_only_the_llm_claims_dhl() -> None:
+    """Anti-circularity proof: the LLM's own carrier_name claim in result.locked
+    must NEVER widen the validator applied to its own tracking_number claim
+    (option b rejected). Only stage1.carrier_name (option a) may widen the gate."""
+    stage1 = _make_shipment(tracking_number="", carrier_name="Unknown")
+    result = _make_result(locked={"tracking_number": "4212345678", "carrier_name": "DHL Express"})
+
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
+
+    assert merged.tracking_number == ""
+    assert conflicts == []
+    assert len(gate_rejections) == 1
+    assert gate_rejections[0]["reason"] == "no_carrier_match"
+
+
+@pytest.mark.parametrize("bad_value", ["ORDER-12345", "PROMO 2026 SALE"])
+def test_mrg04_non_dhl_rejections_unchanged_with_dhl_stage1_carrier(
+    bad_value: str,
+) -> None:
+    """DHL Stage-1 carrier context must not become a blanket bypass — a
+    non-tracking-shaped value is still rejected even when stage1.carrier_name
+    is DHL."""
+    stage1 = _make_shipment(tracking_number="", carrier_name="DHL Express")
+    result = _make_result(locked={"tracking_number": bad_value})
+
+    merged, conflicts, gate_rejections = merge_llm_authoritative(stage1, result)
+
+    assert merged.tracking_number == ""
+    assert conflicts == []
+    assert len(gate_rejections) == 1
+    assert gate_rejections[0]["reason"] == "no_carrier_match"
