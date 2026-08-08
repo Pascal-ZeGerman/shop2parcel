@@ -6,9 +6,9 @@ current_phase: 36
 current_phase_name: DHL Carrier Support + USPS Digest Sender Extraction
 status: idle
 stopped_at: Completed 36-02-PLAN.md; milestone v1.5 archived; manifest bumped to 1.6.0-rc1 (tag pushed, PR #45 merged)
-last_updated: "2026-08-07T21:47:00.000Z"
-last_activity: 2026-08-07
-last_activity_desc: Completed 3 quick tasks from recent spike work — sender-exclusion filter (260807-qw1, spike 027), confirmed USPS digest sender extraction already shipped in Phase 36, and fixed a real production bug found while investigating DHL's validator choice (Phase 36's DHL support was dead-ended at every pre-POST gate — 260807-tpu)
+last_updated: "2026-08-08T00:00:00.000Z"
+last_activity: 2026-08-08
+last_activity_desc: Refreshed the spike-findings-shop2parcel skill (quick task 260808-074) — DHL, USPS digest sender extraction, and the sender-exclusion filter now documented as shipped rather than pending; recorded the 260807-tpu production-bug history
 progress:
   total_phases: 13
   completed_phases: 13
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-07-28)
 Phase: 36 — DHL Carrier Support + USPS Digest Sender Extraction (complete, verified passed 8/8)
 Plan: All plans complete
 Status: No active phase — awaiting next milestone definition
-Last activity: 2026-08-07 — 3 quick tasks from recent spike work: sender-exclusion filter (260807-qw1), USPS digest fix confirmed already shipped, DHL carrier-aware gate fix (260807-tpu) unblocking DHL end-to-end
+Last activity: 2026-08-08 — quick task 260808-074 refreshed the spike-findings-shop2parcel skill docs (DHL/USPS-digest/sender-exclusion now shipped, not pending; 260807-tpu production-bug history recorded)
 
 ```
 [████████████████████] 68/68 plans (100%)
@@ -195,6 +195,7 @@ None — Phase 33 (IMAP Parity) complete and verified (4/4 must-haves). Ready to
 | 260807-qw1 | Implement user-configurable sender-exclusion filter (spike 027): `extract_sender_domain`/`build_sender_exclusion_matcher` (exact-domain-match only, fail-open on empty config) in `api/email_parser.py`; options-flow add/remove UI (`CONF_SENDER_EXCLUSIONS`) mirroring the existing custom-fields pattern; wired into Gmail (before local keyword filter) and IMAP coordinators at the earliest point sender metadata is known, using `_mark_inflight` (not `_mark_message_seen`) so a config change takes effect immediately (D-05). USPS Informed Delivery structurally guaranteed non-excludable (exact match only). --validate: plan-checked + independently verified, 13/13 must-haves. Full suite 1238 passed, 2 pre-existing live-service skips; ruff/mypy clean. | 2026-08-07 | f55c1ac, 34b0f13, 50d7108 | Verified | [260807-qw1-implement-user-configurable-sender-exclu](./quick/260807-qw1-implement-user-configurable-sender-exclu/) |
 | 260807-usps-dhl-check | Investigated spike round-4 candidates (USPS digest structural sender extraction, DHL carrier support) requested as "recent spike work" — found both already shipped in Phase 36 (2026-07-24); `spike-findings-shop2parcel` skill docs are stale on this point (still read "validated, not yet implemented"). No code change; superseded by 260807-tpu below, which the DHL finding led directly into. | 2026-08-07 | n/a (investigation only) | n/a | n/a |
 | 260807-tpu | Made the shared carrier-format gate carrier-aware (`validate_carrier_format(value, carrier_name=None)`, additive OR-widening, DHL bare-digit shape reuses `_dhl_looks_like_tracking`, never a switch) and wired it into MRG-04 (`stage1.carrier_name`, option a — never the LLM's own carrier claim, anti-circularity proven by test) plus all four production pre-POST gates (worker: `job.shipment.carrier_name`; drain: pending shipment's own carrier, bounded-residual-risk documented inline; Gmail/IMAP inline: pure Stage-1 `shipment.carrier_name`). Investigation found DHL was dead-ended at every production POST path since Phase 36 shipped — this un-blocks DHL end-to-end. `_TRACKING_PATTERNS` unchanged (R5 hole stays closed). TDD RED→GREEN ×3 tasks; full suite 1238 passed, 2 pre-existing live-service skips; ruff/mypy clean. --validate: plan-checked + independently verified, 9/9 must-haves. | 2026-08-07 | eab0c9a, 1117867, 93fd9cc | Verified | [260807-tpu-make-mrg-04-s-carrier-format-gate-carrie](./quick/260807-tpu-make-mrg-04-s-carrier-format-gate-carrie/) |
+| 260808-074 | Refreshed the `spike-findings-shop2parcel` skill (docs-only, 3 tasks): `references/us-carrier-coverage.md` now states DHL shipped in Phase 36 (2026-07-24), replaces the open local-vs-shared-validator choice with the resolved 260807-tpu reversal history, and adds a What-to-Avoid entry recording the two-week production dead-end incident; `references/usps-digest-multi-shipment.md` and `references/sender-filtering.md` reframe `_extract_usps_shippers` (Phase 36) and the sender-exclusion matcher/UI/wiring (260807-qw1) as live production code; `SKILL.md` frontmatter description, a new sixth `<context>` paragraph ("Implementation round, NOT a spike round"), 4 `<requirements>` bullets, and 3 `<findings_index>` cells updated to shipped status — Processed Spikes list (26 entries) left byte-identical, no spike number invented for quick-task work. All plan verification gates passed; zero changes under `custom_components/`/`tests/`. | 2026-08-08 | 38cded0, e9f7879, e793ccb | Verified | [260808-074-refresh-spike-findings-shop2parcel-skill](./quick/260808-074-refresh-spike-findings-shop2parcel-skill/) |
 
 ## Performance Metrics
 
@@ -346,9 +347,9 @@ Note: UAT/verification gaps continue the hardware-dependent live HA testing defe
 
 **Resume file:** None
 
-Last session: 2026-08-07T21:47:00.000Z
-Stopped at: Completed 3 quick tasks implementing "the recent spike work" (round 5, spikes 025-027, plus a re-check of round-4 candidates): (1) 260807-qw1 — user-configurable sender-exclusion filter (spike 027), options-flow UI + exact-domain-match matcher, USPS Informed Delivery structurally non-excludable. (2) Confirmed USPS digest per-package sender extraction (spike 023) and DHL carrier support (spike 024) were both already shipped in Phase 36 (2026-07-24) — the `spike-findings-shop2parcel` skill's docs are stale on this point and should be refreshed to avoid future duplicate-work risk. (3) 260807-tpu — while resolving the user's requested DHL validator change, found Phase 36's DHL support was completely dead-ended in production (validate_carrier_format rejected DHL's own tracking-number shape at every pre-POST gate, so no DHL parcel had ever actually reached parcelapp.net); fixed with a carrier-aware, purely-additive gate change across MRG-04 and all 4 production pre-POST sites. Full suite green throughout (1238 passed, 2 pre-existing skips), ruff/mypy clean, both qw1 and tpu independently verified (13/13, 9/9 must-haves).
-Next action: `/gsd-new-milestone` to define v1.6 scope, or continue with ad-hoc spike-driven phases (Phase 37+) if no new milestone is started yet. Outstanding: redeploy 260806-i5r, 260807-qw1, and 260807-tpu to the live HA instance; close .planning/debug/gmail-query-drops-emails.md once verified live; refresh `spike-findings-shop2parcel` skill docs (DHL/USPS-digest sections read "not yet implemented" but shipped in Phase 36). Optional follow-up: symmetric subject/sender enrichment for the sibling rejection log sites in gmail_coordinator.py:807 and imap_coordinator.py:532.
+Last session: 2026-08-08T00:00:00.000Z
+Stopped at: Completed quick task 260808-074 — refreshed the `spike-findings-shop2parcel` skill (`SKILL.md` + 3 reference files) so DHL carrier support, USPS digest per-package sender extraction, and the sender-exclusion filter are documented as shipped production code (Phase 36 / 260807-qw1) rather than pending implementation candidates, and so the DHL production dead-end incident (fixed by 260807-tpu) is recorded as a permanent lesson. Docs-only; zero changes under `custom_components/`/`tests/`; all plan verification gates passed.
+Next action: `/gsd-new-milestone` to define v1.6 scope, or continue with ad-hoc spike-driven phases (Phase 37+) if no new milestone is started yet. Outstanding: redeploy 260806-i5r, 260807-qw1, and 260807-tpu to the live HA instance; close .planning/debug/gmail-query-drops-emails.md once verified live. Optional follow-up: symmetric subject/sender enrichment for the sibling rejection log sites in gmail_coordinator.py:807 and imap_coordinator.py:532.
 
 ## Operator Next Steps
 
