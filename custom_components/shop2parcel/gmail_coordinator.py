@@ -854,7 +854,12 @@ class GmailCoordinator(Shop2ParcelCoordinator):
                 # number, so a body order/invoice/phone number of those lengths that Stage-1 matches
                 # as FedEx WILL pass this gate and burn a quota slot. Tightening the FedEx pattern
                 # is deferred to a future phase.
-                gm_clean, gm_ok, gm_reason = validate_carrier_format(shipment.tracking_number)
+                # quick-260807-tpu Task 3: carrier context is the Stage-1 shipment's
+                # own carrier — this branch runs only when Stage-2 is disabled, so the
+                # value is pure Stage-1 output with no LLM involvement.
+                gm_clean, gm_ok, gm_reason = validate_carrier_format(
+                    shipment.tracking_number, carrier_name=shipment.carrier_name
+                )
                 if not gm_ok:
                     self._diagnostics.record_carrier_format_rejection(
                         gm_clean, gm_reason or "no_carrier_match"

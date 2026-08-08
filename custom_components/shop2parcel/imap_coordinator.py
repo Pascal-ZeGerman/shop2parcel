@@ -574,7 +574,12 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 # + continue (mirrors the existing IMAP quota-skip / dedup-skip branches).
                 # On pass: rebind shipment to the gate-clean canonical form (D-03) so the
                 # POST body and the success-path dedup write both use the separator-free string.
-                im_clean, im_ok, im_reason = validate_carrier_format(shipment.tracking_number)
+                # quick-260807-tpu Task 3: carrier context is the Stage-1 shipment's
+                # own carrier — this branch runs only when Stage-2 is disabled, so the
+                # value is pure Stage-1 output with no LLM involvement.
+                im_clean, im_ok, im_reason = validate_carrier_format(
+                    shipment.tracking_number, carrier_name=shipment.carrier_name
+                )
                 if not im_ok:
                     self._diagnostics.record_carrier_format_rejection(
                         im_clean, im_reason or "no_carrier_match"

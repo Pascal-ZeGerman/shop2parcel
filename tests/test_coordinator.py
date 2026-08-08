@@ -6374,6 +6374,63 @@ async def test_drain_defensive_regate_posts_clean_form_for_valid_item(hass, mock
     )
 
 
+async def test_drain_dhl_shipment_survives_regate_and_posts(hass, mock_stage2_entry):
+    """quick-260807-tpu Task 3 RED: a pending DHL ShipmentData (bare 9-11-digit
+    waybill, carrier_name='DHL Express') must survive the drain re-gate, be
+    POSTed, and be removed from _pending_posts as a SUCCESS — not as a gate
+    rejection. The drain's only available carrier source is the pending
+    shipment's own carrier_name (bounded-residual-risk argument, documented
+    inline at the call site).
+
+    RED: before Task 3, validate_carrier_format(drain_tn_raw) is called with no
+    carrier context, so the bare DHL digit shape is rejected and the item is
+    deleted without a POST.
+    """
+    mock_stage2_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>body shipped</html>",
+        ),
+        patch.object(Shop2ParcelCoordinator, "_async_save_store", new_callable=AsyncMock),
+        patch("custom_components.shop2parcel.coordinator.ParcelAppClient") as mock_parcel_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+
+        coord = GmailCoordinator(hass, mock_stage2_entry)
+        await coord._async_load_store()
+
+        dhl_shipment = ShipmentData(
+            tracking_number="4212345678",
+            carrier_name="DHL Express",
+            order_name="",
+            message_id="msg-drain-dhl",
+            email_date=1700000003,
+        )
+        coord._pending_posts = {"drain_dhl_key": dhl_shipment}
+        coord._quota_exhausted_until = None
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        await coord._async_drain_pending_posts()
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args.kwargs
+    assert call_kwargs.get("tracking_number") == "4212345678"
+    assert call_kwargs.get("carrier_code") == "dhl"
+    assert "drain_dhl_key" not in coord._pending_posts, (
+        "Successfully-posted DHL item must be removed from _pending_posts"
+    )
+    assert coord._diagnostics.carrier_format_rejected_total == 0, (
+        "DHL shipment must not be recorded as a carrier-format rejection"
+    )
+
+
 # ---------------------------------------------------------------------------
 # CR-01 regression: a Stage-2 worker publish that lands MID-POLL (via
 # async_set_updated_data) must survive the poll's end-of-cycle return — the

@@ -728,6 +728,13 @@ def _parse_dhl(html: str, message_id: str, email_date: int) -> ParseResult:
     carrier emails (no Shopify order number present). Uses the local
     _dhl_looks_like_tracking() validator, NOT the shared _looks_like_tracking()
     (Decision 1, 36-01-PLAN.md).
+
+    quick-260807-tpu: this DHL waybill can only reach parcelapp because the four
+    production pre-POST re-gates (coordinator.py's worker + drain, gmail_coordinator.py's
+    and imap_coordinator.py's inline POST gates) now pass carrier context into
+    validate_carrier_format(). A future change that drops the carrier_name argument
+    at any of those call sites silently re-breaks DHL end to end — this comment is
+    the back-reference that makes that coupling discoverable from the parser side.
     """
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text(separator=" ")

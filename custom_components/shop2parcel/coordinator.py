@@ -1672,8 +1672,19 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # carry a malformed value that slipped through an earlier validation gap.
             # On reject: discard the item (it will never pass — no retry benefit) and continue.
             # On pass: use the CLEAN canonical form for both dedup key AND the POST body (D-03).
+            # quick-260807-tpu Task 3: carrier source is the pending shipment's OWN
+            # carrier_name — the only carrier available, because _pending_posts stores
+            # the post-merge ShipmentData only and no Stage-1 copy is retained. Bounded
+            # residual risk: the DHL widening can only change the outcome for a bare
+            # 9-11-digit number; the only Stage-1 producer of that shape is _parse_dhl,
+            # which hardcodes a REAL carrier_name="DHL Express" that MRG-03 never lets
+            # the LLM overwrite. Every other Stage-1 path already satisfies the shared
+            # gate, so the widening is a no-op for it (see quick-260807-tpu-PLAN.md
+            # investigation findings for the full argument).
             drain_tn_raw = merged_shipment.tracking_number or ""
-            drain_clean, drain_ok, drain_reject_reason = validate_carrier_format(drain_tn_raw)
+            drain_clean, drain_ok, drain_reject_reason = validate_carrier_format(
+                drain_tn_raw, carrier_name=merged_shipment.carrier_name
+            )
             if not drain_ok:
                 # _pending_posts stores ShipmentData only (no subject/from fields) and no
                 # email re-fetch is performed on this path, so subject/sender cannot be
@@ -2006,7 +2017,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # without writing _pending_posts. The gate also produces the canonical clean form
         # (D-03) used for the quota-defer persistence, the POST body, and the dedup write
         # on the happy path.
-        wk_clean, wk_ok, wk_reason = validate_carrier_format(merged_shipment.tracking_number)
+        # quick-260807-tpu Task 3: carrier context is the ORIGINAL Stage-1 job shipment's
+        # carrier (job.shipment.carrier_name), deliberately NOT merged_shipment.carrier_name —
+        # the merged carrier may have been LLM-promoted, and reading it here would let the
+        # model widen the very gate that is supposed to be checking its output. The original
+        # job shipment is still in scope at this point.
+        wk_clean, wk_ok, wk_reason = validate_carrier_format(
+            merged_shipment.tracking_number, carrier_name=job.shipment.carrier_name
+        )
         if not wk_ok:
             _LOGGER.debug(
                 "Stage-2 worker: carrier-format gate rejected tn='%s' (reason=%s)"

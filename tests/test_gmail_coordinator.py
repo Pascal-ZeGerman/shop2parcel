@@ -471,6 +471,60 @@ async def test_gmail_inline_posts_clean_canonical_form(hass, mock_no_stage2_entr
     )
 
 
+async def test_gmail_inline_dhl_shipment_reaches_post(hass, mock_no_stage2_entry) -> None:
+    """quick-260807-tpu Task 3 RED: with Stage-2 disabled, a Gmail Stage-1 DHL
+    shipment (bare 9-11-digit waybill, carrier_name='DHL Express') must reach
+    the inline POST instead of hitting the terminal carrier-format-rejection
+    branch. The carrier context passed to the gate is shipment.carrier_name —
+    pure Stage-1 output, no LLM involvement on this disabled-Stage-2 path.
+
+    RED: before Task 3, validate_carrier_format(shipment.tracking_number) is
+    called with no carrier context, so the bare DHL digit shape is rejected.
+    """
+    mock_no_stage2_entry.add_to_hass(hass)
+    dhl_tn = "4212345678"
+    msg_id = "msg_dhl_gmail_inline"
+    mock_gmail = _make_stage1_hit_poll(msg_id, dhl_tn)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body shipped</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit(
+            dhl_tn, carrier_name="DHL Express"
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_no_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args[1]
+    assert call_kwargs["tracking_number"] == dhl_tn
+    assert call_kwargs["carrier_code"] == "dhl"
+    assert coord._diagnostics.carrier_format_rejected_total == 0, (
+        "DHL shipment must not be recorded as a carrier-format rejection"
+    )
+
+
 # ---------------------------------------------------------------------------
 # LOH-SUMMARY: Gmail Stage-1 inline POST description fallback
 # ---------------------------------------------------------------------------
