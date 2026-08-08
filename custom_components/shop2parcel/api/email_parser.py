@@ -26,6 +26,8 @@ from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
 
+from .carrier_codes import normalize_carrier
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -147,30 +149,58 @@ def _looks_like_tracking(s: str) -> bool:
     return any(p.match(s) for p in _TRACKING_PATTERNS)
 
 
-def validate_carrier_format(value: str | None) -> tuple[str, bool, str | None]:
+def validate_carrier_format(
+    value: str | None, *, carrier_name: str | None = None
+) -> tuple[str, bool, str | None]:
     """Validate a carrier tracking number against all known carrier patterns.
 
     Strips internal ``[ -]`` separators and uppercases the input to produce the
     single canonical clean form (D-03). This clean form is the value used for
     validation, dedup, and the parcelapp POST — callers must not normalise further.
 
+    ``carrier_name`` (quick-260807-tpu, additive/optional, keyword-only): the
+    default ``None`` preserves the EXACT prior carrier-agnostic behaviour for
+    every existing caller and every existing test — this call path is
+    byte-identical to the pre-change function for every input. When supplied
+    and it resolves to DHL (``_is_dhl_carrier``), an additional OR-branch also
+    accepts DHL's bare 9-11-digit waybill shape via ``_dhl_looks_like_tracking``.
+    That shape is deliberately absent from the shared ``_TRACKING_PATTERNS``
+    list (Decision 1, 36-01-PLAN.md — it's too broad to trust without carrier
+    context); carrier context is what makes accepting it safe here, and without
+    carrier context it stays rejected. Finding 2 (36-quick-tpu-PLAN.md): this
+    shared gate is the sole reason a Phase 36 DHL shipment could not previously
+    be POSTed — every production POST path re-gates through this function.
+
     Returns:
         ``(clean_value, ok, reason)`` where:
 
         * ``clean_value`` — separator-stripped, uppercased form (always returned,
           even on failure, so callers can log the cleaned value per D-06).
-        * ``ok`` — ``True`` if the clean form matches a carrier pattern.
+        * ``ok`` — ``True`` if the clean form matches a carrier pattern (the
+          shared carrier-agnostic list, OR — additively — the DHL shape when
+          carrier context says DHL).
         * ``reason`` — ``"empty"`` when the input is blank/None,
           ``"no_carrier_match"`` when no pattern matches, or ``None`` on success.
 
-    Reuses ``_looks_like_tracking()`` internally — no parallel reimplementation
-    of pattern logic (D-01). The separator strip uses a bounded char class
-    ``re.sub(r"[ -]", "", ...)``; no unbounded quantifier is introduced (ASVS V5).
+    Reuses ``_looks_like_tracking()`` and ``_dhl_looks_like_tracking()``
+    internally — no parallel reimplementation of pattern logic (D-01); no
+    second DHL regex is introduced. The DHL branch is expressed as a single
+    boolean OR, never a switch: it can only ever convert a rejection into an
+    acceptance, so a valid UPS/USPS/FedEx/ShipBob number still passes even when
+    ``carrier_name`` says DHL — a switch would instead regress a real UPS
+    number carried on a shipment whose carrier field says DHL, which is
+    explicitly forbidden. The separator strip uses a bounded char class
+    ``re.sub(r"[ -]", "", ...)``; the reused DHL regex (``_dhl_looks_like_tracking``)
+    already has bounded quantifiers — no new ReDoS surface is introduced
+    (ASVS V5).
     """
     clean = re.sub(r"[ -]", "", value or "").upper()
     if not clean:
         return clean, False, "empty"
-    if not _looks_like_tracking(clean):
+    ok = _looks_like_tracking(clean) or (
+        _is_dhl_carrier(carrier_name) and _dhl_looks_like_tracking(clean)
+    )
+    if not ok:
         return clean, False, "no_carrier_match"
     return clean, True, None
 
@@ -418,6 +448,21 @@ def _dhl_looks_like_tracking(s: str) -> bool:
     from the Stage-2 path.
     """
     return bool(re.match(r"^\d{9,11}$", s))
+
+
+def _is_dhl_carrier(carrier_name: str | None) -> bool:
+    """True when carrier_name resolves to DHL via the single source of truth
+    (api/carrier_codes.py::normalize_carrier — same package, no HA imports,
+    and carrier_codes.py imports nothing from this module, so no import cycle).
+
+    Guards the ``None`` case before calling ``normalize_carrier``, which calls
+    ``.strip()`` internally and would raise on ``None``. Shared by all five
+    carrier-aware gate call sites (Task 1-3, quick-260807-tpu) so DHL
+    recognition has exactly one definition.
+    """
+    if carrier_name is None:
+        return False
+    return normalize_carrier(carrier_name) == "dhl"
 
 
 def _detect_ups(html: str) -> bool:

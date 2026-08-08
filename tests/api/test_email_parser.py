@@ -1159,6 +1159,102 @@ def test_validate_carrier_format_regression_shipbob() -> None:
     assert clean == "SBAAAAQLCQ6U4P269"
 
 
+def test_validate_carrier_format_accepts_dhl_bare_digits_with_dhl_carrier() -> None:
+    """quick-260807-tpu Task 1: a bare 10-digit DHL waybill is accepted ONLY when
+    carrier_name resolves to DHL — the additive, carrier-aware OR-widening branch."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("4212345678", carrier_name="DHL Express")
+    assert clean == "4212345678"
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_carrier_format_dhl_ecommerce_carrier_name_also_accepted() -> None:
+    """normalize_carrier maps 'DHL eCommerce' to 'dhl' too — same widening applies."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("4212345678", carrier_name="DHL eCommerce")
+    assert clean == "4212345678"
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_carrier_format_rejects_dhl_bare_digits_without_carrier() -> None:
+    """GREEN today, must stay green: no carrier context means the bare-digit shape
+    stays rejected (R5 false-positive hole stays closed)."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("4212345678")
+    assert clean == "4212345678"
+    assert ok is False
+    assert reason == "no_carrier_match"
+
+
+@pytest.mark.parametrize(
+    "carrier_name",
+    ["UPS", "FedEx", "USPS", "ShipBob", "Unknown", "", None],
+)
+def test_validate_carrier_format_rejects_dhl_bare_digits_for_non_dhl_carrier(
+    carrier_name: str | None,
+) -> None:
+    """A bare 9-11-digit value claimed for any non-DHL carrier is still rejected
+    exactly as it is today — the DHL widening never becomes a blanket bypass."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    clean, ok, reason = validate_carrier_format("4212345678", carrier_name=carrier_name)
+    assert clean == "4212345678"
+    assert ok is False
+    assert reason == "no_carrier_match"
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        "1Z999AA10123456784",
+        "9400111122223333444455",
+        "123456789012",
+        "SBAAAAQLCQ6U4P269",
+    ],
+)
+def test_validate_carrier_format_dhl_widening_does_not_narrow_other_carriers(
+    sample: str,
+) -> None:
+    """OR-widening proof: a known-good non-DHL tracking number still passes both
+    with no carrier context AND with carrier_name='DHL Express' — the DHL branch
+    can only ever convert a rejection into an acceptance, never the reverse."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    _clean_none, ok_none, _reason_none = validate_carrier_format(sample)
+    _clean_dhl, ok_dhl, _reason_dhl = validate_carrier_format(sample, carrier_name="DHL Express")
+    assert ok_none is True
+    assert ok_dhl is True
+
+
+@pytest.mark.parametrize("value", ["12345678", "1234567890123"])
+def test_validate_carrier_format_dhl_rejects_out_of_range_digits(value: str) -> None:
+    """8-digit and 13-digit values fall outside DHL's 9-11-digit shape even with
+    DHL carrier context — _dhl_looks_like_tracking's bound is still enforced."""
+    from custom_components.shop2parcel.api.email_parser import validate_carrier_format
+
+    _clean, ok, _reason = validate_carrier_format(value, carrier_name="DHL Express")
+    assert ok is False
+
+
+def test_tracking_patterns_list_unchanged_by_dhl_support() -> None:
+    """Hard constraint 2 / R5 non-regression: _TRACKING_PATTERNS still has exactly
+    5 entries, none of which match a bare 10-digit string, and _looks_like_tracking
+    is unchanged."""
+    from custom_components.shop2parcel.api.email_parser import (
+        _TRACKING_PATTERNS,
+        _looks_like_tracking,
+    )
+
+    assert len(_TRACKING_PATTERNS) == 5
+    assert not any(p.match("4212345678") for p in _TRACKING_PATTERNS)
+    assert _looks_like_tracking("4212345678") is False
+
+
 def test_dhl_template_extracts_tracking(dhl_html: str) -> None:
     """DHL-01: DHL Express template extracts waybill number, sets carrier_name='DHL Express'
     and strategy_used=STRATEGY_DHL."""
