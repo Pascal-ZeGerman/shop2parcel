@@ -209,6 +209,24 @@ STAGE2_FAILING_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_failing"
 # permanently poisoning legitimate shipment emails.
 STAGE2_MSG_QUARANTINE_THRESHOLD: int = 5
 
+# stage2-quarantine-gap: the inline Stage-1-miss Gmail/IMAP fallback gatekeeper's
+# per-message quarantine (STAGE2_MSG_QUARANTINE_THRESHOLD above) only counts
+# deterministic OllamaSchemaError failures — OllamaTransientError (network errors,
+# 5xx, and per-request TimeoutError) is deliberately excluded there so a genuine
+# Ollama outage never permanently marks a not-yet-discovered shipment email seen
+# (findings #1/#594). But a message can also fail with OllamaTransientError on
+# EVERY poll indefinitely — not because Ollama is actually down, but because that
+# specific message's content deterministically overruns the per-request timeout
+# (observed live: an identical "Ollama network error" TimeoutError, 15+ times over
+# 2.5+ hours, for one email, while Ollama itself remained reachable and fast for
+# other requests). This second, much higher ceiling exists purely to bound THAT
+# case: set to 4x STAGE2_MSG_QUARANTINE_THRESHOLD so any realistic transient
+# outage (which by definition affects many different messages at once and
+# typically resolves within minutes) self-heals long before it is ever reached,
+# while a message that never once succeeds is eventually quarantined instead of
+# retrying forever.
+STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD: int = 20
+
 
 def stage2_failing_notification_id(entry_id: str) -> str:
     """Return the persistent-notification ID for Stage-2 consecutive-failure events.

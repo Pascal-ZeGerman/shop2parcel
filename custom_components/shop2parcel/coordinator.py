@@ -67,6 +67,7 @@ from .const import (
     MAX_STAGE2_POSTS_PER_POLL,
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
+    STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD,
     EnqueueOutcome,
     normalize_tracking_number,
     stage2_cap_notification_id,
@@ -506,6 +507,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # In-memory only (session-scoped); a restart clears it and re-evaluates the message.
         # FIFO-bounded so a long run of distinct schema-failing messages cannot grow it unbounded.
         self._stage2_inline_schema_failures: OrderedDict[str, int] = OrderedDict()
+        # stage2-quarantine-gap: per-message consecutive OllamaTransientError count for the
+        # INLINE Gmail/IMAP fallback gatekeeper — the transient-error counterpart to
+        # _stage2_inline_schema_failures above. Uses the much higher
+        # STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD (not STAGE2_MSG_QUARANTINE_THRESHOLD) so a
+        # genuine short outage never reaches it, while a message that deterministically times
+        # out on EVERY poll indefinitely (misclassified as "transient" because the failure
+        # surfaces via TimeoutError rather than a parse error) is eventually quarantined
+        # instead of retrying forever. In-memory only (session-scoped); FIFO-bounded like its
+        # sibling.
+        self._stage2_inline_transient_failures: OrderedDict[str, int] = OrderedDict()
         # IN-07: session-scoped cache of fallback-prefetched Stage2Results whose job
         # the worker cap-skipped, keyed by raw Gmail message ID. The gatekeeper pops
         # this cache before calling the extractor, so a cap-deferred fallback job is
@@ -743,6 +754,37 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_inline_schema_failures.move_to_end(msg_id)
         while len(self._stage2_inline_schema_failures) > SEEN_MESSAGE_IDS_MAXLEN:
             self._stage2_inline_schema_failures.popitem(last=False)
+        return False
+
+    def _register_inline_transient_failure(self, msg_id: str) -> bool:
+        """Track consecutive inline-fallback OllamaTransientError failures per message.
+
+        stage2-quarantine-gap: the transient-error counterpart to
+        _register_inline_schema_failure. A genuine transient outage (network blip, Ollama
+        restart, brief overload) affects many different messages at once and resolves within
+        minutes to low tens of minutes — far short of STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD
+        consecutive same-message poll failures. A message that keeps failing with
+        OllamaTransientError on EVERY poll for that many consecutive attempts is not
+        experiencing a real outage (Ollama would have to be down continuously that whole time,
+        with every other message also failing) — it is a poison message whose specific content
+        deterministically overruns the per-request timeout (observed live: an identical "Ollama
+        network error" TimeoutError, 15+ times over 2.5+ hours, for one specific email, while a
+        direct connectivity check confirmed Ollama itself stayed reachable and responsive
+        throughout). Without this ceiling such a message is retried forever.
+
+        Returns False (keep retrying) for messages still under the threshold. In-memory only
+        (session-scoped): a restart clears the counter and re-evaluates the message, so a
+        genuinely transient blip self-heals long before this ceiling is ever approached.
+        FIFO-bounded at SEEN_MESSAGE_IDS_MAXLEN.
+        """
+        count = self._stage2_inline_transient_failures.get(msg_id, 0) + 1
+        if count >= STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD:
+            self._stage2_inline_transient_failures.pop(msg_id, None)
+            return True
+        self._stage2_inline_transient_failures[msg_id] = count
+        self._stage2_inline_transient_failures.move_to_end(msg_id)
+        while len(self._stage2_inline_transient_failures) > SEEN_MESSAGE_IDS_MAXLEN:
+            self._stage2_inline_transient_failures.popitem(last=False)
         return False
 
     def _debug_mode_active(self) -> bool:
@@ -1384,9 +1426,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     # mirrors the carrier-format-reject branch below) so the poll gate
                     # stops re-fetching it. Below threshold it is left un-cached and
                     # retried next poll (a rare few schema errors may be a model warm-up
-                    # blip). OllamaTransientError (network/5xx) is NEVER counted or marked
-                    # seen: a transient outage must keep retrying and must not permanently
-                    # skip a legitimate shipment email (findings #1/#594).
+                    # blip). OllamaTransientError (network/5xx/timeout) is NOT counted at
+                    # this low threshold: a transient outage must keep retrying and must
+                    # not permanently skip a legitimate shipment email (findings #1/#594).
+                    #
+                    # stage2-quarantine-gap: OllamaTransientError DOES still get a ceiling —
+                    # a much higher one (STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD, 4x this
+                    # threshold) below, because a message that fails with OllamaTransientError
+                    # on EVERY poll for that long is not a real outage (see
+                    # _register_inline_transient_failure) — it is just as deterministic as an
+                    # OllamaSchemaError, only manifesting as a timeout instead of a parse
+                    # failure.
                     if isinstance(
                         fb_err, OllamaSchemaError
                     ) and self._register_inline_schema_failure(msg_key):
@@ -1400,6 +1450,27 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                             meta.get("subject", ""),
                             meta.get("from", ""),
                             STAGE2_MSG_QUARANTINE_THRESHOLD,
+                        )
+                        self._mark_message_seen(msg_key)
+                        self._emit_scan_event(
+                            message_id=f"{prefix}{msg_key}",
+                            meta=meta,
+                            outcome="stage2_no_data",
+                        )
+                    elif isinstance(
+                        fb_err, OllamaTransientError
+                    ) and self._register_inline_transient_failure(msg_key):
+                        _LOGGER.warning(
+                            "%s %s ('%s' from '%s'): quarantining after "
+                            "%d consecutive inline OllamaTransientError failures — marking "
+                            "seen to stop the per-poll re-inference loop (session-scoped; "
+                            "cleared on restart; not treated as a real outage at this count — "
+                            "see STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD)",
+                            log_label,
+                            msg_key,
+                            meta.get("subject", ""),
+                            meta.get("from", ""),
+                            STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD,
                         )
                         self._mark_message_seen(msg_key)
                         self._emit_scan_event(

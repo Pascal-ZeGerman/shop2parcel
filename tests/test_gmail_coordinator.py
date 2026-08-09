@@ -1028,9 +1028,14 @@ async def test_inline_schema_error_quarantines_after_threshold(hass, mock_stage2
 
 async def test_inline_transient_error_never_quarantines(hass, mock_stage2_entry):
     """ollama-fallback-retry-loop (design constraint / finding #594): a TRANSIENT Ollama
-    outage (async_extract raises OllamaTransientError) must NEVER mark a message seen and
-    must keep retrying every poll — a network blip must not permanently poison a legitimate
-    shipment email.
+    outage (async_extract raises OllamaTransientError) must NOT mark a message seen within
+    a short span of consecutive polls and must keep retrying — a brief network blip must
+    not permanently poison a legitimate shipment email.
+
+    stage2-quarantine-gap: this only asserts the SHORT-span guarantee (STAGE2_MSG_QUARANTINE_
+    THRESHOLD + 3 polls, well under STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD) — a message
+    that keeps failing with OllamaTransientError far longer than any realistic outage DOES
+    eventually quarantine; see test_inline_transient_error_quarantines_after_higher_threshold.
     """
     from custom_components.shop2parcel.api.exceptions import OllamaTransientError
     from custom_components.shop2parcel.const import STAGE2_MSG_QUARANTINE_THRESHOLD
@@ -1047,14 +1052,58 @@ async def test_inline_transient_error_never_quarantines(hass, mock_stage2_entry)
     )
 
     extractor = coord._test_extractor  # type: ignore[attr-defined]
-    # A transient error must be retried on EVERY poll — one inference per poll, no quarantine.
+    # A transient error must be retried on EVERY poll within this short span — one inference
+    # per poll, no quarantine yet.
     assert extractor.async_extract.await_count == polls, (
-        f"Transient errors must keep retrying every poll: expected {polls} attempts, "
-        f"got {extractor.async_extract.await_count}"
+        f"Transient errors must keep retrying every poll within a short span: "
+        f"expected {polls} attempts, got {extractor.async_extract.await_count}"
     )
-    # The message must NEVER be marked seen (would permanently skip a legit email on restart-persist).
+    # The message must NOT be marked seen within this short span (would permanently skip a
+    # legit email during a brief outage — finding #594 regression).
     assert msg_id not in coord._seen_message_ids, (
-        "A transient Ollama outage must NOT mark the message seen (finding #594 regression)"
+        "A brief transient Ollama outage must NOT mark the message seen (finding #594 regression)"
+    )
+
+
+async def test_inline_transient_error_quarantines_after_higher_threshold(hass, mock_stage2_entry):
+    """stage2-quarantine-gap: a message that fails with OllamaTransientError on EVERY poll
+    far beyond any realistic outage duration (STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD
+    consecutive polls) must eventually be quarantined (marked seen) so it stops retrying
+    forever.
+
+    Before the fix, OllamaTransientError was NEVER counted by the inline gatekeeper at all
+    (unlike OllamaSchemaError, which quarantines at STAGE2_MSG_QUARANTINE_THRESHOLD) — a
+    message that deterministically times out on every attempt (e.g. a live email observed
+    failing identically 15+ times over 2.5+ hours while Ollama itself stayed reachable) was
+    retried with NO ceiling. This must NOT reuse/lower STAGE2_MSG_QUARANTINE_THRESHOLD (that
+    would break test_inline_transient_error_never_quarantines above and reintroduce the
+    finding #594 risk for genuinely brief outages) — it must use the separate, much higher
+    STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD ceiling.
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD
+
+    threshold = STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD
+    msg_id = "msg_pathological_timeout"
+
+    coord = await _run_inline_fallback_polls(
+        hass,
+        mock_stage2_entry,
+        msg_id=msg_id,
+        extract_side_effect=OllamaTransientError("Ollama network error: "),
+        polls=threshold + 3,
+    )
+
+    extractor = coord._test_extractor  # type: ignore[attr-defined]
+    # async_extract must have run at most `threshold` times, then stopped.
+    assert extractor.async_extract.await_count == threshold, (
+        f"Expected exactly {threshold} inference attempts before quarantine, "
+        f"got {extractor.async_extract.await_count} (infinite-loop regression?)"
+    )
+    # The message must now be terminal (marked seen) so the poll gate skips it.
+    assert msg_id in coord._seen_message_ids, (
+        "A pathological message that always times out must eventually be quarantined "
+        "so it stops being re-fetched forever"
     )
 
 
