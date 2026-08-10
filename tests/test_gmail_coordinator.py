@@ -234,7 +234,7 @@ async def test_fallback_gate_pass_spaced_usps_uses_clean_form(hass, mock_stage2_
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>usps body</html>",
+            return_value="<html>usps body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -379,7 +379,7 @@ async def test_gmail_inline_rejects_malformed_tracking_no_post(hass, mock_no_sta
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -445,7 +445,7 @@ async def test_gmail_inline_posts_clean_canonical_form(hass, mock_no_stage2_entr
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -468,6 +468,60 @@ async def test_gmail_inline_posts_clean_canonical_form(hass, mock_no_stage2_entr
     call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args[1]
     assert call_kwargs["tracking_number"] == expected_clean, (
         f"Expected tracking_number='{expected_clean}', got {call_kwargs['tracking_number']!r}"
+    )
+
+
+async def test_gmail_inline_dhl_shipment_reaches_post(hass, mock_no_stage2_entry) -> None:
+    """quick-260807-tpu Task 3 RED: with Stage-2 disabled, a Gmail Stage-1 DHL
+    shipment (bare 9-11-digit waybill, carrier_name='DHL Express') must reach
+    the inline POST instead of hitting the terminal carrier-format-rejection
+    branch. The carrier context passed to the gate is shipment.carrier_name —
+    pure Stage-1 output, no LLM involvement on this disabled-Stage-2 path.
+
+    RED: before Task 3, validate_carrier_format(shipment.tracking_number) is
+    called with no carrier context, so the bare DHL digit shape is rejected.
+    """
+    mock_no_stage2_entry.add_to_hass(hass)
+    dhl_tn = "4212345678"
+    msg_id = "msg_dhl_gmail_inline"
+    mock_gmail = _make_stage1_hit_poll(msg_id, dhl_tn)
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.GmailClient",
+            return_value=mock_gmail,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value="<html>shipping body shipped</html>",
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        _setup_mock_oauth(mock_oauth)
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_parser_cls.return_value.parse.return_value = _make_parse_result_hit(
+            dhl_tn, carrier_name="DHL Express"
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = GmailCoordinator(hass, mock_no_stage2_entry)
+        await coord._async_load_store()
+        coord._email_client = mock_gmail
+
+        await coord._async_update_data()
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args[1]
+    assert call_kwargs["tracking_number"] == dhl_tn
+    assert call_kwargs["carrier_code"] == "dhl"
+    assert coord._diagnostics.carrier_format_rejected_total == 0, (
+        "DHL shipment must not be recorded as a carrier-format rejection"
     )
 
 
@@ -501,7 +555,7 @@ async def test_gmail_stage1_inline_post_description_falls_back_to_order_name(
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -580,7 +634,7 @@ async def test_fallback_cache_hit_skips_extractor_and_cap(hass, mock_stage2_entr
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -648,7 +702,7 @@ async def test_fallback_enqueue_counts_matched_found_diagnostics(hass, mock_stag
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -704,7 +758,7 @@ async def test_first_refresh_skips_inline_fallback(hass, mock_stage2_entry):
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>first refresh body</html>",
+            return_value="<html>first refresh body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -770,7 +824,7 @@ async def test_second_poll_runs_inline_fallback(hass, mock_stage2_entry):
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>second poll body</html>",
+            return_value="<html>second poll body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -830,7 +884,7 @@ async def test_wall_clock_budget_stops_inline_fallback(hass, mock_stage2_entry):
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>budget body</html>",
+            return_value="<html>budget body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -910,7 +964,7 @@ async def _run_inline_fallback_polls(
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>unparseable digest body</html>",
+            return_value="<html>unparseable digest body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -974,9 +1028,14 @@ async def test_inline_schema_error_quarantines_after_threshold(hass, mock_stage2
 
 async def test_inline_transient_error_never_quarantines(hass, mock_stage2_entry):
     """ollama-fallback-retry-loop (design constraint / finding #594): a TRANSIENT Ollama
-    outage (async_extract raises OllamaTransientError) must NEVER mark a message seen and
-    must keep retrying every poll — a network blip must not permanently poison a legitimate
-    shipment email.
+    outage (async_extract raises OllamaTransientError) must NOT mark a message seen within
+    a short span of consecutive polls and must keep retrying — a brief network blip must
+    not permanently poison a legitimate shipment email.
+
+    stage2-quarantine-gap: this only asserts the SHORT-span guarantee (STAGE2_MSG_QUARANTINE_
+    THRESHOLD + 3 polls, well under STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD) — a message
+    that keeps failing with OllamaTransientError far longer than any realistic outage DOES
+    eventually quarantine; see test_inline_transient_error_quarantines_after_higher_threshold.
     """
     from custom_components.shop2parcel.api.exceptions import OllamaTransientError
     from custom_components.shop2parcel.const import STAGE2_MSG_QUARANTINE_THRESHOLD
@@ -993,14 +1052,58 @@ async def test_inline_transient_error_never_quarantines(hass, mock_stage2_entry)
     )
 
     extractor = coord._test_extractor  # type: ignore[attr-defined]
-    # A transient error must be retried on EVERY poll — one inference per poll, no quarantine.
+    # A transient error must be retried on EVERY poll within this short span — one inference
+    # per poll, no quarantine yet.
     assert extractor.async_extract.await_count == polls, (
-        f"Transient errors must keep retrying every poll: expected {polls} attempts, "
-        f"got {extractor.async_extract.await_count}"
+        f"Transient errors must keep retrying every poll within a short span: "
+        f"expected {polls} attempts, got {extractor.async_extract.await_count}"
     )
-    # The message must NEVER be marked seen (would permanently skip a legit email on restart-persist).
+    # The message must NOT be marked seen within this short span (would permanently skip a
+    # legit email during a brief outage — finding #594 regression).
     assert msg_id not in coord._seen_message_ids, (
-        "A transient Ollama outage must NOT mark the message seen (finding #594 regression)"
+        "A brief transient Ollama outage must NOT mark the message seen (finding #594 regression)"
+    )
+
+
+async def test_inline_transient_error_quarantines_after_higher_threshold(hass, mock_stage2_entry):
+    """stage2-quarantine-gap: a message that fails with OllamaTransientError on EVERY poll
+    far beyond any realistic outage duration (STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD
+    consecutive polls) must eventually be quarantined (marked seen) so it stops retrying
+    forever.
+
+    Before the fix, OllamaTransientError was NEVER counted by the inline gatekeeper at all
+    (unlike OllamaSchemaError, which quarantines at STAGE2_MSG_QUARANTINE_THRESHOLD) — a
+    message that deterministically times out on every attempt (e.g. a live email observed
+    failing identically 15+ times over 2.5+ hours while Ollama itself stayed reachable) was
+    retried with NO ceiling. This must NOT reuse/lower STAGE2_MSG_QUARANTINE_THRESHOLD (that
+    would break test_inline_transient_error_never_quarantines above and reintroduce the
+    finding #594 risk for genuinely brief outages) — it must use the separate, much higher
+    STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD ceiling.
+    """
+    from custom_components.shop2parcel.api.exceptions import OllamaTransientError
+    from custom_components.shop2parcel.const import STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD
+
+    threshold = STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD
+    msg_id = "msg_pathological_timeout"
+
+    coord = await _run_inline_fallback_polls(
+        hass,
+        mock_stage2_entry,
+        msg_id=msg_id,
+        extract_side_effect=OllamaTransientError("Ollama network error: "),
+        polls=threshold + 3,
+    )
+
+    extractor = coord._test_extractor  # type: ignore[attr-defined]
+    # async_extract must have run at most `threshold` times, then stopped.
+    assert extractor.async_extract.await_count == threshold, (
+        f"Expected exactly {threshold} inference attempts before quarantine, "
+        f"got {extractor.async_extract.await_count} (infinite-loop regression?)"
+    )
+    # The message must now be terminal (marked seen) so the poll gate skips it.
+    assert msg_id in coord._seen_message_ids, (
+        "A pathological message that always times out must eventually be quarantined "
+        "so it stops being re-fetched forever"
     )
 
 
@@ -1433,7 +1536,7 @@ async def test_gmail_inline_transient_error_refunds_reserved_slot(hass, mock_no_
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -1483,7 +1586,7 @@ async def test_gmail_inline_429_blocks_shared_hub(hass, mock_no_stage2_entry):
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,
@@ -1535,7 +1638,7 @@ async def test_gmail_inline_already_added_keeps_reserve(hass, mock_no_stage2_ent
         ),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>shipping body</html>",
+            return_value="<html>shipping body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.EmailParser") as mock_parser_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient") as mock_parcel_cls,

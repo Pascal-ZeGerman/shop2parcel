@@ -237,6 +237,55 @@ async def test_imap_inline_posts_clean_canonical_form(hass, mock_imap_no_stage2_
     )
 
 
+async def test_imap_inline_dhl_shipment_reaches_post(hass, mock_imap_no_stage2_entry) -> None:
+    """quick-260807-tpu Task 3 RED (IMAP counterpart of the Gmail inline DHL test):
+    with Stage-2 disabled, an IMAP Stage-1 DHL shipment (bare 9-11-digit waybill,
+    carrier_name='DHL Express') must reach the inline POST instead of hitting the
+    terminal carrier-format-rejection branch. The carrier context passed to the
+    gate is shipment.carrier_name — pure Stage-1 output, no LLM involvement on
+    this disabled-Stage-2 path.
+
+    RED: before Task 3, validate_carrier_format(shipment.tracking_number) is
+    called with no carrier context, so the bare DHL digit shape is rejected.
+    """
+    mock_imap_no_stage2_entry.add_to_hass(hass)
+
+    dhl_tn = "4212345678"
+    raw_msg = _make_imap_message(uid=3, tracking_number=dhl_tn)
+
+    with (
+        patch("custom_components.shop2parcel.imap_coordinator.ImapClient") as mock_imap_cls,
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value="<html>shipping body</html>",
+        ),
+        patch("custom_components.shop2parcel.imap_coordinator.EmailParser") as mock_parser_cls,
+        patch("custom_components.shop2parcel.imap_coordinator.ParcelAppClient") as mock_parcel_cls,
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+    ):
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_imap_cls.return_value.fetch_shipping_emails = AsyncMock(return_value=[raw_msg])
+        mock_parser_cls.return_value.parse.return_value = _make_imap_parse_result(
+            dhl_tn, carrier_name="DHL Express"
+        )
+        mock_parcel_cls.return_value.async_add_delivery = AsyncMock()
+
+        coord = ImapCoordinator(hass, mock_imap_no_stage2_entry)
+        await coord._async_load_store()
+
+        await coord._async_update_data()
+
+    mock_parcel_cls.return_value.async_add_delivery.assert_awaited_once()
+    call_kwargs = mock_parcel_cls.return_value.async_add_delivery.call_args[1]
+    assert call_kwargs["tracking_number"] == dhl_tn
+    assert call_kwargs["carrier_code"] == "dhl"
+    assert coord._diagnostics.carrier_format_rejected_total == 0, (
+        "DHL shipment must not be recorded as a carrier-format rejection"
+    )
+
+
 # ---------------------------------------------------------------------------
 # CR-01: TLS certificate verification wiring — coordinator → ImapClient
 # ---------------------------------------------------------------------------

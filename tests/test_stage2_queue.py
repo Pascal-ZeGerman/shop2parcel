@@ -84,7 +84,7 @@ def _patch_coord_deps():
         patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
     )
 
@@ -141,7 +141,7 @@ async def test_setup_stage2_extractor_survives_corrupt_custom_fields(
         patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
@@ -204,7 +204,7 @@ async def test_in_flight_dedup_prevents_double_enqueue(hass, mock_stage2_config_
         patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
@@ -264,7 +264,7 @@ async def test_drop_newest_backpressure(hass, mock_stage2_config_entry, caplog):
         patch("custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"),
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
     ):
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
@@ -340,7 +340,7 @@ async def test_stage2_branch_bypasses_post(hass, mock_stage2_config_entry):
         ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
@@ -410,7 +410,7 @@ async def test_poll_loop_ollama_free_with_full_queue(hass, mock_stage2_config_en
         ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
@@ -514,7 +514,7 @@ async def test_stage2_disabled_does_not_construct_extractor(hass, mock_config_en
         ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
         patch.object(
             Shop2ParcelCoordinator,

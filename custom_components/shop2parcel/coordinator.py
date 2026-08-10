@@ -67,6 +67,7 @@ from .const import (
     MAX_STAGE2_POSTS_PER_POLL,
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
+    STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD,
     EnqueueOutcome,
     normalize_tracking_number,
     stage2_cap_notification_id,
@@ -263,6 +264,13 @@ class PollStats:
     keyword_hits_total: int = 0
     last_poll_emails_returned: int = 0
     last_poll_emails_skipped_dedup: int = 0
+    # D-02 (quick-260806-i5r): Gmail-only per-poll cap-overflow counter — the
+    # number of post-seen-filter messages dropped by MAX_GMAIL_MESSAGES_PER_POLL
+    # this poll. api/imap_client.py's own cap logs its drop silently; this
+    # counter deliberately does better — an invisible-unless-you-read-logs
+    # drop is the exact failure shape gmail-query-drops-emails follows up on.
+    # In-memory only, reset at the top of every poll (D-06), like its neighbours.
+    last_poll_emails_capped: int = 0
     submitted_tracking_count: int = 0
     last_poll_effective_query: str | None = None
     last_poll_emails_scanned: int = 0
@@ -499,6 +507,16 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # In-memory only (session-scoped); a restart clears it and re-evaluates the message.
         # FIFO-bounded so a long run of distinct schema-failing messages cannot grow it unbounded.
         self._stage2_inline_schema_failures: OrderedDict[str, int] = OrderedDict()
+        # stage2-quarantine-gap: per-message consecutive OllamaTransientError count for the
+        # INLINE Gmail/IMAP fallback gatekeeper — the transient-error counterpart to
+        # _stage2_inline_schema_failures above. Uses the much higher
+        # STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD (not STAGE2_MSG_QUARANTINE_THRESHOLD) so a
+        # genuine short outage never reaches it, while a message that deterministically times
+        # out on EVERY poll indefinitely (misclassified as "transient" because the failure
+        # surfaces via TimeoutError rather than a parse error) is eventually quarantined
+        # instead of retrying forever. In-memory only (session-scoped); FIFO-bounded like its
+        # sibling.
+        self._stage2_inline_transient_failures: OrderedDict[str, int] = OrderedDict()
         # IN-07: session-scoped cache of fallback-prefetched Stage2Results whose job
         # the worker cap-skipped, keyed by raw Gmail message ID. The gatekeeper pops
         # this cache before calling the extractor, so a cap-deferred fallback job is
@@ -736,6 +754,37 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._stage2_inline_schema_failures.move_to_end(msg_id)
         while len(self._stage2_inline_schema_failures) > SEEN_MESSAGE_IDS_MAXLEN:
             self._stage2_inline_schema_failures.popitem(last=False)
+        return False
+
+    def _register_inline_transient_failure(self, msg_id: str) -> bool:
+        """Track consecutive inline-fallback OllamaTransientError failures per message.
+
+        stage2-quarantine-gap: the transient-error counterpart to
+        _register_inline_schema_failure. A genuine transient outage (network blip, Ollama
+        restart, brief overload) affects many different messages at once and resolves within
+        minutes to low tens of minutes — far short of STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD
+        consecutive same-message poll failures. A message that keeps failing with
+        OllamaTransientError on EVERY poll for that many consecutive attempts is not
+        experiencing a real outage (Ollama would have to be down continuously that whole time,
+        with every other message also failing) — it is a poison message whose specific content
+        deterministically overruns the per-request timeout (observed live: an identical "Ollama
+        network error" TimeoutError, 15+ times over 2.5+ hours, for one specific email, while a
+        direct connectivity check confirmed Ollama itself stayed reachable and responsive
+        throughout). Without this ceiling such a message is retried forever.
+
+        Returns False (keep retrying) for messages still under the threshold. In-memory only
+        (session-scoped): a restart clears the counter and re-evaluates the message, so a
+        genuinely transient blip self-heals long before this ceiling is ever approached.
+        FIFO-bounded at SEEN_MESSAGE_IDS_MAXLEN.
+        """
+        count = self._stage2_inline_transient_failures.get(msg_id, 0) + 1
+        if count >= STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD:
+            self._stage2_inline_transient_failures.pop(msg_id, None)
+            return True
+        self._stage2_inline_transient_failures[msg_id] = count
+        self._stage2_inline_transient_failures.move_to_end(msg_id)
+        while len(self._stage2_inline_transient_failures) > SEEN_MESSAGE_IDS_MAXLEN:
+            self._stage2_inline_transient_failures.popitem(last=False)
         return False
 
     def _debug_mode_active(self) -> bool:
@@ -1377,9 +1426,17 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     # mirrors the carrier-format-reject branch below) so the poll gate
                     # stops re-fetching it. Below threshold it is left un-cached and
                     # retried next poll (a rare few schema errors may be a model warm-up
-                    # blip). OllamaTransientError (network/5xx) is NEVER counted or marked
-                    # seen: a transient outage must keep retrying and must not permanently
-                    # skip a legitimate shipment email (findings #1/#594).
+                    # blip). OllamaTransientError (network/5xx/timeout) is NOT counted at
+                    # this low threshold: a transient outage must keep retrying and must
+                    # not permanently skip a legitimate shipment email (findings #1/#594).
+                    #
+                    # stage2-quarantine-gap: OllamaTransientError DOES still get a ceiling —
+                    # a much higher one (STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD, 4x this
+                    # threshold) below, because a message that fails with OllamaTransientError
+                    # on EVERY poll for that long is not a real outage (see
+                    # _register_inline_transient_failure) — it is just as deterministic as an
+                    # OllamaSchemaError, only manifesting as a timeout instead of a parse
+                    # failure.
                     if isinstance(
                         fb_err, OllamaSchemaError
                     ) and self._register_inline_schema_failure(msg_key):
@@ -1393,6 +1450,27 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                             meta.get("subject", ""),
                             meta.get("from", ""),
                             STAGE2_MSG_QUARANTINE_THRESHOLD,
+                        )
+                        self._mark_message_seen(msg_key)
+                        self._emit_scan_event(
+                            message_id=f"{prefix}{msg_key}",
+                            meta=meta,
+                            outcome="stage2_no_data",
+                        )
+                    elif isinstance(
+                        fb_err, OllamaTransientError
+                    ) and self._register_inline_transient_failure(msg_key):
+                        _LOGGER.warning(
+                            "%s %s ('%s' from '%s'): quarantining after "
+                            "%d consecutive inline OllamaTransientError failures — marking "
+                            "seen to stop the per-poll re-inference loop (session-scoped; "
+                            "cleared on restart; not treated as a real outage at this count — "
+                            "see STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD)",
+                            log_label,
+                            msg_key,
+                            meta.get("subject", ""),
+                            meta.get("from", ""),
+                            STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD,
                         )
                         self._mark_message_seen(msg_key)
                         self._emit_scan_event(
@@ -1452,11 +1530,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                 )
                 _LOGGER.debug(
                     "%s %s: fallback carrier-format gate rejected '%s' "
-                    "(reason=%s) — cached as rejected",
+                    "(reason=%s) subject=%r sender=%r — cached as rejected",
                     log_label,
                     msg_key,
                     fb_clean,
                     fb_reason,
+                    meta.get("subject", ""),
+                    meta.get("from", ""),
                 )
                 self._mark_message_seen(msg_key)
                 self._emit_scan_event(
@@ -1663,14 +1743,29 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # carry a malformed value that slipped through an earlier validation gap.
             # On reject: discard the item (it will never pass — no retry benefit) and continue.
             # On pass: use the CLEAN canonical form for both dedup key AND the POST body (D-03).
+            # quick-260807-tpu Task 3: carrier source is the pending shipment's OWN
+            # carrier_name — the only carrier available, because _pending_posts stores
+            # the post-merge ShipmentData only and no Stage-1 copy is retained. Bounded
+            # residual risk: the DHL widening can only change the outcome for a bare
+            # 9-11-digit number; the only Stage-1 producer of that shape is _parse_dhl,
+            # which hardcodes a REAL carrier_name="DHL Express" that MRG-03 never lets
+            # the LLM overwrite. Every other Stage-1 path already satisfies the shared
+            # gate, so the widening is a no-op for it (see quick-260807-tpu-PLAN.md
+            # investigation findings for the full argument).
             drain_tn_raw = merged_shipment.tracking_number or ""
-            drain_clean, drain_ok, drain_reject_reason = validate_carrier_format(drain_tn_raw)
+            drain_clean, drain_ok, drain_reject_reason = validate_carrier_format(
+                drain_tn_raw, carrier_name=merged_shipment.carrier_name
+            )
             if not drain_ok:
+                # _pending_posts stores ShipmentData only (no subject/from fields) and no
+                # email re-fetch is performed on this path, so subject/sender cannot be
+                # logged here — storage_key is the triage handle instead (quick task 260806-v2j).
                 _LOGGER.debug(
                     "Stage-2 drain: carrier-format gate rejected pending tn='%s' (reason=%s)"
-                    " — removing from _pending_posts without POST",
+                    " storage_key=%s — removing from _pending_posts without POST",
                     drain_clean,
                     drain_reject_reason,
+                    storage_key,
                 )
                 self._diagnostics.record_carrier_format_rejection(
                     drain_clean, drain_reject_reason or "no_carrier_match"
@@ -1910,9 +2005,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             for rej in gate_rejections:
                 self._diagnostics.record_carrier_format_rejection(rej["clean"], rej["reason"])
                 _LOGGER.debug(
-                    "Stage-2 worker: carrier-format gate rejected promotion of '%s' (reason=%s)",
+                    "Stage-2 worker: carrier-format gate rejected promotion of '%s' "
+                    "(reason=%s) subject=%r sender=%r",
                     rej["clean"],
                     rej["reason"],
+                    job.meta.get("subject", ""),
+                    job.meta.get("from", ""),
                 )
 
             # Phase 35 Plan 03 (MRG-05, SC-1): record grounding rejections on a
@@ -1990,13 +2088,22 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # without writing _pending_posts. The gate also produces the canonical clean form
         # (D-03) used for the quota-defer persistence, the POST body, and the dedup write
         # on the happy path.
-        wk_clean, wk_ok, wk_reason = validate_carrier_format(merged_shipment.tracking_number)
+        # quick-260807-tpu Task 3: carrier context is the ORIGINAL Stage-1 job shipment's
+        # carrier (job.shipment.carrier_name), deliberately NOT merged_shipment.carrier_name —
+        # the merged carrier may have been LLM-promoted, and reading it here would let the
+        # model widen the very gate that is supposed to be checking its output. The original
+        # job shipment is still in scope at this point.
+        wk_clean, wk_ok, wk_reason = validate_carrier_format(
+            merged_shipment.tracking_number, carrier_name=job.shipment.carrier_name
+        )
         if not wk_ok:
             _LOGGER.debug(
                 "Stage-2 worker: carrier-format gate rejected tn='%s' (reason=%s)"
-                " — discarding job without POST (terminal)",
+                " subject=%r sender=%r — discarding job without POST (terminal)",
                 wk_clean,
                 wk_reason,
+                job.meta.get("subject", ""),
+                job.meta.get("from", ""),
             )
             self._diagnostics.record_carrier_format_rejection(
                 wk_clean, wk_reason or "no_carrier_match"

@@ -19,7 +19,8 @@ DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
 # wider net safe — non-shipment mail that slips through the query is rejected
 # before burning a parcelapp quota slot.  Gmail already excludes Spam/Trash,
 # so no -label:spam guard is needed.
-# User can override via Options flow at any time (CONF_GMAIL_QUERY).
+# User can override the stored per-entry value at any time (CONF_GMAIL_QUERY) —
+# see the quick-260806-i5r note below for how that value is consumed today.
 #
 # Residual FedEx risk (T-N3K-02): the FedEx carrier pattern in _TRACKING_PATTERNS
 # matches ANY bare 12-, 15-, or 20-digit number.  An email body containing an
@@ -27,6 +28,17 @@ DEFAULT_POLL_INTERVAL = 30  # 30 minutes (CONTEXT.md D-08)
 # pass the carrier-format gate and burn a parcelapp quota slot.  The wider query
 # above increases the email volume exposed to this risk.  Tightening the FedEx
 # pattern to a known-prefix anchor is deferred to a future phase.
+#
+# quick-260806-i5r (gmail-query-drops-emails follow-up, D-01): this string is no
+# longer sent to the Gmail List API at all — gmail_coordinator.py always passes
+# an empty base query there (Gmail's server-side OR-chain search silently
+# dropped real shipment emails). DEFAULT_GMAIL_QUERY is now consumed exclusively
+# by api/email_parser.py's build_keyword_matcher(), which compiles it into a
+# LOCAL post-fetch narrowing filter applied to each message's subject/body
+# before the expensive EmailParser.parse() call. The options-flow field that
+# used to expose this value for editing was removed (D-03); a stored per-entry
+# override still works and still feeds the local filter (D-04), it just has no
+# form to change it from.
 DEFAULT_GMAIL_QUERY = (
     "tracking OR shipped OR shipment OR delivery OR delivered OR parcel OR package OR order"
 )
@@ -38,6 +50,20 @@ CONF_RESCAN_WINDOW_DAYS = "rescan_window_days"  # int, days; Gmail-only
 DEFAULT_RESCAN_WINDOW_DAYS = 30
 MIN_RESCAN_WINDOW_DAYS = 7
 MAX_RESCAN_WINDOW_DAYS = 365
+
+# Gmail-side per-poll message volume cap (D-02, quick-260806-i5r): the
+# server-side keyword narrowing removed by gmail-query-drops-emails used to
+# bound how many messages a poll fetched in practice; now a broad
+# date-only after: window over a busy mailbox decides how many
+# messages.get() full-body fetches a single poll performs — unbounded on a
+# Raspberry-Pi-class host, and worse in debug mode which forces a 365-day
+# window (MAX_RESCAN_WINDOW_DAYS above). Mirrors api/imap_client.py's own
+# same-purpose MAX_MESSAGES_PER_POLL, deliberately named differently so the
+# two never get confused across modules — that constant stays untouched, in
+# its own module. Gmail messages.list() returns results newest-first
+# (opposite of IMAP's ascending UIDs), so the coordinator keeps the FRONT
+# slice, not the tail.
+MAX_GMAIL_MESSAGES_PER_POLL: int = 100
 
 # Phase 9: IMAP connection + multi-account constants
 CONF_CONNECTION_TYPE = "connection_type"  # str: "gmail" | "imap"
@@ -183,6 +209,24 @@ STAGE2_FAILING_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_failing"
 # permanently poisoning legitimate shipment emails.
 STAGE2_MSG_QUARANTINE_THRESHOLD: int = 5
 
+# stage2-quarantine-gap: the inline Stage-1-miss Gmail/IMAP fallback gatekeeper's
+# per-message quarantine (STAGE2_MSG_QUARANTINE_THRESHOLD above) only counts
+# deterministic OllamaSchemaError failures — OllamaTransientError (network errors,
+# 5xx, and per-request TimeoutError) is deliberately excluded there so a genuine
+# Ollama outage never permanently marks a not-yet-discovered shipment email seen
+# (findings #1/#594). But a message can also fail with OllamaTransientError on
+# EVERY poll indefinitely — not because Ollama is actually down, but because that
+# specific message's content deterministically overruns the per-request timeout
+# (observed live: an identical "Ollama network error" TimeoutError, 15+ times over
+# 2.5+ hours, for one email, while Ollama itself remained reachable and fast for
+# other requests). This second, much higher ceiling exists purely to bound THAT
+# case: set to 4x STAGE2_MSG_QUARANTINE_THRESHOLD so any realistic transient
+# outage (which by definition affects many different messages at once and
+# typically resolves within minutes) self-heals long before it is ever reached,
+# while a message that never once succeeds is eventually quarantined instead of
+# retrying forever.
+STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD: int = 20
+
 
 def stage2_failing_notification_id(entry_id: str) -> str:
     """Return the persistent-notification ID for Stage-2 consecutive-failure events.
@@ -287,6 +331,17 @@ DEFAULT_OLLAMA_TIMEOUT = 60  # seconds
 CONF_QUEUE_MAXLEN = "queue_maxlen"
 DEFAULT_QUEUE_MAXLEN = 32
 CONF_CUSTOM_FIELDS = "custom_fields"  # list[dict]: {"name": str, "description": str | None}
+
+# Quick task 260807-qw1 (spike 027): user-configurable EXCLUDE-biased
+# sender-domain filter. Stored value is list[str] — lowercased, exact-match
+# domains. An empty or absent list means exclude nothing (fail-open, D-03).
+# See api/email_parser.py build_sender_exclusion_matcher and
+# .claude/skills/spike-findings-shop2parcel/references/sender-filtering.md.
+CONF_SENDER_EXCLUSIONS = "sender_exclusions"  # list[str]
+# D-07: shared skip/outcome string — both gmail_coordinator.py and
+# imap_coordinator.py use it for last_poll_skip_reasons entries and
+# _emit_scan_event outcomes, so it lives here rather than in either module.
+SENDER_EXCLUDED_SKIP_REASON = "sender_excluded"
 # CONF_STAGE2_ENABLED: derived boolean; set in async_setup_entry from CONF_OLLAMA_URL presence.
 # Never exposed as a user-editable form field (D-05, T-17-02-03).
 CONF_STAGE2_ENABLED = "stage2_enabled"

@@ -19,7 +19,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .api.carrier_codes import normalize_carrier
-from .api.email_parser import EmailParser, ParseResult, ShipmentData, validate_carrier_format
+from .api.email_parser import (
+    EmailParser,
+    ParseResult,
+    ShipmentData,
+    build_sender_exclusion_matcher,
+    validate_carrier_format,
+)
 from .api.exceptions import (
     ImapAuthError,
     ImapTransientError,
@@ -43,12 +49,14 @@ from .const import (
     CONF_IMAP_USERNAME,
     CONF_IMAP_VERIFY_TLS,
     CONF_RESCAN_WINDOW_DAYS,
+    CONF_SENDER_EXCLUSIONS,
     DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_IMAP_SEARCH,
     DEFAULT_IMAP_VERIFY_TLS,
     DEFAULT_RESCAN_WINDOW_DAYS,
     MAX_RESCAN_WINDOW_DAYS,
     MAX_SUBMITTED_TRACKING_NUMBERS,
+    SENDER_EXCLUDED_SKIP_REASON,
     debug_mode_notification_id,
     normalize_tracking_number,
 )
@@ -259,6 +267,15 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         # per-account quota timestamp remains on this subclass.
         quota_blocked = self._hub.quota_is_exhausted
 
+        # quick-260807-qw1 (D-06): built once per poll, unconditionally — a
+        # small `set` build, not a regex compile, so no cache key is
+        # warranted (mirrors gmail_coordinator.py). Reads CONF_SENDER_
+        # EXCLUSIONS fresh each poll so a just-saved options change
+        # (OptionsFlowWithReload reload) takes effect on the very next poll.
+        sender_is_excluded = build_sender_exclusion_matcher(
+            entry.options.get(CONF_SENDER_EXCLUSIONS, [])
+        )
+
         for msg_info in raw_messages:
             uid_str = str(msg_info["uid"])
             # IN-04: qualify the per-message storage key with UIDVALIDITY when the
@@ -292,6 +309,36 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             # message — three email.message_from_bytes/MIME-walk passes that must
             # not run on the HA event loop.
             imap_meta, html = await self.hass.async_add_executor_job(_parse_imap_message, raw_bytes)
+
+            # quick-260807-qw1 (spike 027): sender-exclusion gate — earliest
+            # point the From header exists on this path. IMAP has no local
+            # keyword filter (it narrows server-side via CONF_IMAP_SEARCH),
+            # so "before the parser" is the whole requirement here. Fails
+            # open (D-03) when CONF_SENDER_EXCLUSIONS is empty or absent.
+            if sender_is_excluded(imap_meta.get("from", "")):
+                d.emails_scanned_total += 1
+                d.last_poll_emails_scanned += 1
+                d.last_poll_skip_reasons.append(
+                    {"message_id": uid_str, "reason": SENDER_EXCLUDED_SKIP_REASON, **imap_meta}
+                )
+                self._emit_scan_event(
+                    message_id=f"imap:{uid_str}",
+                    meta=imap_meta,
+                    outcome=SENDER_EXCLUDED_SKIP_REASON,
+                )
+                _LOGGER.debug(
+                    "IMAP UID %s sender-excluded — subject=%r sender=%r",
+                    uid_str,
+                    imap_meta.get("subject", ""),
+                    imap_meta.get("from", ""),
+                )
+                # D-05: reversible skip (mirrors gmail_coordinator.py) — the
+                # in-memory in-flight gate, never the persisted seen cache,
+                # so removing a domain from the list restores processing on
+                # the next poll.
+                self._mark_inflight(uid_key)
+                continue
+
             if not html:
                 d.emails_scanned_total += 1
                 d.last_poll_emails_scanned += 1
@@ -527,7 +574,12 @@ class ImapCoordinator(Shop2ParcelCoordinator):
                 # + continue (mirrors the existing IMAP quota-skip / dedup-skip branches).
                 # On pass: rebind shipment to the gate-clean canonical form (D-03) so the
                 # POST body and the success-path dedup write both use the separator-free string.
-                im_clean, im_ok, im_reason = validate_carrier_format(shipment.tracking_number)
+                # quick-260807-tpu Task 3: carrier context is the Stage-1 shipment's
+                # own carrier — this branch runs only when Stage-2 is disabled, so the
+                # value is pure Stage-1 output with no LLM involvement.
+                im_clean, im_ok, im_reason = validate_carrier_format(
+                    shipment.tracking_number, carrier_name=shipment.carrier_name
+                )
                 if not im_ok:
                     self._diagnostics.record_carrier_format_rejection(
                         im_clean, im_reason or "no_carrier_match"

@@ -277,7 +277,7 @@ async def test_dbg03_gmail_dedup_bypass(hass, mock_config_entry):
         ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
@@ -411,7 +411,7 @@ async def test_dbg04_gmail_no_post(hass, mock_config_entry):
         ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
@@ -521,7 +521,7 @@ async def test_dbg05_gmail_info_log(hass, mock_config_entry, caplog):
         ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
@@ -867,7 +867,7 @@ async def test_p1_quota_zero_writes_hub_store(hass, mock_config_entry):
         ) as mock_oauth,
         patch(
             "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
-            return_value="<html>body</html>",
+            return_value="<html>body shipped</html>",
         ),
         patch("custom_components.shop2parcel.gmail_coordinator.persistent_notification"),
     ):
