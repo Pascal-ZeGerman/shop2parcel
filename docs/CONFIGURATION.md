@@ -119,7 +119,7 @@ The second arm is a broad fallback for shipment emails not covered by the sender
 **Default IMAP search criteria (`DEFAULT_IMAP_SEARCH`):**
 
 ```
-OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "shipment"
+OR OR OR OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "delivered" SUBJECT "shipment" SUBJECT "order" SUBJECT "confirmed"
 ```
 
 ### Broad scan gate (`enable_broad_scan`)

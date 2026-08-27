@@ -163,7 +163,7 @@ After the integration is configured you can adjust settings via **Settings → D
 |--------|---------|-------|
 | Poll interval (minutes) | 30 | How often to check the inbox. Minimum 5 minutes. |
 | Gmail search query | `(from:no-reply@shopify.com OR from:mcinfo@ups.com OR from:inform@informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR from:TrackingUpdates@fedex.com) subject:(shipped OR delivered OR tracking OR package) OR -label:spam subject:(tracking OR shipped OR shipment OR delivery OR parcel)` | (Gmail only) Advanced: customise the Gmail filter for non-standard senders. |
-| IMAP search criteria | `OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "shipment"` | (IMAP only) Standard IMAP SEARCH criteria string for filtering messages. |
+| IMAP search criteria | `OR OR OR OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "delivered" SUBJECT "shipment" SUBJECT "order" SUBJECT "confirmed"` | (IMAP only) Standard IMAP SEARCH criteria string for filtering messages. |
 
 ---
 

@@ -80,8 +80,30 @@ CONF_IMAP_TLS = "imap_tls"  # str: "ssl" | "starttls" | "none"
 CONF_IMAP_VERIFY_TLS = "imap_verify_tls"  # bool
 DEFAULT_IMAP_VERIFY_TLS = True
 CONF_IMAP_SEARCH = "imap_search"  # str: IMAP SEARCH criteria
+# quick-260827-e6t: widened from 4 to 7 SUBJECT terms (shipped, tracking, delivery,
+# delivered, shipment, order, confirmed). Unlike DEFAULT_GMAIL_QUERY above — which,
+# since quick-260806-i5r, is only a LOCAL post-fetch narrowing filter — this string
+# is sent verbatim to the IMAP server as the SEARCH command's criteria: it is a
+# server-side narrowing filter that decides which messages Shop2Parcel ever sees.
+# Trigger: a real 17TRACK delivery-notification email for a COLAMY order carried the
+# subject "...has been delivered." — the past-participle "delivered" was not
+# covered by the present-tense-only "delivery" term, so the IMAP server never
+# returned that message and the shipment was silently skipped. "order" and
+# "confirmed" are separate user-requested widening for order-confirmation emails
+# that also carry tracking data.
+# RFC 3501 grammar note: IMAP's OR operator is BINARY and written in PREFIX
+# position, so N SUBJECT keys require exactly N-1 leading OR tokens in a
+# left-nested tree. Adding an 8th term means adding a 7th OR token — get this
+# wrong and every poll fails server-side with BAD rather than a local exception.
+# tests/test_const.py::test_default_imap_search_is_a_valid_prefix_or_tree pins
+# this grammar so a future addition cannot silently break it.
+# Widening the net here is safe because the carrier-format pre-POST gate
+# (validated per Phase 28 / quick-260807-tpu) still rejects non-shipment mail
+# before it can burn a parcelapp quota slot — the same backstop argument already
+# documented for DEFAULT_GMAIL_QUERY above.
 DEFAULT_IMAP_SEARCH = (
-    'OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "shipment"'
+    'OR OR OR OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" '
+    'SUBJECT "delivered" SUBJECT "shipment" SUBJECT "order" SUBJECT "confirmed"'
 )
 
 # Parcel API key (stored in config entry data, shared between config_flow and coordinator)

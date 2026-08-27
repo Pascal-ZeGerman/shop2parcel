@@ -261,7 +261,7 @@ async def test_device_grouping(hass, mock_config_entry):
     device_reg = dr.async_get(hass)
     devices = [
         d
-        for d in device_reg.devices.values()
+        for d in dr.async_entries_for_config_entry(device_reg, mock_config_entry.entry_id)
         if (DOMAIN, mock_config_entry.entry_id) in d.identifiers
     ]
     assert len(devices) == 1, f"Expected exactly one Shop2Parcel device, found {len(devices)}"
