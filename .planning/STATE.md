@@ -4,11 +4,10 @@ milestone: none
 milestone_name: none — v1.5 closed, v1.6 not yet defined
 current_phase: 36
 current_phase_name: DHL Carrier Support + USPS Digest Sender Extraction
-status: idle
+status: "Quick task 260827-e6t shipped — PR #49 (release/v1.6.0-rc3)"
 stopped_at: "Completed 36-02-PLAN.md; milestone v1.5 archived; manifest bumped to 1.6.0-rc1 (tag pushed, PR #45 merged)"
-last_updated: "2026-08-27T14:29:16.087Z"
+last_updated: "2026-08-27T16:24:22.384Z"
 last_activity: 2026-08-27
-last_activity_desc: quick task 260827-e6t widened DEFAULT_IMAP_SEARCH from 4 to 7 SUBJECT terms (added delivered/order/confirmed) with a correct RFC 3501 6-OR prefix tree, fixing a confirmed production miss on a real 17TRACK/COLAMY delivery-notification email
 progress:
   total_phases: 13
   completed_phases: 13
@@ -30,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-07-28)
 
 Phase: 36 — DHL Carrier Support + USPS Digest Sender Extraction (complete, verified passed 8/8)
 Plan: All plans complete
-Status: No active phase — awaiting next milestone definition
-Last activity: 2026-08-08 — quick task 260808-074 refreshed the spike-findings-shop2parcel skill docs (DHL/USPS-digest/sender-exclusion now shipped, not pending; 260807-tpu production-bug history recorded)
+Status: Quick task 260827-e6t shipped — PR #49 (release/v1.6.0-rc3)
+Last activity: 2026-08-27
 
 ```
 [████████████████████] 68/68 plans (100%)
@@ -198,6 +197,7 @@ None — Phase 33 (IMAP Parity) complete and verified (4/4 must-haves). Ready to
 | 260807-tpu | Made the shared carrier-format gate carrier-aware (`validate_carrier_format(value, carrier_name=None)`, additive OR-widening, DHL bare-digit shape reuses `_dhl_looks_like_tracking`, never a switch) and wired it into MRG-04 (`stage1.carrier_name`, option a — never the LLM's own carrier claim, anti-circularity proven by test) plus all four production pre-POST gates (worker: `job.shipment.carrier_name`; drain: pending shipment's own carrier, bounded-residual-risk documented inline; Gmail/IMAP inline: pure Stage-1 `shipment.carrier_name`). Investigation found DHL was dead-ended at every production POST path since Phase 36 shipped — this un-blocks DHL end-to-end. `_TRACKING_PATTERNS` unchanged (R5 hole stays closed). TDD RED→GREEN ×3 tasks; full suite 1238 passed, 2 pre-existing live-service skips; ruff/mypy clean. --validate: plan-checked + independently verified, 9/9 must-haves. | 2026-08-07 | eab0c9a, 1117867, 93fd9cc | Verified | [260807-tpu-make-mrg-04-s-carrier-format-gate-carrie](./quick/260807-tpu-make-mrg-04-s-carrier-format-gate-carrie/) |
 | 260808-074 | Refreshed the `spike-findings-shop2parcel` skill (docs-only, 3 tasks): `references/us-carrier-coverage.md` now states DHL shipped in Phase 36 (2026-07-24), replaces the open local-vs-shared-validator choice with the resolved 260807-tpu reversal history, and adds a What-to-Avoid entry recording the two-week production dead-end incident; `references/usps-digest-multi-shipment.md` and `references/sender-filtering.md` reframe `_extract_usps_shippers` (Phase 36) and the sender-exclusion matcher/UI/wiring (260807-qw1) as live production code; `SKILL.md` frontmatter description, a new sixth `<context>` paragraph ("Implementation round, NOT a spike round"), 4 `<requirements>` bullets, and 3 `<findings_index>` cells updated to shipped status — Processed Spikes list (26 entries) left byte-identical, no spike number invented for quick-task work. All plan verification gates passed; zero changes under `custom_components/`/`tests/`. | 2026-08-08 | 38cded0, e9f7879, e793ccb | Verified | [260808-074-refresh-spike-findings-shop2parcel-skill](./quick/260808-074-refresh-spike-findings-shop2parcel-skill/) |
 | 260827-e6t | Fixed a confirmed production gap: `DEFAULT_IMAP_SEARCH` widened from 4 to 7 SUBJECT terms (added `delivered`, `order`, `confirmed` to the existing `shipped`/`tracking`/`delivery`/`shipment`), closing the real 17TRACK/COLAMY delivery-notification miss where a subject ending "...has been delivered." was silently skipped because `delivered` (past participle) was not covered by `delivery`. Rebuilt as a correct RFC 3501 6-OR left-nested prefix tree (N-1 rule for 7 keys); hand-wrapped the 148-char literal as two 74-char implicitly concatenated single-quoted fragments to stay under ruff's 100-column limit. 3 new regression tests pin term coverage, exact OR/SUBJECT/total token counts, and a recursive-descent prefix-OR-tree parse-validity check. README.md and docs/CONFIGURATION.md synced to the same byte-identical string. TDD RED→GREEN; full suite 1242 passed, 2 pre-existing live-service skips; ruff clean (scoped to project files). | 2026-08-27 | 1e63ab7, c864d8a, 7dddcd8 | [260827-e6t-fix-imap-subject-search-query-gap-in-sho](./quick/260827-e6t-fix-imap-subject-search-query-gap-in-sho/) |
+| 260827-hjh | Unblocked CI on PR #49 (release/v1.6.0-rc3): replaced deprecated `device_reg.devices` mapping-style iteration with `dr.async_entries_for_config_entry()` at the two repo-wide call sites (`test_diagnostic_sensor.py::test_diagnostic_sensors_share_device`, `test_sensor.py::test_device_grouping`) — CI's pinned HA version raised a hard `RuntimeError` on the old access pattern. Plan's pre-verified assumption that the helper alone was semantically equivalent to the old identifier-filtered comprehension proved false: the v1.5 shared Hub registers a second device (`identifiers={(DOMAIN, "__shared__")}`) against the same config entry that owns its global sensors, so the helper alone returned 2 devices. Fixed (Rule 1) by retaining a residual `identifiers` filter after the new helper call at both sites, preserving original `len(devices) == 1` assertion semantics. Test-only; zero production files touched. Full suite 1242 passed, 2 pre-existing live-service skips (unchanged baseline); ruff clean. | 2026-08-27 | 0aa917b | [260827-hjh-fix-deprecated-device-registry-devices-m](./quick/260827-hjh-fix-deprecated-device-registry-devices-m/) |
 
 ## Performance Metrics
 
@@ -349,9 +349,9 @@ Note: UAT/verification gaps continue the hardware-dependent live HA testing defe
 
 **Resume file:** None
 
-Last session: 2026-08-27T14:27:59.679Z
-Stopped at: Completed quick task 260827-e6t — widened `DEFAULT_IMAP_SEARCH` from 4 to 7 SUBJECT terms (added `delivered`, `order`, `confirmed`), rebuilt as a correct RFC 3501 6-OR left-nested prefix tree, closing a confirmed production gap where a real 17TRACK/COLAMY delivery-notification email ("...has been delivered.") was silently skipped because `delivered` wasn't covered by `delivery`. README.md and docs/CONFIGURATION.md synced. TDD RED→GREEN; full suite 1242 passed; ruff clean.
-Next action: `/gsd-new-milestone` to define v1.6 scope, or continue with ad-hoc spike-driven phases (Phase 37+) if no new milestone is started yet. Outstanding: redeploy 260806-i5r, 260807-qw1, and 260807-tpu to the live HA instance; close .planning/debug/gmail-query-drops-emails.md once verified live. Optional follow-up: symmetric subject/sender enrichment for the sibling rejection log sites in gmail_coordinator.py:807 and imap_coordinator.py:532.
+Last session: 2026-08-27T16:45:33Z
+Stopped at: Completed quick task 260827-hjh — fixed deprecated `device_reg.devices` mapping access in 2 tests (`test_diagnostic_sensor.py::test_diagnostic_sensors_share_device`, `test_sensor.py::test_device_grouping`), unblocking CI on PR #49 (release/v1.6.0-rc3). Full suite 1242 passed, 2 pre-existing live-service skips; ruff clean.
+Next action: Confirm CI green on PR #49 (read check output text, not `gh pr checks --watch` exit code), then merge. Afterward: `/gsd-new-milestone` to define v1.6 scope, or continue with ad-hoc spike-driven phases (Phase 37+) if no new milestone is started yet. Outstanding: redeploy 260806-i5r, 260807-qw1, and 260807-tpu to the live HA instance; close .planning/debug/gmail-query-drops-emails.md once verified live. Optional follow-up: symmetric subject/sender enrichment for the sibling rejection log sites in gmail_coordinator.py:807 and imap_coordinator.py:532.
 
 ## Operator Next Steps
 
