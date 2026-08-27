@@ -282,3 +282,92 @@ def test_normalize_matches_validate_carrier_format_clean_form():
 def test_normalize_handles_none_like_empty():
     """WR-01: empty input still yields an empty string (no crash)."""
     assert normalize_tracking_number("") == ""
+
+
+# -------- quick-260827-e6t: DEFAULT_IMAP_SEARCH 7-term widening + OR-tree grammar ------
+
+
+def test_default_imap_search_contains_all_7_subject_terms():
+    """IMAPQ-01/IMAPQ-02: all 7 SUBJECT terms present in full key form.
+
+    Each term is checked independently (as a full 'SUBJECT "term"' key, not a bare
+    word) so that reordering the terms does not break the test, and so that
+    'delivery' alone cannot accidentally satisfy the 'delivered' assertion.
+    'delivered' is the term whose absence caused the real 17TRACK/COLAMY
+    delivery-notification email ("...has been delivered.") to be silently
+    skipped by the default IMAP search criteria.
+    """
+    from custom_components.shop2parcel.const import DEFAULT_IMAP_SEARCH
+
+    required_terms = [
+        "shipped",
+        "tracking",
+        "delivery",
+        "delivered",
+        "shipment",
+        "order",
+        "confirmed",
+    ]
+    for term in required_terms:
+        expected_key = f'SUBJECT "{term}"'
+        assert expected_key in DEFAULT_IMAP_SEARCH, (
+            f"Term '{term}' missing from DEFAULT_IMAP_SEARCH: {DEFAULT_IMAP_SEARCH!r}"
+        )
+
+
+def test_default_imap_search_or_count_is_term_count_minus_one():
+    """IMAPQ-03: N SUBJECT keys need exactly N-1 leading OR tokens (RFC 3501 binary
+    prefix operator, left-nested tree).
+
+    No search term is itself the two-letter operator word 'OR', so an
+    exact-token-equality count is unambiguous. This test also doubles as the
+    guard against a lost separator space when the constant is hand-wrapped as
+    two implicitly concatenated string fragments — a dropped space would merge
+    two tokens and change the total token count.
+    """
+    from custom_components.shop2parcel.const import DEFAULT_IMAP_SEARCH
+
+    tokens = DEFAULT_IMAP_SEARCH.split()
+    subject_count = sum(1 for t in tokens if t == "SUBJECT")
+    or_count = sum(1 for t in tokens if t == "OR")
+
+    assert subject_count == 7, f"expected 7 SUBJECT tokens, got {subject_count}: {tokens!r}"
+    assert or_count == 6, f"expected 6 OR tokens (N-1 rule), got {or_count}: {tokens!r}"
+    assert len(tokens) == 20, f"expected 20 total tokens, got {len(tokens)}: {tokens!r}"
+
+
+def test_default_imap_search_is_a_valid_prefix_or_tree():
+    """IMAPQ-03: the token stream parses to completion under RFC 3501 prefix-OR
+    semantics — no leftover tokens, no underflow.
+
+    A tiny recursive-descent validator proves the OR-nesting count is provably
+    correct rather than merely arithmetically plausible. A malformed tree would
+    surface as a server-side BAD response on every IMAP poll rather than as a
+    local exception here — which is exactly why it is worth pinning as a test.
+    """
+    from custom_components.shop2parcel.const import DEFAULT_IMAP_SEARCH
+
+    tokens = DEFAULT_IMAP_SEARCH.split()
+    index = [0]
+
+    def parse() -> bool:
+        """Consume one search-key expression starting at index[0]. Returns False
+        on underflow (ran past the end of the token list)."""
+        if index[0] >= len(tokens):
+            return False
+        token = tokens[index[0]]
+        index[0] += 1
+        if token == "OR":
+            # Binary operator: recursively parse two operand keys.
+            return parse() and parse()
+        # Otherwise it must be a SUBJECT key, consuming one quoted value.
+        if index[0] >= len(tokens):
+            return False
+        index[0] += 1  # consume the quoted value token
+        return True
+
+    underflowed = not parse()
+    assert not underflowed, "prefix-OR-tree parse underflowed (ran out of tokens)"
+    assert index[0] == len(tokens), (
+        f"leftover tokens after parse: consumed {index[0]} of {len(tokens)}: {tokens!r}"
+    )
