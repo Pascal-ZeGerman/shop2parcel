@@ -217,23 +217,25 @@ def load_store(
 
 
 def gmail_seed_message_ids(persisted: Mapping[str, dict[str, Any]]) -> list[str]:
-    """Return bare Gmail message ids from a persisted_shipments dict."""
-    ids: list[str] = []
-    for entry in persisted.values():
-        mid = entry.get("message_id")
-        if isinstance(mid, str) and not mid.startswith("imap:"):
-            ids.append(mid)
-    return ids
+    """Return the bare Gmail message ids from a Gmail account's persisted_shipments dict.
+
+    No 'imap:' prefix ever appears in real persisted data (coordinator.py:2483 stores
+    ShipmentData.message_id verbatim, which is a bare Gmail id or bare IMAP uid — the
+    'imap:' prefix used elsewhere in imap_coordinator.py is for _emit_scan_event's event-
+    bus payload only, a separate concern from the storage schema). The caller already
+    knows which account this is (account.kind == "gmail") before calling this, so no
+    prefix filtering is needed or correct here.
+    """
+    return [mid for entry in persisted.values() if isinstance(mid := entry.get("message_id"), str)]
 
 
 def imap_seed_uids(persisted: Mapping[str, dict[str, Any]]) -> list[str]:
-    """Return bare IMAP uids (stripped of the 'imap:' prefix) from persisted_shipments."""
-    uids: list[str] = []
-    for entry in persisted.values():
-        mid = entry.get("message_id")
-        if isinstance(mid, str) and mid.startswith("imap:"):
-            uids.append(mid.removeprefix("imap:"))
-    return uids
+    """Return the bare IMAP uids from an IMAP account's persisted_shipments dict.
+
+    See gmail_seed_message_ids' docstring — the 'imap:' prefix does not exist in real
+    persisted data; the caller already knows this is an IMAP account before calling.
+    """
+    return [mid for entry in persisted.values() if isinstance(mid := entry.get("message_id"), str)]
 
 
 def extract_domain(from_header: str) -> str | None:

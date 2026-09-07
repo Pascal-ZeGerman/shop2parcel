@@ -259,12 +259,18 @@ def test_load_store_type_guards(tmp_path) -> None:
 
 
 def test_gmail_and_imap_seed_extraction() -> None:
-    persisted = {
-        "abc123": {"message_id": "abc123"},
-        "imap:1001": {"message_id": "imap:1001"},
-    }
-    assert sl.gmail_seed_message_ids(persisted) == ["abc123"]
-    assert sl.imap_seed_uids(persisted) == ["1001"]
+    # Real coordinator.py:2483 stores ShipmentData.message_id verbatim — bare Gmail
+    # ids and bare IMAP uids, never an "imap:" prefix (that prefix is only used in
+    # imap_coordinator.py's _emit_scan_event payload, a separate event-bus concern).
+    # Each account's own store contains only its own kind, disambiguated by the
+    # caller (account.kind) before either function is called — no prefix filtering
+    # needed or correct here. Regression for the real bug this caught: both
+    # functions used to filter on a startswith("imap:") check that never matched
+    # real data, silently returning [] for every IMAP account.
+    gmail_persisted = {"abc123": {"message_id": "abc123"}}
+    imap_persisted = {"1:1001": {"message_id": "1001"}}
+    assert sl.gmail_seed_message_ids(gmail_persisted) == ["abc123"]
+    assert sl.imap_seed_uids(imap_persisted) == ["1001"]
 
 
 def main() -> int:
