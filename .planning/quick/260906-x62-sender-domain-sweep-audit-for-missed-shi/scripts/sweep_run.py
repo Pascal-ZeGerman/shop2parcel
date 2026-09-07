@@ -324,6 +324,37 @@ def _account_display_title(account: sl.Account) -> str:
     return account.title or account.entry_id
 
 
+def _require_imap_fields(account: sl.Account) -> tuple[str, int, str, str]:
+    """Narrow an IMAP account's Optional fields, failing loudly on a malformed entry.
+
+    Account.imap_* fields are typed Optional because the dataclass loads them via
+    dict.get() from a JSON blob shared with Gmail accounts (which never have them).
+    A well-formed IMAP config entry always has all four populated — this just turns
+    a missing field into a clear config-entry error instead of a cryptic failure
+    deep inside imaplib.
+    """
+    missing = [
+        name
+        for name, value in (
+            ("imap_host", account.imap_host),
+            ("imap_port", account.imap_port),
+            ("imap_username", account.imap_username),
+            ("imap_password", account.imap_password),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            f"account {account.entry_id} is missing required IMAP field(s) "
+            f"{missing} in core.config_entries — malformed config entry, cannot connect"
+        )
+    assert account.imap_host is not None
+    assert account.imap_port is not None
+    assert account.imap_username is not None
+    assert account.imap_password is not None
+    return account.imap_host, account.imap_port, account.imap_username, account.imap_password
+
+
 def run_seed_phase(
     accounts: list[sl.Account],
     args: argparse.Namespace,
@@ -360,13 +391,14 @@ def run_seed_phase(
             uids = sl.imap_seed_uids(persisted)
             if not uids:
                 continue
+            host, port, username, password = _require_imap_fields(account)
             conn = None
             try:
                 conn, _uidvalidity = imap_connect(
-                    account.imap_host,
-                    account.imap_port,
-                    account.imap_username,
-                    account.imap_password,
+                    host,
+                    port,
+                    username,
+                    password,
                     account.imap_tls or "ssl",
                     account.imap_verify_tls,
                 )
@@ -435,13 +467,14 @@ def run_sweep_phase(
                         )
         else:
             since_date = _imap_since_date(args.months)
+            host, port, username, password = _require_imap_fields(account)
             conn = None
             try:
                 conn, uidvalidity = imap_connect(
-                    account.imap_host,
-                    account.imap_port,
-                    account.imap_username,
-                    account.imap_password,
+                    host,
+                    port,
+                    username,
+                    password,
                     account.imap_tls or "ssl",
                     account.imap_verify_tls,
                 )
