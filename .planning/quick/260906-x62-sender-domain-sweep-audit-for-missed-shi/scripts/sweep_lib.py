@@ -238,6 +238,28 @@ def imap_seed_uids(persisted: Mapping[str, dict[str, Any]]) -> list[str]:
     return [mid for entry in persisted.values() if isinstance(mid := entry.get("message_id"), str)]
 
 
+def parse_uid_from_fetch_marker(marker: str) -> str | None:
+    """Extract the true UID from a `UID FETCH` response marker string.
+
+    imaplib's marker for a `UID FETCH` response has the form
+    "<seqnum> (UID <uid> BODY[...] {<size>}" — the sequence number always
+    comes FIRST. A naive "grab the first digit token" parse silently returns
+    the sequence number instead of the requested UID (a real bug caught by
+    comparing fetched results against a live mailbox: every result came back
+    keyed by a small ~17000-range sequence number instead of the true
+    ~1646143xxx UID that was actually requested). This explicitly finds the
+    token that follows the literal "UID" keyword instead.
+
+    Returns None if no "UID <digits>" pair is found (caller falls back to
+    positional pairing against the requested batch order).
+    """
+    tokens = marker.replace("(", " ").replace(")", " ").split()
+    for pos, token in enumerate(tokens):
+        if token.upper() == "UID" and pos + 1 < len(tokens) and tokens[pos + 1].isdigit():
+            return tokens[pos + 1]
+    return None
+
+
 def extract_domain(from_header: str) -> str | None:
     """Extract the lowercased sending domain from a From header value.
 
@@ -389,11 +411,13 @@ def render_report(
             lines.append("No candidates.")
             lines.append("")
             continue
-        lines.append("| Sender | Subject | Date | ID |")
-        lines.append("|--------|---------|------|-----|")
+        lines.append("| # | Sender | Subject | Date | ID |")
+        lines.append("|---|--------|---------|------|-----|")
         for cand in sorted(candidates, key=lambda c: c.date, reverse=True):
-            lines.append(f"| {cand.sender} | {cand.subject} | {cand.date} | {cand.ident} |")
             total += 1
+            lines.append(
+                f"| {total} | {cand.sender} | {cand.subject} | {cand.date} | {cand.ident} |"
+            )
         lines.append("")
 
     lines.append(f"**Total candidates: {total}**")

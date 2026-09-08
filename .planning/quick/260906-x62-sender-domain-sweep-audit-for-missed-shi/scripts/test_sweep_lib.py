@@ -192,6 +192,11 @@ def test_render_report_grouping_and_header() -> None:
     idx1 = report.index("Subj 1")
     idx2 = report.index("Subj 2")
     assert idx2 < idx1  # Subj 2 (2026-02-01) sorts before Subj 1 (2026-01-01)
+    # Running numbers: a continuous "#" column so entries can be referenced by
+    # a single number regardless of which account section they fall in.
+    assert "| # | Sender | Subject | Date | ID |" in report
+    assert "| 1 | s2@x.com | Subj 2 | 2026-02-01 | id2 |" in report
+    assert "| 2 | s1@x.com | Subj 1 | 2026-01-01 | id1 |" in report
 
 
 def test_resolve_google_client(tmp_path) -> None:
@@ -273,6 +278,24 @@ def test_gmail_and_imap_seed_extraction() -> None:
     assert sl.imap_seed_uids(imap_persisted) == ["1001"]
 
 
+def test_parse_uid_from_fetch_marker() -> None:
+    # Regression for a real bug caught against a live mailbox: naively
+    # grabbing "the first digit token" from a UID FETCH marker returns the
+    # sequence number (which always comes first), not the requested UID.
+    # Every fetched result was silently mislabeled with a small ~17000-range
+    # sequence number instead of the true ~1646143xxx UID — corrupting the
+    # candidate-diff logic downstream, not just cosmetic.
+    marker = "17417 (UID 1646143839 BODY[HEADER.FIELDS (FROM SUBJECT DATE)] {123}"
+    assert sl.parse_uid_from_fetch_marker(marker) == "1646143839"
+
+    # Simpler/older server response shape, no BODY[...] fields spelled out.
+    marker2 = "42 (UID 1001)"
+    assert sl.parse_uid_from_fetch_marker(marker2) == "1001"
+
+    # No "UID" token present at all — caller falls back to positional pairing.
+    assert sl.parse_uid_from_fetch_marker("garbage response with no uid") is None
+
+
 def main() -> int:
     tests = [
         test_extract_domain,
@@ -284,6 +307,7 @@ def main() -> int:
         test_render_report_secret_leak_regression,
         test_render_report_grouping_and_header,
         test_gmail_and_imap_seed_extraction,
+        test_parse_uid_from_fetch_marker,
     ]
     import tempfile
 

@@ -286,10 +286,11 @@ def imap_fetch_headers(conn: imaplib.IMAP4, uids: list[str]) -> dict[str, dict[s
         if typ != "OK" or not msg_data:
             continue
         # imaplib returns a flat list where each message contributes a
-        # (marker, literal) tuple; the uid isn't reliably embedded in every
-        # server's response line, so we pair sequentially against the
-        # requested batch order as a best-effort fallback when a per-item
-        # UID cannot be parsed.
+        # (marker, literal) tuple. See sweep_lib.parse_uid_from_fetch_marker's
+        # docstring for why the true UID must be parsed explicitly rather than
+        # grabbed as "the first digit token" — sequential pairing against the
+        # requested batch order is the fallback only when no server-echoed UID
+        # can be found at all.
         idx = 0
         for item in msg_data:
             if not isinstance(item, tuple):
@@ -304,11 +305,7 @@ def imap_fetch_headers(conn: imaplib.IMAP4, uids: list[str]) -> dict[str, dict[s
             marker = (
                 item[0].decode(errors="replace") if isinstance(item[0], bytes) else str(item[0])
             )
-            uid_from_marker = None
-            for token in marker.replace("(", " ").split():
-                if token.isdigit() and idx < len(batch):
-                    uid_from_marker = token
-                    break
+            uid_from_marker = sl.parse_uid_from_fetch_marker(marker)
             uid = uid_from_marker or (batch[idx] if idx < len(batch) else str(idx))
             results[uid] = {"From": from_hdr, "Subject": subject_hdr, "Date": date_hdr}
             idx += 1
