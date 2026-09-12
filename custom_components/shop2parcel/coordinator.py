@@ -81,7 +81,7 @@ from .const import (
     normalize_tracking_number,
     stage2_cap_notification_id,
 )
-from .correlation import is_contaminated
+from .correlation import is_contaminated, sanitize_search_terms
 from .extractors.ollama_extractor import OllamaExtractor, preprocess_html
 from .merge import merge_llm_authoritative_with_grounding, validate_grounding
 
@@ -3080,3 +3080,118 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         order_number = target.order_number or (merged.order_name or None)
 
         return _RenameProposal(description=description, order_number=order_number)
+
+    async def async_sweep_stuck_shipments(self, now: datetime) -> None:
+        """Compose the full rename sweep: select candidates, search this account's
+        mailbox for correlated matches, diff against already-seen messages, decide
+        a rename per candidate, gate the POST behind the shared-budget reserve, and
+        persist the result (T-37-01, D-06, D-08, T-37-24).
+
+        Mirrors async_cleanup_delivered's callback signature exactly, including the
+        'now' parameter required by async_track_time_interval's callback contract
+        even though it is unused here.
+
+        Exceptions are caught + logged + return early — DO NOT raise
+        ConfigEntryAuthFailed or UpdateFailed from here: those are only meaningful
+        inside _async_update_data. Per-candidate exceptions are additionally
+        isolated (T-37-24): one candidate's failure must never abort the rest of
+        the cycle.
+        """
+        if not self.data:
+            return  # Nothing to sweep — skip the search/rename work entirely
+
+        if self.config_entry is None:
+            _LOGGER.error("async_sweep_stuck_shipments called with no config_entry — skipping")
+            return
+
+        # The feature gate (a configured account_token) and the per-cycle cap both
+        # live inside this call — an empty result means either is not satisfied.
+        candidates = self._select_sweep_candidates()
+        if not candidates:
+            return
+
+        renamed_any = False
+        new_data = dict(self.data)
+        candidates_skipped_no_new_mail = 0
+        renames_applied = 0
+
+        for storage_key, shipment in candidates:
+            try:
+                # a. Build the correlation search terms: the tracking number always,
+                # plus the order number when the shipment already has one.
+                raw_terms = [shipment.tracking_number, shipment.order_number]
+                terms = sanitize_search_terms(raw_terms)
+                if not terms:
+                    continue
+
+                # b. Search THIS account's own mailbox for correlated matches (D-05).
+                matches = await self.async_search_correlated_emails(terms)
+
+                # c. Diff against already-considered message ids for this shipment —
+                # the cheap exit implementing "only re-attempt when a genuinely new
+                # correlated email has appeared" (T-37-24). An empty diff means skip
+                # entirely: no parse, no LLM call, no quota interaction.
+                found_ids = [message_id for message_id, _html in matches]
+                new_ids = self._new_correlated_message_ids(storage_key, found_ids)
+                if not new_ids:
+                    candidates_skipped_no_new_mail += 1
+                    continue
+
+                html_by_id = dict(matches)
+                try:
+                    # d. Evaluate new messages in order; stop at the first proposal —
+                    # one rename per shipment per cycle.
+                    for message_id in new_ids:
+                        proposal = await self._async_attempt_rename(
+                            shipment, message_id, html_by_id[message_id]
+                        )
+                        if proposal is None:
+                            continue
+                        posted = await self._async_post_rename(shipment, proposal.description)
+                        if posted:
+                            new_data[storage_key] = dc_replace(
+                                shipment,
+                                order_summary=proposal.description,
+                                order_number=proposal.order_number,
+                            )
+                            renamed_any = True
+                            renames_applied += 1
+                        break
+                finally:
+                    # e. Every considered message id is marked seen regardless of
+                    # outcome — contaminated, ungrounded, or failed-to-POST included
+                    # (T-37-24).
+                    self._mark_sweep_messages_seen(storage_key, new_ids)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.error(
+                    "async_sweep_stuck_shipments: unexpected error processing candidate %s: %s",
+                    storage_key,
+                    err,
+                    exc_info=True,
+                )
+                continue
+
+        _LOGGER.debug(
+            "Sweep cycle: %d candidate(s) selected, %d skipped for no new mail, "
+            "%d rename(s) applied",
+            len(candidates),
+            candidates_skipped_no_new_mail,
+            renames_applied,
+        )
+
+        if not renamed_any:
+            return  # Nothing renamed this cycle — no publish, no save (even if
+            # sweep_seen_message_ids changed; it rides along in the next save).
+
+        # D-06: snapshot pattern — publish the new data via the coordinator's data
+        # update, mirroring async_cleanup_delivered's async_set_updated_data usage.
+        self.async_set_updated_data(new_data)
+
+        # DBG-03: zero store writes in debug mode. sweep_seen_message_ids rides
+        # along in the same snapshot as persisted_shipments — a cycle that renamed
+        # nothing but marked messages seen has its marks persisted on the NEXT save
+        # rather than triggering an extra write here.
+        debug_mode = self.config_entry.options.get(CONF_DEBUG_MODE, False)
+        if not debug_mode:
+            self._pending_shipments = new_data
+            await self._async_save_store()
