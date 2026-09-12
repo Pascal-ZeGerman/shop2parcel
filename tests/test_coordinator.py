@@ -15,6 +15,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.shop2parcel.api.carrier_codes import normalize_carrier
 from custom_components.shop2parcel.api.email_parser import ParseResult, ShipmentData
 from custom_components.shop2parcel.api.exceptions import (
     GmailAuthError,
@@ -23,6 +24,7 @@ from custom_components.shop2parcel.api.exceptions import (
     ImapTransientError,
     ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
+    ParcelAppEditFailedError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
     ParcelAppTransientError,
@@ -38,6 +40,9 @@ from custom_components.shop2parcel.const import (
     DEFAULT_RESCAN_WINDOW_DAYS,
     DOMAIN,
     MAX_SWEEP_SHIPMENTS_PER_CYCLE,
+    PARCELAPP_DAILY_LIMIT,
+    RENAME_NOTIFY_THRESHOLD,
+    RENAME_QUOTA_RESERVE,
 )
 from custom_components.shop2parcel.coordinator import (
     PollStats,
@@ -49,7 +54,7 @@ from custom_components.shop2parcel.coordinator import (
 )
 from custom_components.shop2parcel.extractors.types import Stage2Result
 from custom_components.shop2parcel.gmail_coordinator import GmailCoordinator
-from custom_components.shop2parcel.hub import _next_midnight_utc
+from custom_components.shop2parcel.hub import _next_midnight_utc, _today_utc_str
 from custom_components.shop2parcel.imap_coordinator import ImapCoordinator
 
 _CORRELATION_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "correlation"
@@ -7313,3 +7318,503 @@ async def test_attempt_rename_naming_grounding_rejection_increments_existing_cou
         )
     assert result is None
     assert coord._diagnostics.grounding_rejected_total == 1
+
+
+# -------- Phase 37 / 37-10 Task 1: quota-reserve gate, rename POST, failure counters -----
+
+
+def _target_shipment(
+    tracking_number: str = "1Z999AA10123456784", carrier_name: str = "UPS"
+) -> ShipmentData:
+    """A ShipmentData for _async_post_rename's shipment parameter."""
+    return ShipmentData(
+        tracking_number=tracking_number,
+        carrier_name=carrier_name,
+        order_name="",
+        message_id="target-msg",
+        email_date=1700000000,
+    )
+
+
+def _patch_parcel_client(*, edit_side_effect=None):
+    """Patch coordinator.ParcelAppClient so async_edit_delivery is a controlled
+    AsyncMock, isolating _async_post_rename tests from real HTTP."""
+    mock_client_cls = MagicMock()
+    mock_client_cls.return_value.async_edit_delivery = AsyncMock(side_effect=edit_side_effect)
+    return patch("custom_components.shop2parcel.coordinator.ParcelAppClient", mock_client_cls)
+
+
+async def test_rename_reserve_at_boundary_skips_try_consume(hass, mock_config_entry):
+    """used_today at exactly LIMIT - RESERVE -> no POST attempted, try_consume never
+    called (T-37-06)."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub._used_today = PARCELAPP_DAILY_LIMIT - RENAME_QUOTA_RESERVE
+    coord._hub.used_today_date = _today_utc_str()
+    coord._hub.try_consume = MagicMock(wraps=coord._hub.try_consume)
+    with _patch_parcel_client() as mock_client_cls:
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is False
+    coord._hub.try_consume.assert_not_called()
+    mock_client_cls.return_value.async_edit_delivery.assert_not_awaited()
+
+
+async def test_rename_reserve_one_below_boundary_calls_try_consume(hass, mock_config_entry):
+    """used_today one below the boundary -> try_consume is called and the POST proceeds."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub._used_today = PARCELAPP_DAILY_LIMIT - RENAME_QUOTA_RESERVE - 1
+    coord._hub.used_today_date = _today_utc_str()
+    coord._hub.try_consume = MagicMock(wraps=coord._hub.try_consume)
+    with _patch_parcel_client() as mock_client_cls:
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is True
+    coord._hub.try_consume.assert_called_once()
+    mock_client_cls.return_value.async_edit_delivery.assert_awaited_once()
+
+
+async def test_rename_reserve_try_consume_false_skips_post(hass, mock_config_entry):
+    """try_consume() returning False (ceiling reached between the check and now) ->
+    no POST attempted."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub.try_consume = MagicMock(return_value=False)
+    with _patch_parcel_client() as mock_client_cls:
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is False
+    mock_client_cls.return_value.async_edit_delivery.assert_not_awaited()
+
+
+async def test_rename_reserve_transient_error_refunds_once(hass, mock_config_entry):
+    """A ParcelAppTransientError triggers refund_consume exactly once (T-37-32)."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub.refund_consume = MagicMock(wraps=coord._hub.refund_consume)
+    with _patch_parcel_client(edit_side_effect=ParcelAppTransientError("boom")):
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is False
+    coord._hub.refund_consume.assert_called_once()
+
+
+async def test_rename_reserve_edit_failed_does_not_refund(hass, mock_config_entry):
+    """A ParcelAppEditFailedError does NOT trigger refund_consume — the slot was
+    genuinely spent on a request the server processed and rejected (T-37-32)."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub.refund_consume = MagicMock(wraps=coord._hub.refund_consume)
+    with _patch_parcel_client(edit_side_effect=ParcelAppEditFailedError("ERROR")):
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is False
+    coord._hub.refund_consume.assert_not_called()
+
+
+async def test_rename_notify_threshold_calls_hub_failure_once(hass, mock_config_entry):
+    """RENAME_NOTIFY_THRESHOLD consecutive edit-failed rejections -> hub.record_rename_failure
+    is called exactly once with this entry id (D-04)."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub.record_rename_failure = MagicMock()
+    with _patch_parcel_client(edit_side_effect=ParcelAppEditFailedError("ERROR")):
+        for _ in range(RENAME_NOTIFY_THRESHOLD):
+            await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    coord._hub.record_rename_failure.assert_called_once_with(mock_config_entry.entry_id)
+
+
+async def test_rename_notify_success_resets_counter_and_calls_hub_success(hass, mock_config_entry):
+    """A success after prior failures resets the counter and calls
+    hub.record_rename_success."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub.record_rename_success = MagicMock()
+    with _patch_parcel_client(edit_side_effect=ParcelAppEditFailedError("ERROR")):
+        await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert coord._rename_consecutive_failures == 1
+    with _patch_parcel_client():
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is True
+    assert coord._rename_consecutive_failures == 0
+    coord._hub.record_rename_success.assert_called_once_with(mock_config_entry.entry_id)
+
+
+async def test_rename_notify_unexpected_exception_also_records_failure(hass, mock_config_entry):
+    """A non-taxonomy exception from the POST is caught, logged, and still records a
+    rename failure — it never propagates out of _async_post_rename."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub.record_rename_failure = MagicMock()
+    with _patch_parcel_client(edit_side_effect=RuntimeError("boom")):
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is False
+    assert coord._rename_consecutive_failures == 1
+
+
+async def test_rename_post_debug_mode_no_post_no_quota(hass, mock_config_entry):
+    """Debug mode: no POST is attempted, no quota is consumed, returns False (LD-02/DBG-03)."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    hass.config_entries.async_update_entry(mock_config_entry, options={CONF_DEBUG_MODE: True})
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub.try_consume = MagicMock(wraps=coord._hub.try_consume)
+    with _patch_parcel_client() as mock_client_cls:
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is False
+    coord._hub.try_consume.assert_not_called()
+    mock_client_cls.return_value.async_edit_delivery.assert_not_awaited()
+
+
+async def test_rename_post_carrier_code_normalized(hass, mock_config_entry):
+    """The carrier code sent is the normalized form of the shipment's raw carrier
+    name, not the raw value."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    with _patch_parcel_client() as mock_client_cls:
+        await coord._async_post_rename(_target_shipment(carrier_name="UPS"), "Shop - Widget")
+    call_kwargs = mock_client_cls.return_value.async_edit_delivery.call_args.kwargs
+    assert call_kwargs["carrier_code"] == normalize_carrier("UPS")
+    assert call_kwargs["carrier_code"] != "UPS"
+
+
+async def test_rename_post_token_read_from_config_entry_data_at_call_time(hass, mock_config_entry):
+    """The account token passed to the client is read from config_entry.data at call
+    time."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry, token="tok-abc")
+    coord = GmailCoordinator(hass, mock_config_entry)
+    with _patch_parcel_client() as mock_client_cls:
+        await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    call_kwargs = mock_client_cls.return_value.async_edit_delivery.call_args.kwargs
+    assert call_kwargs["account_token"] == "tok-abc"
+
+
+async def test_rename_post_caplog_never_contains_account_token(hass, mock_config_entry, caplog):
+    """No log record emitted by this path contains the account token value, on any
+    outcome (success, transient failure, edit-failed rejection) — T-37-03."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry, token="super-secret-token-value")
+    coord = GmailCoordinator(hass, mock_config_entry)
+    with caplog.at_level(logging.DEBUG):
+        with _patch_parcel_client(edit_side_effect=ParcelAppEditFailedError("ERROR")):
+            await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+        with _patch_parcel_client(edit_side_effect=ParcelAppTransientError("boom")):
+            await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+        with _patch_parcel_client():
+            await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert not any("super-secret-token-value" in r.getMessage() for r in caplog.records)
+
+
+# -------- Phase 37 / 37-10 Task 2: async_sweep_stuck_shipments composition -------
+
+
+def _mock_sweep_coord(
+    hass, mock_config_entry, *, data: dict[str, ShipmentData] | None = None
+) -> GmailCoordinator:
+    """A GmailCoordinator with the sweep's three collaborators pre-empted as
+    AsyncMocks — each is already unit-tested in its own right (37-07/37-08's
+    async_search_correlated_emails, 37-09's _async_attempt_rename, this plan's own
+    Task 1 _async_post_rename) — so these tests exercise ONLY
+    async_sweep_stuck_shipments' own orchestration, per this task's own framing
+    ("a pure, cheap-to-test decision function" composed here, not re-tested here).
+    """
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_search_correlated_emails = AsyncMock(return_value=[])
+    coord._async_attempt_rename = AsyncMock(return_value=None)
+    coord._async_post_rename = AsyncMock(return_value=False)
+    coord._async_save_store = AsyncMock()
+    if data is not None:
+        coord.async_set_updated_data(data)
+    return coord
+
+
+async def test_sweep_cycle_no_data_returns_immediately(hass, mock_config_entry):
+    """No coordinator.data -> the sweep performs no search."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = _mock_sweep_coord(hass, mock_config_entry)
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    coord.async_search_correlated_emails.assert_not_awaited()
+
+
+async def test_sweep_cycle_no_config_entry_returns_immediately(hass, mock_config_entry):
+    """No config_entry -> the sweep performs no search."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": _stuck_shipment("m1", 1)})
+    coord.config_entry = None
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    coord.async_search_correlated_emails.assert_not_awaited()
+
+
+async def test_sweep_cycle_no_account_token_returns_immediately(hass, mock_config_entry):
+    """No CONF_ACCOUNT_TOKEN configured -> _select_sweep_candidates returns [] and the
+    sweep performs no search."""
+    mock_config_entry.add_to_hass(hass)
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": _stuck_shipment("m1", 1)})
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    coord.async_search_correlated_emails.assert_not_awaited()
+
+
+async def test_sweep_cycle_search_terms_include_order_number_when_set(hass, mock_config_entry):
+    """A candidate with a known order_number passes both the tracking number and the
+    order number as search terms."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    shipment = ShipmentData(
+        tracking_number="1Zm1",
+        carrier_name="UPS",
+        order_name="",
+        message_id="m1",
+        email_date=1,
+        order_number="ORDER-42",
+    )
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": shipment})
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    terms = coord.async_search_correlated_emails.call_args.args[0]
+    assert shipment.tracking_number in terms
+    assert "ORDER-42" in terms
+
+
+async def test_sweep_cycle_search_terms_tracking_number_only_when_no_order_number(
+    hass, mock_config_entry
+):
+    """A candidate with no order_number passes only the tracking number."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    shipment = _stuck_shipment("m1", 1)
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": shipment})
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    terms = coord.async_search_correlated_emails.call_args.args[0]
+    assert terms == [shipment.tracking_number]
+
+
+async def test_sweep_cycle_all_seen_skips_extractor_and_post(hass, mock_config_entry):
+    """A candidate whose search returns only already-seen ids -> zero
+    _async_attempt_rename / _async_post_rename calls: no parse, no LLM call, no
+    quota interaction (T-37-24)."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": _stuck_shipment("m1", 1)})
+    coord._mark_sweep_messages_seen("m1", ["seen-msg"])
+    coord.async_search_correlated_emails = AsyncMock(
+        return_value=[("seen-msg", "<html>already considered</html>")]
+    )
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    coord._async_attempt_rename.assert_not_awaited()
+    coord._async_post_rename.assert_not_awaited()
+
+
+async def test_sweep_cycle_contaminated_message_still_marked_seen(hass, mock_config_entry):
+    """A message _async_attempt_rename rejects (contaminated, ungrounded, etc. — any
+    None-returning outcome) is still marked seen afterwards."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": _stuck_shipment("m1", 1)})
+    coord.async_search_correlated_emails = AsyncMock(
+        return_value=[("new-msg", "<html>contaminated</html>")]
+    )
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    assert "new-msg" in coord._sweep_seen_message_ids.get("m1", set())
+    coord._async_post_rename.assert_not_awaited()
+
+
+async def test_sweep_cycle_two_proposals_only_one_post(hass, mock_config_entry):
+    """Two proposal-yielding messages for one candidate -> only one rename POST
+    occurs, and the second message is never evaluated — one rename per shipment per
+    cycle."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": _stuck_shipment("m1", 1)})
+    coord.async_search_correlated_emails = AsyncMock(
+        return_value=[("msg-a", "<html>a</html>"), ("msg-b", "<html>b</html>")]
+    )
+    coord._async_attempt_rename = AsyncMock(
+        return_value=_RenameProposal(description="Shop - Widget", order_number=None)
+    )
+    coord._async_post_rename = AsyncMock(return_value=True)
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    coord._async_attempt_rename.assert_awaited_once()
+    coord._async_post_rename.assert_awaited_once()
+    # Both message ids are marked seen even though msg-b was never evaluated —
+    # the plan's mark-full-new_ids contract (T-37-24).
+    assert coord._sweep_seen_message_ids["m1"] == {"msg-a", "msg-b"}
+
+
+async def test_sweep_cycle_renames_two_shipments_one_store_save(hass, mock_config_entry):
+    """A cycle that renames two shipments performs exactly one store save, not one
+    per shipment."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    data = {"m1": _stuck_shipment("m1", 1), "m2": _stuck_shipment("m2", 2)}
+    coord = _mock_sweep_coord(hass, mock_config_entry, data=data)
+    coord.async_search_correlated_emails = AsyncMock(return_value=[("new-msg", "<html/>")])
+    coord._async_attempt_rename = AsyncMock(
+        return_value=_RenameProposal(description="Shop - Widget", order_number=None)
+    )
+    coord._async_post_rename = AsyncMock(return_value=True)
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    coord._async_save_store.assert_awaited_once()
+    assert coord.data["m1"].order_summary == "Shop - Widget"
+    assert coord.data["m2"].order_summary == "Shop - Widget"
+
+
+async def test_sweep_cycle_no_renames_zero_store_saves(hass, mock_config_entry):
+    """A cycle that renames nothing performs zero store saves."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": _stuck_shipment("m1", 1)})
+    coord.async_search_correlated_emails = AsyncMock(return_value=[("new-msg", "<html/>")])
+    # _async_attempt_rename default returns None (no proposal) -> nothing to rename.
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    coord._async_save_store.assert_not_awaited()
+
+
+async def test_sweep_cycle_candidate_exception_does_not_abort_others(hass, mock_config_entry):
+    """An exception raised while processing one candidate is logged and does not
+    prevent the next candidate from being processed."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    data = {"m1": _stuck_shipment("m1", 1), "m2": _stuck_shipment("m2", 2)}
+    coord = _mock_sweep_coord(hass, mock_config_entry, data=data)
+
+    async def _search(terms):
+        if "1Zm1" in terms:
+            raise RuntimeError("boom")
+        return [("new-msg", "<html/>")]
+
+    coord.async_search_correlated_emails = AsyncMock(side_effect=_search)
+    coord._async_attempt_rename = AsyncMock(
+        return_value=_RenameProposal(description="Shop - Widget", order_number=None)
+    )
+    coord._async_post_rename = AsyncMock(return_value=True)
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    assert coord.data["m2"].order_summary == "Shop - Widget"
+
+
+async def test_sweep_cycle_debug_mode_zero_saves_zero_posts(hass, mock_config_entry):
+    """Debug mode: zero store saves and zero rename POSTs for the whole cycle —
+    exercises the real _async_post_rename debug gate through the composed sweep."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    hass.config_entries.async_update_entry(mock_config_entry, options={CONF_DEBUG_MODE: True})
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_set_updated_data({"m1": _stuck_shipment("m1", 1)})
+    coord.async_search_correlated_emails = AsyncMock(return_value=[("new-msg", "<html/>")])
+    coord._async_attempt_rename = AsyncMock(
+        return_value=_RenameProposal(description="Shop - Widget", order_number=None)
+    )
+    coord._async_save_store = AsyncMock()
+    with _patch_parcel_client() as mock_client_cls:
+        await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    mock_client_cls.return_value.async_edit_delivery.assert_not_awaited()
+    coord._async_save_store.assert_not_awaited()
+
+
+# -------- Phase 37 / 37-10 Task 3: end-to-end sweep proof ------------------
+
+
+async def test_sweep_end_to_end_renames_stuck_shipment_and_second_sweep_no_post(
+    hass, mock_config_entry
+):
+    """T-37-01 end-to-end proof: a stuck shipment with no order identifier gets
+    renamed via a correlated order-confirmation email that has one — the exact
+    Pitfall-1 precondition (RESEARCH.md) this phase exists to solve. Drives the
+    REAL async_sweep_stuck_shipments -> _async_attempt_rename -> _async_post_rename
+    pipeline (including the real contamination check and the real MRG-05
+    grounding merge), with the genuine external boundaries mocked: the mailbox
+    search, the Stage-2 extractor, and the parcelapp client.
+
+    Deviation note (Rule 1 — bug/behavior discovery during execution):
+    tests/fixtures/correlation/amazon_shoes_confirmation.html has no
+    tracking-shaped token at all (by design — it is the "order confirmation with
+    no tracking number" motivating case), so the REAL EmailParser always returns
+    shipment=None for it (confirmed empirically and by the already-merged
+    test_attempt_rename_gate_unparseable_email_returns_none, plan 37-09) —
+    _async_attempt_rename's Stage-1-parse gate short-circuits before the naming
+    pipeline runs. This is RESEARCH.md's own documented, deliberate design
+    (Architecture Patterns' code sketch: "if match_stage1.shipment is None:
+    continue"), not a bug to fix here. To exercise this exact fixture as the
+    plan specifies, EmailParser (Stage-1) is patched to return the Stage-1
+    baseline that fixture's own order-number label regex would have extracted,
+    matching the naming-pass unit tests' own established _patch_email_parser
+    pattern (37-09) — the mailbox search, extractor, and parcelapp client remain
+    the three mocked I/O boundaries; the contamination check and grounding merge
+    run for real.
+    """
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry, token="tok-e2e")
+    target = ShipmentData(
+        tracking_number="1Z999EE10123456789",
+        carrier_name="UPS",
+        order_name="",
+        message_id="target-msg",
+        email_date=1700000000,
+    )
+    match_html = _load_correlation_fixture("amazon_shoes_confirmation.html")
+    match_stage1 = ShipmentData(
+        tracking_number="",
+        carrier_name="",
+        order_name="#113-5838173-8241820",
+        message_id="match-msg",
+        email_date=target.email_date,
+    )
+    stage2_result = Stage2Result(
+        locked={
+            "tracking_number": None,
+            "carrier_name": None,
+            "order_name": None,
+            "order_summary": "Amazon - Shoes",
+        },
+        custom={},
+        passes_used=1,
+        latency_ms=1.0,
+    )
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        coord.async_set_updated_data({"target-msg": target})
+        coord.async_search_correlated_emails = AsyncMock(return_value=[("match-msg", match_html)])
+        coord._extractor = MagicMock()
+        coord._extractor.async_extract = AsyncMock(return_value=stage2_result)
+
+        with (
+            _patch_email_parser(match_stage1),
+            _patch_parcel_client() as mock_client_cls,
+        ):
+            await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+
+        # The rename POST was called once, with the extractor's summary as the
+        # description — never the tracking number.
+        mock_client_cls.return_value.async_edit_delivery.assert_awaited_once()
+        edit_kwargs = mock_client_cls.return_value.async_edit_delivery.call_args.kwargs
+        assert edit_kwargs["description"] == "Amazon - Shoes"
+        assert edit_kwargs["description"] != target.tracking_number
+
+        # The shipment in coordinator.data carries the new summary and the
+        # discovered order number.
+        renamed = coord.data["target-msg"]
+        assert renamed.order_summary == "Amazon - Shoes"
+        assert renamed.order_number == "#113-5838173-8241820"
+
+        # The message id is recorded as seen.
+        assert "match-msg" in coord._sweep_seen_message_ids["target-msg"]
+
+        # Re-running the same end-to-end sweep immediately afterwards performs no
+        # second POST.
+        mock_client_cls.return_value.async_edit_delivery.reset_mock()
+        with (
+            _patch_email_parser(match_stage1),
+            _patch_parcel_client() as mock_client_cls_2,
+        ):
+            await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+        mock_client_cls_2.return_value.async_edit_delivery.assert_not_awaited()
