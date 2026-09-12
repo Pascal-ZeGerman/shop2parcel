@@ -45,6 +45,7 @@ from .api.exceptions import (
     OllamaTransientError,
     ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
+    ParcelAppEditFailedError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
     ParcelAppTransientError,
@@ -70,6 +71,9 @@ from .const import (
     MAX_STAGE2_FALLBACK_INLINE_SECONDS,
     MAX_STAGE2_POSTS_PER_POLL,
     MAX_SWEEP_SHIPMENTS_PER_CYCLE,
+    PARCELAPP_DAILY_LIMIT,
+    RENAME_NOTIFY_THRESHOLD,
+    RENAME_QUOTA_RESERVE,
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
     STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD,
@@ -632,6 +636,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # timestamp, formerly _stage2_last_notify_ts) is retired — the hub now owns
         # the single consolidated notification; this counter stays as telemetry.
         self._stage2_consecutive_failures: int = 0
+        # Phase 37 (D-04): per-account consecutive parcelapp-rename-failure counter.
+        # Deliberately a SEPARATE counter from _stage2_consecutive_failures above —
+        # cloning, not sharing, per 37-05's hub-side precedent (record_rename_failure
+        # is its own hub method with its own failing set) — the two failure domains
+        # (Ollama vs. a stale account_token/genuine edit rejection) must never
+        # misattribute each other (T-37-17). Reset only on a real rename success
+        # (_record_rename_success).
+        self._rename_consecutive_failures: int = 0
         # Phase 31 (D-08): the per-account time-boundary refresh timers (quota-expiry +
         # UTC-midnight used_today) are removed — the hub now owns exactly 3 shared timers
         # (armed once in hub.async_setup(), cancelled once in hub.async_shutdown()),
@@ -2698,6 +2710,122 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not debug_mode:
             self._pending_shipments = new_data
             await self._async_save_store()
+
+    def _record_rename_failure(self) -> None:
+        """Increment the per-account consecutive rename-failure counter; report to
+        the hub exactly once when it reaches RENAME_NOTIFY_THRESHOLD (D-04, T-37-04).
+
+        Thin wrapper cloning _record_stage2_failure's counter-plus-hub-report
+        shape, but entirely independent of _stage2_consecutive_failures — see the
+        counter's own docstring in __init__ for why the two domains are never
+        shared. Uses `==` (not `>=`) so the hub is told exactly once per
+        escalation, mirroring the plan's "calls hub.record_rename_failure exactly
+        once with this entry id" contract; a subsequent success resets the
+        counter so a later run of failures can escalate again.
+        """
+        self._rename_consecutive_failures += 1
+        if self._rename_consecutive_failures == RENAME_NOTIFY_THRESHOLD and self._hub is not None:
+            self._hub.record_rename_failure(self.config_entry.entry_id)  # type: ignore[union-attr]
+
+    def _record_rename_success(self) -> None:
+        """Reset the per-account consecutive rename-failure counter and tell the
+        hub this account recovered (D-04).
+
+        Clones _record_stage2_success's reset-plus-hub-report shape. Calling
+        hub.record_rename_success unconditionally (not just when the counter was
+        previously non-zero) mirrors the Stage-2 success path and is safe: the
+        hub's own discard()/dismiss() are no-ops when this entry_id was never
+        failing.
+        """
+        self._rename_consecutive_failures = 0
+        if self._hub is not None:
+            self._hub.record_rename_success(self.config_entry.entry_id)  # type: ignore[union-attr]
+
+    async def _async_post_rename(self, shipment: ShipmentData, description: str) -> bool:
+        """Attempt to rename one shipment on parcelapp.net via the unofficial
+        edit-ajax.php endpoint, gated behind the shared daily-budget reserve
+        (T-37-06, D-04). Returns whether the rename was applied remotely.
+
+        Never raises: every failure path is caught, logged (without ever
+        interpolating the account token — T-37-03) and recorded via the
+        per-account consecutive-failure counter. The sweep runs outside
+        _async_update_data, where ConfigEntryAuthFailed and UpdateFailed are
+        meaningless — this method never raises either of them.
+        """
+        assert self.config_entry is not None
+        assert self._hub is not None  # attach() runs before any poll (__init__.py:181)
+
+        # 1. Debug-mode dry run (LD-02/DBG-03): no POST, no quota interaction, no
+        # store write. Identical dry-run contract to the poll paths.
+        if self.config_entry.options.get(CONF_DEBUG_MODE, False):
+            _LOGGER.debug(
+                "DEBUG mode: would rename tn=%s to %r (no POST, no quota consumed)",
+                shipment.tracking_number,
+                description,
+            )
+            return False
+
+        # 2. Reserve pre-check (T-37-06): try_consume() is pure FCFS with no
+        # caller-priority notion, so this caller-side reserve is the only way to
+        # guarantee a rename never takes the last RENAME_QUOTA_RESERVE slots of
+        # the day. This is a pre-check, not a consumed-then-returned slot — it
+        # needs no refund path.
+        if self._hub.used_today >= PARCELAPP_DAILY_LIMIT - RENAME_QUOTA_RESERVE:
+            return False
+
+        # 3. FCFS consume: the ceiling may have been reached between the check
+        # above and now (another account's normal traffic raced in).
+        if not self._hub.try_consume():
+            return False
+
+        parcel_client = ParcelAppClient(
+            session=async_get_clientsession(self.hass),
+            api_key=self.config_entry.data[CONF_API_KEY],
+        )
+        account_token = self.config_entry.data.get(CONF_ACCOUNT_TOKEN, "")
+        carrier_code = normalize_carrier(shipment.carrier_name)
+
+        # 4. POST, then the exception ladder (5).
+        try:
+            await parcel_client.async_edit_delivery(
+                account_token=account_token,
+                tracking_number=shipment.tracking_number,
+                carrier_code=carrier_code,
+                description=description,
+            )
+        except ParcelAppTransientError as err:
+            # The request never reached a decision — mirrors the existing
+            # refund-on-transient contract (Phase 31 D-01).
+            self._hub.refund_consume()
+            _LOGGER.warning(
+                "Rename sweep: transient error POSTing rename for tn=%s: %s",
+                shipment.tracking_number,
+                str(err)[:100],
+            )
+            self._record_rename_failure()
+            return False
+        except ParcelAppEditFailedError:
+            # The server processed and rejected the request — the slot is
+            # genuinely spent; no refund (T-37-32).
+            _LOGGER.warning(
+                "Rename sweep: parcelapp rejected rename for tn=%s (ERROR response)",
+                shipment.tracking_number,
+            )
+            self._record_rename_failure()
+            return False
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Rename sweep: unexpected error POSTing rename for tn=%s: %s",
+                shipment.tracking_number,
+                err,
+                exc_info=True,
+            )
+            self._record_rename_failure()
+            return False
+
+        # 6. Success.
+        self._record_rename_success()
+        return True
 
     def _select_sweep_candidates(self) -> list[tuple[str, ShipmentData]]:
         """Select which "stuck" shipments this sweep cycle will search and attempt
