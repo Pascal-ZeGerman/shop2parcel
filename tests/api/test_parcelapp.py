@@ -13,12 +13,14 @@ from aioresponses import aioresponses
 from custom_components.shop2parcel.api.exceptions import (
     ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
+    ParcelAppEditFailedError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
     ParcelAppTransientError,
 )
 from custom_components.shop2parcel.api.parcelapp import (
     ADD_DELIVERY_URL,
+    EDIT_DELIVERY_URL,
     VIEW_DELIVERIES_URL,
     ParcelAppClient,
 )
@@ -659,6 +661,150 @@ async def test_get_deliveries_network_error_raises_transient(client):
         )
         with pytest.raises(ParcelAppTransientError):
             await client.async_get_deliveries()
+
+
+# ---------------------------------------------------------------------------
+# async_edit_delivery (Phase 37: D-02/D-03/Pitfall 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_delivery_ok_body_resolves_without_raising(client):
+    """A 200 response with body 'OK' resolves without raising."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, status=200, body="OK")
+        await client.async_edit_delivery(
+            "test-account-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+        )
+
+
+async def test_edit_delivery_error_body_raises_edit_failed(client):
+    """A 200 response with body 'ERROR' raises ParcelAppEditFailedError."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, status=200, body="ERROR")
+        with pytest.raises(ParcelAppEditFailedError):
+            await client.async_edit_delivery(
+                "test-account-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+            )
+
+
+async def test_edit_delivery_error_body_case_insensitive_whitespace_stripped(client):
+    """A 200 response with body '  error  ' (lowercase, whitespace) also raises —
+    the check is stripped and case-insensitive."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, status=200, body="  error  ")
+        with pytest.raises(ParcelAppEditFailedError):
+            await client.async_edit_delivery(
+                "test-account-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+            )
+
+
+async def test_edit_delivery_500_raises_transient_not_edit_failed(client):
+    """A 500 response raises ParcelAppTransientError; the ERROR-body check is
+    never reached (status is checked first)."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, status=500, body="ERROR")
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_edit_delivery(
+                "test-account-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+            )
+
+
+async def test_edit_delivery_403_raises_transient(client):
+    """A 403 response raises ParcelAppTransientError (this endpoint has no
+    dedicated auth-error branch — no api-key to distinguish, only the cookie)."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, status=403)
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_edit_delivery(
+                "test-account-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+            )
+
+
+async def test_edit_delivery_network_error_raises_transient_chained(client):
+    """An aiohttp.ClientError raised by the session raises ParcelAppTransientError,
+    chained from the original."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, exception=aiohttp.ClientConnectionError("refused"))
+        with pytest.raises(ParcelAppTransientError) as exc_info:
+            await client.async_edit_delivery(
+                "test-account-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+            )
+        assert exc_info.value.__cause__ is not None
+
+
+async def test_edit_delivery_timeout_raises_transient(client):
+    """A TimeoutError raised by the session raises ParcelAppTransientError."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, exception=TimeoutError("timed out"))
+        with pytest.raises(ParcelAppTransientError):
+            await client.async_edit_delivery(
+                "test-account-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+            )
+
+
+async def test_edit_delivery_request_shape(client):
+    """Request uses form-urlencoded content type, a Cookie header of the form
+    account_token=<token>, and a body with name/number/carrier/oldNumber/oldType,
+    with number == oldNumber and carrier == oldType."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, status=200, body="OK")
+        await client.async_edit_delivery(
+            "test-account-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+        )
+        import yarl
+
+        requests = mock.requests[("POST", yarl.URL(EDIT_DELIVERY_URL))]
+        assert len(requests) == 1
+        req = requests[0]
+        assert req.kwargs["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+        assert req.kwargs["headers"]["Cookie"] == "account_token=test-account-token"
+        body = req.kwargs["data"]
+        assert body["name"] == "Amazon - Shoes"
+        assert body["number"] == "1Z999AA10123456784"
+        assert body["carrier"] == "ups"
+        assert body["oldNumber"] == "1Z999AA10123456784"
+        assert body["oldType"] == "ups"
+        assert body["number"] == body["oldNumber"]
+        assert body["carrier"] == body["oldType"]
+
+
+async def test_edit_delivery_description_sanitized(client):
+    """A description containing a newline and 400 characters is sent with the
+    newline replaced by a space and the value truncated to MAX_DESCRIPTION_CHARS."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, status=200, body="OK")
+        await client.async_edit_delivery(
+            "test-account-token", "1Z999AA10123456784", "ups", "x" * 200 + "\n" + "y" * 200
+        )
+        import yarl
+
+        requests = mock.requests[("POST", yarl.URL(EDIT_DELIVERY_URL))]
+        body = requests[0].kwargs["data"]
+        assert "\n" not in body["name"]
+        assert len(body["name"]) == 200
+
+
+async def test_edit_delivery_token_never_in_exception_message(client):
+    """Neither the raised exception message nor any log record contains the
+    account token value."""
+    with aioresponses() as mock:
+        mock.post(EDIT_DELIVERY_URL, status=200, body="ERROR")
+        with pytest.raises(ParcelAppEditFailedError) as exc_info:
+            await client.async_edit_delivery(
+                "super-secret-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+            )
+        assert "super-secret-token" not in str(exc_info.value)
+
+
+async def test_edit_delivery_token_never_logged(client, caplog):
+    """The account token must never appear in a log record emitted by the method."""
+    with caplog.at_level("DEBUG"):
+        with aioresponses() as mock:
+            mock.post(EDIT_DELIVERY_URL, status=200, body="OK")
+            await client.async_edit_delivery(
+                "super-secret-token", "1Z999AA10123456784", "ups", "Amazon - Shoes"
+            )
+    assert "super-secret-token" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

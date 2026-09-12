@@ -109,6 +109,19 @@ DEFAULT_IMAP_SEARCH = (
 # Parcel API key (stored in config entry data, shared between config_flow and coordinator)
 CONF_API_KEY = "api_key"
 
+# Phase 37 (D-03): the parcelapp.net *web session* cookie value — a different
+# credential from CONF_API_KEY above (that's the official add-delivery/deliveries
+# API key; this is the raw session cookie the parcelapp.net web UI itself uses).
+# There is no login flow to obtain it automatically — the user manually copies it
+# from browser DevTools (see README setup section). It is optional, collected
+# post-setup via the options flow (not config_flow.py — mirrors CONF_OLLAMA_URL's
+# "optional, added later" precedent, not CONF_API_KEY's "required at setup" one),
+# and stored in the config entry `data` dict (never `options`) per this project's
+# Credential Storage constraint in CLAUDE.md. Its presence is what enables the
+# rename sweep — an empty value means the feature is off, mirroring how an empty
+# CONF_OLLAMA_URL disables Stage-2.
+CONF_ACCOUNT_TOKEN = "account_token"
+
 # PR4-C2: opt-in gate for Tier 2 broad-scan. OFF by default to prevent
 # false-positive forwards to ParcelApp consuming the 20/day quota.
 CONF_ENABLE_BROAD_SCAN = "enable_broad_scan"
@@ -148,6 +161,16 @@ def debug_mode_notification_id(entry_id: str) -> str:
 # quota. See WR-01 in phase 20 REVIEW.md for full analysis.
 # stage2_cap_notification_id mirrors debug_mode_notification_id pattern.
 MAX_STAGE2_POSTS_PER_POLL: int = 5
+# Phase 37 (D-06): per-12h-sweep-cycle cap on "stuck" shipments searched+attempted.
+# The sweep fires twice per day per account (SWEEP_INTERVAL_HOURS=12 below), so 3
+# candidates per cycle bounds the sweep at 6 mailbox searches, 6 Stage-2 calls and
+# at most 6 rename POSTs per account per day. Deliberately LOWER than
+# MAX_STAGE2_POSTS_PER_POLL's 5 because each candidate costs a mailbox search *and*
+# an LLM call *and* a quota slot, and because renames are the lowest-priority
+# consumer of the shared 20/day budget (see RENAME_QUOTA_RESERVE below). Shipments
+# not reached in a cycle are picked up on a later sweep — no starvation mechanism
+# beyond that was requested (CONTEXT.md D-06).
+MAX_SWEEP_SHIPMENTS_PER_CYCLE: int = 3
 # Phase 31 (D-02): shared per-poll Stage-2 POST window used by the hub's
 # _poll_window_unsub timer (31-03) to reset the shared _stage2_posts_this_poll
 # counter. Matches DEFAULT_POLL_INTERVAL's 30-minute wall-clock cadence.
@@ -222,6 +245,12 @@ STAGE2_NOTIFY_THRESHOLD: int = 3
 STAGE2_NOTIFY_COOLDOWN_S: int = 3600
 STAGE2_FAILING_NOTIFICATION_ID_PREFIX = "shop2parcel_stage2_failing"
 
+# Phase 37 (D-04): consecutive per-account rename failures before the account is
+# reported to the hub. Mirrors STAGE2_NOTIFY_THRESHOLD's value — the edit-ajax.php
+# endpoint returns no structured error code, so this is a heuristic for a stale
+# account_token, not a certain diagnosis.
+RENAME_NOTIFY_THRESHOLD: int = 3
+
 # Poison-message quarantine: after STAGE2_MSG_QUARANTINE_THRESHOLD consecutive
 # extraction failures on the SAME Gmail message, the worker stops releasing it
 # for re-fetch and leaves it in the in-memory in-flight skip set for the rest of
@@ -283,6 +312,18 @@ def stage2_failing_notification_id(entry_id: str) -> str:
 # ceiling, so a single flaky account among ~10 never fires it alone.
 HUB_STAGE2_NOTIFY_THRESHOLD: int = 5
 HUB_STAGE2_FAILING_NOTIFICATION_ID: str = "shop2parcel_hub_stage2_failing"
+
+# Phase 37 (D-04): hub-scoped consolidated rename-failure notification. Mirrors
+# HUB_STAGE2_NOTIFY_THRESHOLD's value and CAP-not-floor semantics — deliberately
+# higher than RENAME_NOTIFY_THRESHOLD (the per-account threshold) because the hub
+# aggregates an already-sticky signal across accounts, and it is applied as a cap
+# via min(threshold, max(1, account_count)) so a single-account install still
+# notifies. A distinct notification id from HUB_STAGE2_FAILING_NOTIFICATION_ID
+# because the rename failure domain (parcelapp edit endpoint / stale cookie) is
+# separate from the Stage-2 failure domain (Ollama); the two must never dismiss
+# each other.
+HUB_RENAME_NOTIFY_THRESHOLD: int = 5
+HUB_RENAME_FAILING_NOTIFICATION_ID: str = "shop2parcel_hub_rename_failing"
 
 
 def normalize_tracking_number(tracking_number: str) -> str:
@@ -374,3 +415,16 @@ CONF_FIELD_DESCRIPTION = "field_description"  # str | None
 # Advisory only until a real 429 is seen (the coordinator then tracks actual quota).
 # ParcelAppQuotaSensor uses this constant to estimate remaining quota.
 PARCELAPP_DAILY_LIMIT: int = 20
+
+# Phase 37: the hub's try_consume() is pure FCFS with no notion of caller
+# priority, so "rename POSTs are lowest priority" is expressed as a caller-side
+# reserve — a rename is skipped whenever
+# used_today >= PARCELAPP_DAILY_LIMIT - RENAME_QUOTA_RESERVE, guaranteeing a
+# rename never takes the last two slots of the day. No hub change and no refund
+# path is implied; this is a pre-check, not a consumed-then-returned slot.
+RENAME_QUOTA_RESERVE: int = 2
+
+# Phase 37: the sweep cadence registered in __init__.py — twice the frequency of
+# the 24h delivered-cleanup timer, and the denominator behind
+# MAX_SWEEP_SHIPMENTS_PER_CYCLE's arithmetic.
+SWEEP_INTERVAL_HOURS: int = 12

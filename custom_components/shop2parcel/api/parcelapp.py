@@ -23,6 +23,7 @@ import aiohttp
 from .exceptions import (
     ParcelAppAlreadyAddedError,
     ParcelAppAuthError,
+    ParcelAppEditFailedError,
     ParcelAppInvalidTrackingError,
     ParcelAppQuotaError,
     ParcelAppTransientError,
@@ -32,6 +33,12 @@ _LOGGER = logging.getLogger(__name__)
 
 ADD_DELIVERY_URL = "https://api.parcel.app/external/add-delivery/"
 VIEW_DELIVERIES_URL = "https://api.parcel.app/external/deliveries/"
+# Phase 37 (D-02): unofficial edit-ajax.php endpoint used under a narrowly scoped
+# policy exception — rename only; the exception does not extend to any other
+# unofficial endpoint (e.g. delete-ajax.php remains out of scope). Contract
+# independently re-verified against the jmdevita/parcel-ha reference integration
+# during Phase 37 research (see RESEARCH.md "Code Examples").
+EDIT_DELIVERY_URL = "https://web.parcelapp.net/edit-ajax.php"
 
 _ALREADY_ADDED_MSG = "You have already added this delivery to the app"
 _NO_JSON = object()  # Sentinel: body could not be decoded as JSON.
@@ -209,6 +216,66 @@ class ParcelAppClient:
             # and previously escaped the documented ParcelApp exception taxonomy,
             # aborting the whole poll cycle instead of a per-message transient skip.
             raise ParcelAppTransientError(f"Network error: {err}") from err
+
+    async def async_edit_delivery(
+        self,
+        account_token: str,
+        tracking_number: str,
+        carrier_code: str,
+        description: str,
+    ) -> None:
+        """POST a rename to parcelapp.net's unofficial edit-ajax.php endpoint (D-02).
+
+        Rename-only usage: number/carrier are kept identical to oldNumber/oldType —
+        only `name` changes. WR-09-style sanitization applies here too (control
+        chars stripped, capped at MAX_DESCRIPTION_CHARS) — same single choke-point
+        principle as async_add_delivery, since `description` can carry LLM-derived
+        text from a *correlated* email (Phase 37 sweep), not just the shipment's
+        own source email.
+
+        account_token is taken as a per-call parameter, not an __init__ field — it
+        is a different, optional credential from api_key (D-03).
+
+        Security: account_token must NEVER appear in an exception message, a log
+        record, or a URL. Failures identify the delivery by tracking number only.
+        """
+        description = _CTRL_CHARS_RE.sub(" ", description)[:MAX_DESCRIPTION_CHARS].strip()
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Cookie": f"account_token={account_token}",
+        }
+        body = {
+            "name": description,
+            "number": tracking_number,
+            "carrier": carrier_code,
+            "oldNumber": tracking_number,
+            "oldType": carrier_code,
+        }
+        _LOGGER.debug("Submitting rename for TN %s (carrier=%s)", tracking_number, carrier_code)
+        try:
+            async with self._session.post(
+                EDIT_DELIVERY_URL,
+                headers=headers,
+                data=body,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                _LOGGER.debug(
+                    "edit-ajax.php responded HTTP %d for TN %s", resp.status, tracking_number
+                )
+                if resp.status >= 400:
+                    raise ParcelAppTransientError(f"edit-ajax.php returned HTTP {resp.status}")
+                result = (await resp.text()).strip().upper()
+                if result == "ERROR":
+                    # No structured error code on this endpoint — could be a stale
+                    # account_token OR a genuine edit rejection. D-04's
+                    # consecutive-failure counter is the intended way to surface
+                    # this ambiguity to the user.
+                    raise ParcelAppEditFailedError(
+                        f"edit-ajax.php rejected rename for TN {tracking_number}"
+                    )
+        except (TimeoutError, aiohttp.ClientError) as err:
+            # WR-04: catch the aiohttp base class (see async_add_delivery note).
+            raise ParcelAppTransientError(f"Network error during edit: {err}") from err
 
     async def async_get_deliveries(self, filter_mode: str = "recent") -> list[dict]:
         """GET current deliveries from parcelapp.net.

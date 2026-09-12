@@ -122,3 +122,15 @@ def test_already_added_is_not_invalid_tracking_subclass():
     )
 
     assert not issubclass(ParcelAppAlreadyAddedError, ParcelAppInvalidTrackingError)
+
+
+def test_edit_failed_error_is_parcelapp_error_not_transient():
+    """Phase 37: ParcelAppEditFailedError subclasses ParcelAppError but deliberately
+    NOT ParcelAppTransientError — a stale account_token does not self-heal on retry."""
+    from custom_components.shop2parcel.api.exceptions import (  # noqa: PLC0415
+        ParcelAppEditFailedError,
+        ParcelAppError,
+    )
+
+    assert issubclass(ParcelAppEditFailedError, ParcelAppError)
+    assert not issubclass(ParcelAppEditFailedError, ParcelAppTransientError)
