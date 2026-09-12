@@ -7715,3 +7715,106 @@ async def test_sweep_cycle_debug_mode_zero_saves_zero_posts(hass, mock_config_en
         await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
     mock_client_cls.return_value.async_edit_delivery.assert_not_awaited()
     coord._async_save_store.assert_not_awaited()
+
+
+# -------- Phase 37 / 37-10 Task 3: end-to-end sweep proof ------------------
+
+
+async def test_sweep_end_to_end_renames_stuck_shipment_and_second_sweep_no_post(
+    hass, mock_config_entry
+):
+    """T-37-01 end-to-end proof: a stuck shipment with no order identifier gets
+    renamed via a correlated order-confirmation email that has one — the exact
+    Pitfall-1 precondition (RESEARCH.md) this phase exists to solve. Drives the
+    REAL async_sweep_stuck_shipments -> _async_attempt_rename -> _async_post_rename
+    pipeline (including the real contamination check and the real MRG-05
+    grounding merge), with the genuine external boundaries mocked: the mailbox
+    search, the Stage-2 extractor, and the parcelapp client.
+
+    Deviation note (Rule 1 — bug/behavior discovery during execution):
+    tests/fixtures/correlation/amazon_shoes_confirmation.html has no
+    tracking-shaped token at all (by design — it is the "order confirmation with
+    no tracking number" motivating case), so the REAL EmailParser always returns
+    shipment=None for it (confirmed empirically and by the already-merged
+    test_attempt_rename_gate_unparseable_email_returns_none, plan 37-09) —
+    _async_attempt_rename's Stage-1-parse gate short-circuits before the naming
+    pipeline runs. This is RESEARCH.md's own documented, deliberate design
+    (Architecture Patterns' code sketch: "if match_stage1.shipment is None:
+    continue"), not a bug to fix here. To exercise this exact fixture as the
+    plan specifies, EmailParser (Stage-1) is patched to return the Stage-1
+    baseline that fixture's own order-number label regex would have extracted,
+    matching the naming-pass unit tests' own established _patch_email_parser
+    pattern (37-09) — the mailbox search, extractor, and parcelapp client remain
+    the three mocked I/O boundaries; the contamination check and grounding merge
+    run for real.
+    """
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry, token="tok-e2e")
+    target = ShipmentData(
+        tracking_number="1Z999EE10123456789",
+        carrier_name="UPS",
+        order_name="",
+        message_id="target-msg",
+        email_date=1700000000,
+    )
+    match_html = _load_correlation_fixture("amazon_shoes_confirmation.html")
+    match_stage1 = ShipmentData(
+        tracking_number="",
+        carrier_name="",
+        order_name="#113-5838173-8241820",
+        message_id="match-msg",
+        email_date=target.email_date,
+    )
+    stage2_result = Stage2Result(
+        locked={
+            "tracking_number": None,
+            "carrier_name": None,
+            "order_name": None,
+            "order_summary": "Amazon - Shoes",
+        },
+        custom={},
+        passes_used=1,
+        latency_ms=1.0,
+    )
+
+    with patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_store_cls.return_value.async_save = AsyncMock()
+        coord = GmailCoordinator(hass, mock_config_entry)
+        coord.async_set_updated_data({"target-msg": target})
+        coord.async_search_correlated_emails = AsyncMock(return_value=[("match-msg", match_html)])
+        coord._extractor = MagicMock()
+        coord._extractor.async_extract = AsyncMock(return_value=stage2_result)
+
+        with (
+            _patch_email_parser(match_stage1),
+            _patch_parcel_client() as mock_client_cls,
+        ):
+            await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+
+        # The rename POST was called once, with the extractor's summary as the
+        # description — never the tracking number.
+        mock_client_cls.return_value.async_edit_delivery.assert_awaited_once()
+        edit_kwargs = mock_client_cls.return_value.async_edit_delivery.call_args.kwargs
+        assert edit_kwargs["description"] == "Amazon - Shoes"
+        assert edit_kwargs["description"] != target.tracking_number
+
+        # The shipment in coordinator.data carries the new summary and the
+        # discovered order number.
+        renamed = coord.data["target-msg"]
+        assert renamed.order_summary == "Amazon - Shoes"
+        assert renamed.order_number == "#113-5838173-8241820"
+
+        # The message id is recorded as seen.
+        assert "match-msg" in coord._sweep_seen_message_ids["target-msg"]
+
+        # Re-running the same end-to-end sweep immediately afterwards performs no
+        # second POST.
+        mock_client_cls.return_value.async_edit_delivery.reset_mock()
+        with (
+            _patch_email_parser(match_stage1),
+            _patch_parcel_client() as mock_client_cls_2,
+        ):
+            await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+        mock_client_cls_2.return_value.async_edit_delivery.assert_not_awaited()
