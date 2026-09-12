@@ -338,7 +338,8 @@ async def test_shipments_saved_to_store_after_poll(
         "persisted_shipments must contain the shipment keyed by message_id"
     )
     entry = materialized["persisted_shipments"]["MSG_NEW"]
-    # custom_attributes is included since Phase 21 Plan 01; order_summary since LOH-SUMMARY.
+    # custom_attributes is included since Phase 21 Plan 01; order_summary since LOH-SUMMARY;
+    # order_number since Phase 37 (D-08) — asdict(shipment) serializes it automatically.
     assert entry == {
         "tracking_number": "TN_NEW",
         "carrier_name": "UPS",
@@ -347,6 +348,7 @@ async def test_shipments_saved_to_store_after_poll(
         "email_date": 1700000000,
         "custom_attributes": {},
         "order_summary": None,
+        "order_number": None,
     }, f"persisted_shipments entry has wrong fields: {entry!r}"
 
 

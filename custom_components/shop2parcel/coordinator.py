@@ -2338,6 +2338,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
                     custom_attributes=_safe_custom_attributes(entry),
                     order_summary=entry.get("order_summary") or None,
+                    # Phase 37 (D-08): additive field, no STORAGE_VERSION bump — a store
+                    # written before this phase has no "order_number" key and loads as None.
+                    order_number=entry.get("order_number") or None,
                 )
             except TypeError as err:
                 _LOGGER.warning(
@@ -2377,6 +2380,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     **{k: entry[k] for k in _SHIPMENT_FIELD_TYPES},
                     custom_attributes=_safe_custom_attributes(entry),
                     order_summary=entry.get("order_summary") or None,
+                    # Phase 37 (D-08): additive field, no STORAGE_VERSION bump — a store
+                    # written before this phase has no "order_number" key and loads as None.
+                    order_number=entry.get("order_number") or None,
                 )
             except TypeError as err:
                 _LOGGER.warning(
