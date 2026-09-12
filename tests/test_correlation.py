@@ -5,11 +5,21 @@ RESEARCH.md Pitfall-1 case: a correlated match with an unknown target order must
 false-flagged as contaminated just because it (correctly) contains its own order number. See
 correlation.py's module docstring and RESEARCH.md's "Common Pitfalls / Pitfall 1" section for the
 full rationale behind the patched `find_other_shipment_tokens` this module tests.
+
+The five cases in TestKnownRealShapes below (see `test_known_real_shapes` below) encode
+previously-validated evidence from spikes 028/029/030 (`.planning/spikes/029-attribution-
+heuristic-candidate/README.md`'s Category A/B/C taxonomy and
+`run_attribution_test.py`'s corpus cases), not freshly-invented expectations. Every one of these
+five cases is driven by the *tracking*-token branch or by a known `target_order`, neither of which
+RESEARCH.md's Pitfall-1 patch touches, so all five expectations are unchanged from the spike
+verdicts.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from custom_components.shop2parcel.correlation import is_contaminated
 
@@ -79,3 +89,66 @@ def test_find_other_shipment_tokens_known_target_keeps_original_behavior() -> No
     </body></html>"""
     others = find_other_shipment_tokens(html, target_tracking=None, target_order="10015")
     assert others == {"10026"}
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "target_tracking", "target_order", "expect_contaminated", "expect_in_others"),
+    [
+        pytest.param(
+            "multi_order_receipt.html",
+            "1Z999AA10123456784",
+            None,
+            True,
+            "1Z888BB29876543210",
+            id="multi_order_receipt_digest_order_1001_perspective",
+        ),
+        pytest.param(
+            "multi_order_receipt.html",
+            "1Z888BB29876543210",
+            None,
+            True,
+            "1Z999AA10123456784",
+            id="multi_order_receipt_digest_order_1002_perspective",
+        ),
+        pytest.param(
+            "forwarded_old_order.html",
+            "1Z777CC30987654321",
+            None,
+            True,
+            None,
+            id="forwarded_digest_quoting_old_order",
+        ),
+        pytest.param(
+            "clean_single_with_noise.html",
+            "1Z888BB29876543210",
+            None,
+            False,
+            None,
+            id="clean_single_with_noise_not_flagged",
+        ),
+        pytest.param(
+            "amazon_shoes_confirmation.html",
+            None,
+            "113-5838173-8241820",
+            False,
+            None,
+            id="amazon_known_order_not_flagged",
+        ),
+    ],
+)
+def test_known_real_shapes(
+    fixture_name: str,
+    target_tracking: str | None,
+    target_order: str | None,
+    expect_contaminated: bool,
+    expect_in_others: str | None,
+) -> None:
+    """Spike 029 Category A (confirmed real digest threat) + Category B/C (false-positive and
+    adversarial-clean checks) — see module docstring for provenance. None of these five cases
+    exercise RESEARCH.md's Pitfall-1 patch (all use a known target_order or the tracking-token
+    branch), so all five expectations are unchanged from the original spike verdicts."""
+    html = _load(fixture_name)
+    contaminated, others = is_contaminated(html, target_tracking, target_order)
+    assert contaminated is expect_contaminated
+    if expect_in_others is not None:
+        assert expect_in_others in others
