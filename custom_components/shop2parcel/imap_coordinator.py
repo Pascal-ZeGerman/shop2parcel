@@ -66,6 +66,7 @@ from .coordinator import (
     _extract_imap_email_meta,
     _sanitise_parser_error,
 )
+from .correlation import sanitize_search_terms
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,6 +86,24 @@ _IMAP_MONTH_ABBR = (
     "Nov",
     "Dec",
 )
+
+
+def _compute_imap_since_date(rescan_window_days: int) -> str:
+    """Return an RFC 3501 SINCE date string for the given rescan window.
+
+    Shared by the poll (`_async_update_data_inner`) and the correlated-search
+    override (plan 37-08) so the two never drift apart. IN-08: RFC 3501 SINCE
+    compares against the message INTERNALDATE at the SERVER's local-day
+    granularity, while this boundary is computed from UTC. For servers west of
+    UTC the UTC-derived date can sit one day ahead of the server's local date at
+    the window edge, silently excluding messages still inside the configured
+    window. Widen by one day — the overlap is cheap and fully absorbed by the
+    tracking-number dedup / seen-ID gates (poll) or by _new_correlated_message_ids
+    (sweep).
+    """
+    since_ts = int(time.time()) - (rescan_window_days + 1) * 86400
+    since_dt = datetime.fromtimestamp(since_ts, tz=UTC)
+    return f"{since_dt.day:02d}-{_IMAP_MONTH_ABBR[since_dt.month - 1]}-{since_dt.year}"
 
 
 def _parse_imap_message(raw_bytes: bytes) -> tuple[dict, str | None]:
@@ -203,15 +222,10 @@ class ImapCoordinator(Shop2ParcelCoordinator):
         debug_mode = entry.options.get(CONF_DEBUG_MODE, False)
         if debug_mode:
             rescan_window_days = MAX_RESCAN_WINDOW_DAYS
-        # IN-08: RFC 3501 SINCE compares against the message INTERNALDATE at the
-        # SERVER's local-day granularity, while this boundary is computed from UTC.
-        # For servers west of UTC the UTC-derived date can sit one day ahead of the
-        # server's local date at the window edge, silently excluding messages still
-        # inside the configured window. Widen by one day — the overlap is cheap and
-        # fully absorbed by the tracking-number dedup / seen-ID gates.
-        since_ts = int(time.time()) - (rescan_window_days + 1) * 86400
-        _since_dt = datetime.fromtimestamp(since_ts, tz=UTC)
-        since_date = f"{_since_dt.day:02d}-{_IMAP_MONTH_ABBR[_since_dt.month - 1]}-{_since_dt.year}"
+        # See _compute_imap_since_date's docstring for the one-day-widening rationale
+        # (IN-08). Shared with the correlated-search override (plan 37-08) so the two
+        # paths cannot drift apart.
+        since_date = _compute_imap_since_date(rescan_window_days)
         _LOGGER.debug(
             "IMAP poll start — host: %s query: %s since: %s",
             entry.data[CONF_IMAP_HOST],
@@ -788,3 +802,103 @@ class ImapCoordinator(Shop2ParcelCoordinator):
             await self._async_save_store()
 
         return current_data
+
+    async def async_search_correlated_emails(
+        self, search_terms: list[str]
+    ) -> list[tuple[str, str]]:
+        """Search this IMAP account's OWN mailbox for messages correlated to one
+        stuck shipment. Overrides the base contract documented on
+        Shop2ParcelCoordinator.async_search_correlated_emails (plan 37-07) — see
+        that docstring for the full input/output shape this method must honor.
+
+        RESEARCH.md Pitfall 2 confirms the IMAP path has no token-freshness
+        equivalent to Gmail's OAuth refresh: credentials are read fresh from
+        `self.config_entry.data` on every call (below), exactly as the poll does,
+        so there is no cached-token staleness risk to guard against here.
+
+        The allowlist in `sanitize_search_terms` is load-bearing: each term is
+        interpolated into an IMAP SEARCH string and `imaplib` performs no CRLF
+        sanitization, so an unfiltered term with an embedded newline would
+        pipeline an additional IMAP command — the same threat the options-flow
+        already guards for `CONF_IMAP_SEARCH` (options_flow.py WR-01).
+        """
+        sanitized = sanitize_search_terms(search_terms)
+        if not sanitized:
+            return []
+
+        entry = self.config_entry
+        assert entry is not None  # sweep only runs on an attached coordinator
+        imap_client = cast(ImapClient, self._email_client)
+
+        rescan_window_days = entry.options.get(CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS)
+        since_date = _compute_imap_since_date(rescan_window_days)
+        verify_tls = entry.options.get(
+            CONF_IMAP_VERIFY_TLS,
+            entry.data.get(CONF_IMAP_VERIFY_TLS, DEFAULT_IMAP_VERIFY_TLS),
+        )
+        # D-06/T-37-28: keep the sweep consistent with the poll path — a sender the
+        # user has declared never shipment-relevant must not be able to drive a
+        # rename either.
+        sender_is_excluded = build_sender_exclusion_matcher(
+            entry.options.get(CONF_SENDER_EXCLUSIONS, [])
+        )
+
+        # One fetch_shipping_emails call per sanitized term rather than a
+        # hand-built OR tree — this project has a documented history of getting
+        # RFC 3501 prefix-notation OR trees subtly wrong (see DEFAULT_IMAP_SEARCH's
+        # own history), and with at most two terms (tracking number + order
+        # number) the extra round trip is not worth that risk.
+        results_by_uid: dict[str, str] = {}
+        uid_order: list[str] = []
+        for term in sanitized:
+            criteria = f'TEXT "{term}"'
+            try:
+                raw_messages = await imap_client.fetch_shipping_emails(
+                    host=entry.data[CONF_IMAP_HOST],
+                    port=entry.data[CONF_IMAP_PORT],
+                    username=entry.data[CONF_IMAP_USERNAME],
+                    password=entry.data[CONF_IMAP_PASSWORD],
+                    tls_mode=entry.data[CONF_IMAP_TLS],
+                    search_criteria=criteria,
+                    since_date=since_date,
+                    verify_tls=verify_tls,
+                )
+            except ImapAuthError as err:
+                # Never raise the HA reauth-trigger exception from here — the sweep
+                # runs outside _async_update_data, where that signal is meaningful.
+                _LOGGER.error("IMAP correlated-email search auth error: %s", err)
+                return []
+            except ImapTransientError as err:
+                # Never raise the HA transient-failure exception from here, for the
+                # same reason.
+                _LOGGER.warning("IMAP correlated-email search transient error: %s", err)
+                return []
+
+            for msg_info in raw_messages:
+                uid_str = str(msg_info["uid"])
+                if uid_str in results_by_uid:
+                    continue
+                # One bad message must not abort the whole search — wrap the
+                # per-message parse in its own try/except, log, and continue.
+                try:
+                    imap_meta, html = await self.hass.async_add_executor_job(
+                        _parse_imap_message, msg_info["raw"]
+                    )
+                    if sender_is_excluded(imap_meta.get("from", "")):
+                        _LOGGER.debug(
+                            "IMAP correlated-email search: UID %s sender-excluded", uid_str
+                        )
+                        continue
+                    if not html:
+                        continue
+                    results_by_uid[uid_str] = html
+                    uid_order.append(uid_str)
+                except Exception as err:  # noqa: BLE001 — one bad message must not abort search
+                    _LOGGER.warning(
+                        "IMAP correlated-email search: failed to parse UID %s: %s",
+                        uid_str,
+                        err,
+                    )
+                    continue
+
+        return [(uid, results_by_uid[uid]) for uid in uid_order]
