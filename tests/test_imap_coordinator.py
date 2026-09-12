@@ -14,12 +14,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.shop2parcel.api.exceptions import ImapAuthError, ImapTransientError
 from custom_components.shop2parcel.const import (
     CONF_CUSTOM_FIELDS,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_TIMEOUT,
     CONF_OLLAMA_URL,
     CONF_QUEUE_MAXLEN,
+    CONF_SENDER_EXCLUSIONS,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT,
     DEFAULT_QUEUE_MAXLEN,
@@ -1112,3 +1114,201 @@ async def test_imap_fallback_dedup_hit_marks_seen(hass, mock_imap_stage2_entry):
 
     mock_enqueue.assert_not_called()
     assert uid_key in coord._seen_message_ids
+
+
+# ---------------------------------------------------------------------------
+# Plan 37-08 Task 3: async_search_correlated_emails (IMAP override)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_imap_correlated_search_entry() -> MockConfigEntry:
+    """IMAP MockConfigEntry for the correlated-search override tests."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "connection_type": "imap",
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "imap_username": "user@example.com",
+            "imap_password": "app-password-here",
+            "imap_tls": "ssl",
+            "api_key": "test-parcelapp-key",
+        },
+        options={
+            "imap_search": 'SUBJECT "shipped"',
+            "poll_interval": 30,
+        },
+        unique_id="imap-correlated-search@example.com",
+    )
+
+
+def _correlated_imap_msg(uid: int) -> dict:
+    return {
+        "uid": uid,
+        "raw": b"From: shop@example.com\r\nSubject: Your order has shipped\r\n\r\n",
+        "uidvalidity": None,
+    }
+
+
+async def test_imap_correlated_search_empty_sanitized_terms_short_circuits(
+    hass, mock_imap_correlated_search_entry
+):
+    """An empty sanitized term list short-circuits to an empty list with no connection
+    attempt — every input here fails sanitize_search_terms."""
+    mock_imap_correlated_search_entry.add_to_hass(hass)
+    coord = ImapCoordinator(hass, mock_imap_correlated_search_entry)
+    mock_imap = MagicMock()
+    mock_imap.fetch_shipping_emails = AsyncMock()
+    coord._email_client = mock_imap
+
+    result = await coord.async_search_correlated_emails(["ab", "has space"])
+
+    assert result == []
+    mock_imap.fetch_shipping_emails.assert_not_awaited()
+
+
+async def test_imap_correlated_search_newline_injection_term_dropped_no_call(
+    hass, mock_imap_correlated_search_entry
+):
+    """A raw term containing a newline and an extra command word is dropped by
+    sanitization — no fetch_shipping_emails call is made at all."""
+    mock_imap_correlated_search_entry.add_to_hass(hass)
+    coord = ImapCoordinator(hass, mock_imap_correlated_search_entry)
+    mock_imap = MagicMock()
+    mock_imap.fetch_shipping_emails = AsyncMock()
+    coord._email_client = mock_imap
+
+    malicious = "1Z999AA10123456784\r\nA1 STORE 1 +FLAGS (\\Deleted)"
+    result = await coord.async_search_correlated_emails([malicious])
+
+    assert result == []
+    mock_imap.fetch_shipping_emails.assert_not_awaited()
+
+
+async def test_imap_correlated_search_criteria_contains_no_crlf(
+    hass, mock_imap_correlated_search_entry
+):
+    """Each recorded search_criteria argument contains no carriage return and no line
+    feed."""
+    mock_imap_correlated_search_entry.add_to_hass(hass)
+    coord = ImapCoordinator(hass, mock_imap_correlated_search_entry)
+    mock_imap = MagicMock()
+    mock_imap.fetch_shipping_emails = AsyncMock(return_value=[])
+    coord._email_client = mock_imap
+
+    await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    call_kwargs = mock_imap.fetch_shipping_emails.call_args.kwargs
+    criteria = call_kwargs["search_criteria"]
+    assert "\r" not in criteria
+    assert "\n" not in criteria
+    assert "1Z999AA10123456784" in criteria
+
+
+async def test_imap_correlated_search_two_terms_dedups_uid(hass, mock_imap_correlated_search_entry):
+    """With two sanitized terms, two separate fetch_shipping_emails calls are made and
+    a UID returned by both term searches appears once in the result."""
+    mock_imap_correlated_search_entry.add_to_hass(hass)
+    coord = ImapCoordinator(hass, mock_imap_correlated_search_entry)
+    mock_imap = MagicMock()
+    mock_imap.fetch_shipping_emails = AsyncMock(
+        side_effect=[
+            [_correlated_imap_msg(1), _correlated_imap_msg(2)],
+            [_correlated_imap_msg(2), _correlated_imap_msg(3)],
+        ]
+    )
+    coord._email_client = mock_imap
+
+    with patch(
+        "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+        return_value="<html>hello</html>",
+    ):
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784", "ORDER-1234"])
+
+    assert mock_imap.fetch_shipping_emails.await_count == 2
+    result_uids = [uid for uid, _html in result]
+    assert result_uids == ["1", "2", "3"]
+
+
+async def test_imap_correlated_search_omits_message_with_no_html(
+    hass, mock_imap_correlated_search_entry
+):
+    """A message whose raw bytes yield no HTML is omitted."""
+    mock_imap_correlated_search_entry.add_to_hass(hass)
+    coord = ImapCoordinator(hass, mock_imap_correlated_search_entry)
+    mock_imap = MagicMock()
+    mock_imap.fetch_shipping_emails = AsyncMock(return_value=[_correlated_imap_msg(1)])
+    coord._email_client = mock_imap
+
+    with (
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+            return_value=None,
+        ),
+        patch(
+            "custom_components.shop2parcel.imap_coordinator.extract_text_body_imap",
+            return_value=None,
+        ),
+    ):
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
+
+
+async def test_imap_correlated_search_excludes_sender_domain(
+    hass, mock_imap_correlated_search_entry
+):
+    """A message whose sender domain is in the account's configured exclusion list is
+    omitted."""
+    mock_imap_correlated_search_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_imap_correlated_search_entry, options={CONF_SENDER_EXCLUSIONS: ["excluded.com"]}
+    )
+    coord = ImapCoordinator(hass, mock_imap_correlated_search_entry)
+    mock_imap = MagicMock()
+    excluded_msg = {
+        "uid": 1,
+        "raw": b"From: sender@excluded.com\r\nSubject: Your order has shipped\r\n\r\n",
+        "uidvalidity": None,
+    }
+    mock_imap.fetch_shipping_emails = AsyncMock(return_value=[excluded_msg])
+    coord._email_client = mock_imap
+
+    with patch(
+        "custom_components.shop2parcel.imap_coordinator.extract_html_body_imap",
+        return_value="<html>hello</html>",
+    ):
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
+
+
+async def test_imap_correlated_search_auth_error_yields_empty_no_raise(
+    hass, mock_imap_correlated_search_entry
+):
+    """An ImapAuthError yields an empty list and raises nothing."""
+    mock_imap_correlated_search_entry.add_to_hass(hass)
+    coord = ImapCoordinator(hass, mock_imap_correlated_search_entry)
+    mock_imap = MagicMock()
+    mock_imap.fetch_shipping_emails = AsyncMock(side_effect=ImapAuthError("bad credentials"))
+    coord._email_client = mock_imap
+
+    result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
+
+
+async def test_imap_correlated_search_transient_error_yields_empty(
+    hass, mock_imap_correlated_search_entry
+):
+    """An ImapTransientError produces an empty list and does not raise."""
+    mock_imap_correlated_search_entry.add_to_hass(hass)
+    coord = ImapCoordinator(hass, mock_imap_correlated_search_entry)
+    mock_imap = MagicMock()
+    mock_imap.fetch_shipping_emails = AsyncMock(side_effect=ImapTransientError("temporary failure"))
+    coord._email_client = mock_imap
+
+    result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
