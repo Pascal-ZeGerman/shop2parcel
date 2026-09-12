@@ -155,6 +155,51 @@ Note: The free Parcel tier allows up to 20 new tracking numbers per day. If you 
 
 ---
 
+## Setup: Parcel account token (optional — enables shipment renaming)
+
+Every 12 hours, Shop2Parcel looks for shipments whose parcelapp description is still the bare
+tracking number, searches that account's own mailbox for other emails about the same shipment, and
+renames the delivery to a descriptive shop-and-product name (e.g. "Amazon - Shoes"). Renames are
+the lowest-priority consumer of the 20-per-day parcelapp budget and are skipped whenever that
+budget is nearly spent, so they never compete with adding new shipments.
+
+**Why a second credential is needed:** parcelapp.net's official API can create and read deliveries,
+but it has no endpoint to update one. Renaming an existing delivery therefore goes through the same
+web endpoint the parcelapp.net web app itself uses when you rename a delivery by hand — and that
+endpoint authenticates with a browser session cookie (`account_token`), not the API key above.
+
+### Get your account token
+
+1. Sign in at [web.parcelapp.net](https://web.parcelapp.net).
+2. Open your browser's DevTools and switch to the **Network** tab.
+3. Reload the page (or sign out and sign back in) while the Network tab is recording.
+4. Find the request whose response indicates a logged-in session — its response body contains
+   `message=logged`.
+5. Open that request's headers and locate the `account_token` cookie value.
+6. Copy the value.
+
+### Where to paste it
+
+Paste the value into the integration's Options dialog (**Settings → Devices & Services →
+Shop2Parcel → Configure**), Settings step, in the **Parcel account token** field. Leaving the field
+empty keeps the rename feature off — this is the on/off switch for the whole feature.
+
+### Limitations
+
+The token has no documented expiry and cannot be validated when you enter it, because there is no
+cheap read endpoint gated by it. If it goes stale, renames will start failing, and after several
+consecutive failures a persistent Home Assistant notification will appear suggesting the token may
+need refreshing. This notification is a heuristic, not a certain diagnosis — the rename endpoint
+returns no structured error code, so a stale token looks identical to a genuine edit rejection. If
+you see the notification, repeat the steps above to get a fresh token.
+
+### Security note
+
+Treat this value like a password. It is stored in Home Assistant's encrypted config-entry storage,
+never written to `configuration.yaml`, and never logged.
+
+---
+
 ## Options (after setup)
 
 After the integration is configured you can adjust settings via **Settings → Devices & Services → Shop2Parcel → Configure**:
@@ -162,6 +207,7 @@ After the integration is configured you can adjust settings via **Settings → D
 | Option | Default | Notes |
 |--------|---------|-------|
 | Poll interval (minutes) | 30 | How often to check the inbox. Minimum 5 minutes. |
+| Parcel account token | (empty) | Enables the shipment-renaming sweep — see [Setup: Parcel account token](#setup-parcel-account-token-optional--enables-shipment-renaming) above. An empty value disables the feature. |
 | Gmail search query | `(from:no-reply@shopify.com OR from:mcinfo@ups.com OR from:inform@informeddelivery.usps.com OR from:USPSPackageTracker@usps.com OR from:TrackingUpdates@fedex.com) subject:(shipped OR delivered OR tracking OR package) OR -label:spam subject:(tracking OR shipped OR shipment OR delivery OR parcel)` | (Gmail only) Advanced: customise the Gmail filter for non-standard senders. |
 | IMAP search criteria | `OR OR OR OR OR OR SUBJECT "shipped" SUBJECT "tracking" SUBJECT "delivery" SUBJECT "delivered" SUBJECT "shipment" SUBJECT "order" SUBJECT "confirmed"` | (IMAP only) Standard IMAP SEARCH criteria string for filtering messages. |
 

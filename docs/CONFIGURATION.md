@@ -25,6 +25,7 @@ These fields are collected once during setup and stored encrypted in HA's config
 | Field | Key | Type | Required | Description |
 |-------|-----|------|----------|-------------|
 | parcelapp.net API Key | `api_key` | `str` | Yes | API key for your parcelapp.net account. Found in the parcelapp app under Settings > API. Validated at setup time by calling the view-deliveries endpoint. |
+| Parcel account token | `account_token` | `str` | No | Optional. Stored in config entry `data` (not `options`) because it is a session credential, same tier as `api_key`. Enables the shipment-renaming sweep — collected via the Options flow after initial setup, not at config-flow time. Default empty, which disables the feature. Not validated at entry time (no cheap read endpoint exists for it); see the README's "Setup: Parcel account token" walkthrough for acquisition steps and staleness detection. |
 
 ### Gmail connection
 
