@@ -51,6 +51,7 @@ from .api.exceptions import (
 from .api.ollama_client import OllamaClient
 from .api.parcelapp import ParcelAppClient
 from .const import (
+    CONF_ACCOUNT_TOKEN,
     CONF_API_KEY,
     CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
@@ -65,6 +66,7 @@ from .const import (
     MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
     MAX_STAGE2_FALLBACK_INLINE_SECONDS,
     MAX_STAGE2_POSTS_PER_POLL,
+    MAX_SWEEP_SHIPMENTS_PER_CYCLE,
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
     STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD,
@@ -546,6 +548,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # store key "sweep_seen_message_ids" — no STORAGE_VERSION bump. Garbage-collected in
         # async_cleanup_delivered when a shipment leaves tracking (see below).
         self._sweep_seen_message_ids: dict[str, set[str]] = {}
+        # Phase 37 (D-06 / T-37-21): rotation cursor for _select_sweep_candidates'
+        # wrapping window. Deliberately in-memory only, NOT persisted — this is a
+        # fairness hint, not state worth surviving a restart. Resetting it to 0 on
+        # HA restart merely restarts the rotation window from the beginning; it does
+        # not re-select or skip any shipment.
+        self._sweep_cursor: int = 0
         # Phase 26: operational-health persisted counters.
         # Persisted across HA restarts via additive store keys (no STORAGE_VERSION bump).
         # Incremented only on genuine 2xx POST-success via _record_forward().
@@ -2668,3 +2676,58 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not debug_mode:
             self._pending_shipments = new_data
             await self._async_save_store()
+
+    def _select_sweep_candidates(self) -> list[tuple[str, ShipmentData]]:
+        """Select which "stuck" shipments this sweep cycle will search and attempt
+        to rename (D-06, T-37-06, T-37-21).
+
+        A shipment is "stuck" exactly when its parcelapp.net description would
+        still be the bare tracking number — i.e. when neither order_summary nor
+        order_name is truthy. This predicate is derived directly from the
+        description precedence expression at every POST call site
+        (`merged_shipment.order_summary or merged_shipment.order_name or
+        merged_shipment.tracking_number` — see async_add_delivery call sites
+        above). Changing one without the other silently breaks the sweep's
+        targeting.
+
+        Delivered shipments need no explicit check here: RESEARCH.md Pitfall 5
+        confirms the existing daily async_cleanup_delivered() removal from
+        self.data is the sweep's termination condition — a shipment naturally
+        stops being swept once that cleanup drops it from coordinator.data. The
+        worst case is one or two extra searches in the ~24h window between
+        delivery and the next daily cleanup, which is acceptable because rename
+        POSTs are already lowest priority against the shared 20/day quota. Do
+        NOT add a redundant delivery-status call here.
+        """
+        if self.config_entry is None or not self.data:
+            return []
+
+        # Feature gate (CONTEXT.md "Claude's Discretion"): the presence of a
+        # non-blank CONF_ACCOUNT_TOKEN IS the sweep's on/off switch — there is
+        # no separate boolean toggle. Do not add one.
+        account_token = self.config_entry.data.get(CONF_ACCOUNT_TOKEN)
+        if not account_token or not account_token.strip():
+            return []
+
+        stuck = [
+            (storage_key, shipment)
+            for storage_key, shipment in self.data.items()
+            if not shipment.order_summary and not shipment.order_name
+        ]
+
+        # Deterministic ordering: oldest stuck shipment first (email_date
+        # ascending), storage_key as tie-break so ordering never depends on
+        # dict insertion order.
+        stuck.sort(key=lambda pair: (pair[1].email_date, pair[0]))
+
+        if len(stuck) <= MAX_SWEEP_SHIPMENTS_PER_CYCLE:
+            return stuck
+
+        # Cap plus rotation (D-06 / T-37-21): a wrapping window keyed off an
+        # in-memory cursor is what makes "shipments not reached in one cycle
+        # are picked up on a later sweep" literally true — a plain head slice
+        # would starve every shipment past the cap forever.
+        start = self._sweep_cursor % len(stuck)
+        window = [stuck[(start + i) % len(stuck)] for i in range(MAX_SWEEP_SHIPMENTS_PER_CYCLE)]
+        self._sweep_cursor += MAX_SWEEP_SHIPMENTS_PER_CYCLE
+        return window
