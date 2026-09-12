@@ -45,6 +45,7 @@ from homeassistant.helpers.selector import (
 from .api.exceptions import OllamaTransientError
 from .api.ollama_client import OllamaClient
 from .const import (
+    CONF_ACCOUNT_TOKEN,
     CONF_CONNECTION_TYPE,
     CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
@@ -194,6 +195,11 @@ class OptionsFlowHandler(OptionsFlowWithReload):
         # Build the model field once and reuse in both branches.
         model_field = await self._build_ollama_model_field(url=ollama_url_default)
 
+        # Phase 37 (D-03): account_token lives in entry.data (never entry.options —
+        # see the submit-handler pop/write below), so the render-time default must
+        # be read from data too or the field would never round-trip.
+        account_token_default = self.config_entry.data.get(CONF_ACCOUNT_TOKEN, "")
+
         if conn_type == CONNECTION_TYPE_IMAP:
             schema = vol.Schema(
                 {
@@ -228,6 +234,10 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                     vol.Optional(
                         CONF_OLLAMA_URL,
                         default=ollama_url_default,
+                    ): str,
+                    vol.Optional(
+                        CONF_ACCOUNT_TOKEN,
+                        default=account_token_default,
                     ): str,
                     vol.Required(
                         CONF_OLLAMA_MODEL,
@@ -283,6 +293,10 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                     vol.Optional(
                         CONF_OLLAMA_URL,
                         default=ollama_url_default,
+                    ): str,
+                    vol.Optional(
+                        CONF_ACCOUNT_TOKEN,
+                        default=account_token_default,
                     ): str,
                     vol.Required(
                         CONF_OLLAMA_MODEL,
@@ -344,6 +358,34 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                             errors["base"] = "ollama_model_not_found"
                             description_placeholders["missing_model"] = model
             if not errors:
+                # Phase 37 (D-03 / RESEARCH.md Pitfall 3): pop the token out of
+                # user_input BEFORE new_options is built below, so it can never
+                # land in entry.options — CLAUDE.md's Credential Storage
+                # constraint requires secrets in entry.data only. Security: the
+                # raw/normalized token value must never be logged, placed in an
+                # error message, or added to description_placeholders.
+                raw_token = user_input.pop(CONF_ACCOUNT_TOKEN, None)
+                normalized_token = (raw_token or "").strip() or None
+                stored_token = self.config_entry.data.get(CONF_ACCOUNT_TOKEN)
+                if normalized_token != stored_token:
+                    # OptionsFlowHandler subclasses OptionsFlowWithReload, so the
+                    # standard async_create_entry return below already reloads
+                    # the entry on every save. Calling async_update_entry
+                    # unconditionally would cause a second reload (T-37-19) —
+                    # only write entry.data when the normalized value changed.
+                    new_data = {**self.config_entry.data}
+                    if normalized_token is None:
+                        new_data.pop(CONF_ACCOUNT_TOKEN, None)
+                    else:
+                        new_data[CONF_ACCOUNT_TOKEN] = normalized_token
+                    self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+                # Validation policy (RESEARCH.md Pitfall 3): no live authenticity
+                # check is possible — there is no cheap read endpoint gated by
+                # this cookie, unlike CONF_API_KEY. Only the empty/whitespace
+                # case above is normalized; D-04's consecutive-failure
+                # notification is the intended feedback loop for a bad or stale
+                # token. Do not add a blocking probe here.
+
                 # Strip whitespace from URL before persisting (WR-01).
                 user_input[CONF_OLLAMA_URL] = user_input.get(CONF_OLLAMA_URL, "").strip()
                 # Merge with existing options so CONF_CUSTOM_FIELDS is preserved (CR-01).
