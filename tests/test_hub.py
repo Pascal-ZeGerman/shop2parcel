@@ -2385,9 +2385,17 @@ def test_record_stage2_worker_success_last_failing_dismisses(hass):
 
 def test_detach_discards_failing_account_from_set(hass):
     """detach(coordinator) discards that account's entry_id from the
-    failing set (D-07); other accounts still failing means no dismiss."""
+    failing set (D-07); other accounts still failing means no dismiss.
+
+    Phase 37 (D-04): detach() also unconditionally discards the SEPARATE,
+    always-empty rename failing set and dismisses its (also separate)
+    notification id — this test only asserts the Stage-2 id is untouched.
+    """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     hub = Shop2ParcelHub(hass)
@@ -2405,12 +2413,21 @@ def test_detach_discards_failing_account_from_set(hass):
         hub.detach(coordinator_a)
 
         assert "entry-a" not in hub._stage2_failing_entry_ids
-        mock_dismiss.assert_not_called()
+        assert not any(
+            call.kwargs.get("notification_id") == HUB_STAGE2_FAILING_NOTIFICATION_ID
+            for call in mock_dismiss.call_args_list
+        )
 
 
 def test_detach_of_last_failing_account_dismisses_notification(hass):
     """detach() of the LAST failing account empties the set and dismisses
-    the notification — removing a failing account counts as recovery (D-07)."""
+    the notification — removing a failing account counts as recovery (D-07).
+
+    Phase 37 (D-04): detach() also unconditionally dismisses the SEPARATE
+    rename notification id (its always-empty failing set) — asserted via
+    assert_any_call rather than assert_called_once_with since two distinct
+    ids are now dismissed.
+    """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
@@ -2432,14 +2449,17 @@ def test_detach_of_last_failing_account_dismisses_notification(hass):
         hub.detach(coordinator_a)
 
         assert hub._stage2_failing_entry_ids == set()
-        mock_dismiss.assert_called_once_with(
-            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
-        )
+        mock_dismiss.assert_any_call(hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID)
 
 
 async def test_async_shutdown_dismisses_hub_notification_unconditionally(hass):
     """async_shutdown() calls async_dismiss for the hub notification
-    unconditionally, even with no active failing streak (D-07 teardown-dismiss)."""
+    unconditionally, even with no active failing streak (D-07 teardown-dismiss).
+
+    Phase 37 (D-04): async_shutdown() also unconditionally dismisses the
+    SEPARATE rename notification id — asserted via assert_any_call since two
+    distinct ids are now dismissed.
+    """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
@@ -2457,9 +2477,7 @@ async def test_async_shutdown_dismisses_hub_notification_unconditionally(hass):
         with patch.object(persistent_notification, "async_dismiss") as mock_dismiss:
             await hub.async_shutdown()
 
-            mock_dismiss.assert_called_once_with(
-                hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
-            )
+            mock_dismiss.assert_any_call(hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID)
 
 
 def test_hub_notification_body_is_pii_free(hass):
@@ -2814,9 +2832,11 @@ async def test_remove_to_zero_then_readd_recreates_hub(
         # both global entities removed from the registry (no orphaned rows),
         # hass.data[DOMAIN]["__shared__"] deleted.
         assert worker_task.done(), "worker must be cancelled/done at last-account teardown"
-        mock_dismiss_last.assert_called_once_with(
-            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
-        )
+        # Phase 37 (D-04): detach()/async_shutdown() also unconditionally
+        # dismiss the SEPARATE rename notification id (always-empty rename
+        # failing set here) — assert_any_call since more than one distinct
+        # id is now dismissed during this teardown.
+        mock_dismiss_last.assert_any_call(hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID)
         assert registry.async_get(quota_entity_id) is None, "quota sensor must be de-registered"
         assert registry.async_get(queue_entity_id) is None, "queue sensor must be de-registered"
         assert "__shared__" not in hass.data.get(DOMAIN, {})
@@ -2990,3 +3010,254 @@ async def test_concurrent_setup_during_last_account_teardown_does_not_orphan_new
         # Cleanup: unload B so its hub's worker task is cancelled before the
         # mocked-Store context exits.
         await hass.config_entries.async_unload(mock_config_entry_b.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 37 Plan 05 Task 1: rename-specific consecutive-failure + single hub
+# notification pair (D-04), cloned from the Stage-2 pair above but with its
+# own failing set, active flag, threshold constant and notification id. The
+# two domains (Ollama/Stage-2 vs parcelapp edit-ajax.php/rename) must never
+# misattribute or dismiss each other's notification.
+# ---------------------------------------------------------------------------
+
+
+def test_rename_notify_failing_entry_ids_init_empty(hass):
+    """Init: hub._rename_failing_entry_ids starts as an empty set, and the
+    rename active flag starts False — independent of the Stage-2 pair."""
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+
+    assert hub._rename_failing_entry_ids == set()
+    assert hub._rename_notification_active is False
+
+
+def test_rename_notify_single_coordinator_first_failure_fires_immediately(hass):
+    """With one attached coordinator, the effective threshold is
+    min(HUB_RENAME_NOTIFY_THRESHOLD, 1) == 1 — the FIRST record_rename_failure
+    call creates the notification immediately (cap-not-floor semantics)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_RENAME_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("only-account",))
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        hub.record_rename_failure("only-account")
+
+        assert mock_create.call_count == 1
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["notification_id"] == HUB_RENAME_FAILING_NOTIFICATION_ID
+
+
+def test_rename_notify_third_of_three_fires_notification_once(hass):
+    """With three attached coordinators, the effective threshold is
+    min(HUB_RENAME_NOTIFY_THRESHOLD, 3) == 3 — the first two distinct-entry
+    failures create no notification; the third creates exactly one."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_RENAME_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b", "c"))
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        hub.record_rename_failure("a")
+        mock_create.assert_not_called()
+
+        hub.record_rename_failure("b")
+        mock_create.assert_not_called()
+
+        hub.record_rename_failure("c")
+        assert mock_create.call_count == 1
+        assert mock_create.call_args.kwargs["notification_id"] == HUB_RENAME_FAILING_NOTIFICATION_ID
+        assert mock_create.call_args.kwargs["title"] != "Shop2Parcel Stage-2 Failing"
+
+
+def test_rename_notify_repeated_same_entry_does_not_refire(hass):
+    """Repeated record_rename_failure calls for the SAME entry id after the
+    notification is active create no additional notification."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("only-account",))
+
+    with patch.object(persistent_notification, "async_create") as mock_create:
+        hub.record_rename_failure("only-account")
+        hub.record_rename_failure("only-account")
+        hub.record_rename_failure("only-account")
+
+        assert mock_create.call_count == 1
+        assert hub._rename_failing_entry_ids == {"only-account"}
+
+
+def test_rename_notify_success_one_of_two_does_not_dismiss(hass):
+    """record_rename_success for one of two failing entries does not
+    dismiss — the failing set is not yet empty."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b"))
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        hub.record_rename_failure("a")
+        hub.record_rename_failure("b")
+
+        hub.record_rename_success("a")
+
+        mock_dismiss.assert_not_called()
+        assert hub._rename_failing_entry_ids == {"b"}
+
+
+def test_rename_notify_success_last_failing_dismisses(hass):
+    """record_rename_success for the ONLY failing entry dismisses the
+    notification using the rename notification id and clears the active flag."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_RENAME_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("only-account",))
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        hub.record_rename_failure("only-account")
+        hub.record_rename_success("only-account")
+
+        mock_dismiss.assert_called_once_with(
+            hass, notification_id=HUB_RENAME_FAILING_NOTIFICATION_ID
+        )
+        assert hub._rename_failing_entry_ids == set()
+        assert hub._rename_notification_active is False
+
+
+def test_rename_notify_cross_domain_isolation(hass):
+    """Cross-domain isolation (T-37-17): drive BOTH record_stage2_worker_failure
+    and record_rename_failure into notifying state for the same fleet, then
+    call record_stage2_worker_success for every Stage-2-failing entry and
+    assert the rename notification id was never dismissed — recovery in one
+    domain must not dismiss the other's notification. Also proves
+    record_rename_failure never touches _stage2_failing_entry_ids and
+    record_stage2_worker_success never dismisses the rename notification id."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_RENAME_FAILING_NOTIFICATION_ID,
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("only-account",))
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        # Drive both domains into a failing/notifying state for the same entry.
+        hub.record_stage2_worker_failure("only-account")
+        hub.record_rename_failure("only-account")
+
+        assert hub._rename_failing_entry_ids == {"only-account"}
+        assert hub._stage2_failing_entry_ids == {"only-account"}
+
+        # Recovery in the Stage-2 domain only.
+        hub.record_stage2_worker_success("only-account")
+
+        # The Stage-2 notification was dismissed, but the rename one was not.
+        dismissed_ids = [call.kwargs["notification_id"] for call in mock_dismiss.call_args_list]
+        assert HUB_STAGE2_FAILING_NOTIFICATION_ID in dismissed_ids
+        assert HUB_RENAME_FAILING_NOTIFICATION_ID not in dismissed_ids
+        assert hub._rename_failing_entry_ids == {"only-account"}
+        assert hub._rename_notification_active is True
+
+
+def test_rename_notify_failure_never_touches_stage2_failing_set(hass):
+    """record_rename_failure leaves _stage2_failing_entry_ids empty — the two
+    failure domains never share state."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    _attach_mock_coordinators(hub, ("a", "b", "c"))
+
+    with patch.object(persistent_notification, "async_create"):
+        hub.record_rename_failure("a")
+        hub.record_rename_failure("b")
+        hub.record_rename_failure("c")
+
+        assert hub._stage2_failing_entry_ids == set()
+        assert hub._rename_failing_entry_ids == {"a", "b", "c"}
+
+
+def test_rename_notify_detach_discards_and_dismisses_when_empty(hass):
+    """detach(coordinator) discards a departing entry from the rename failing
+    set, dismissing the rename notification once that set empties — mirrors
+    the Stage-2 detach behavior in the same method."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_RENAME_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    hub = Shop2ParcelHub(hass)
+    coordinator_a = MagicMock()
+    coordinator_a.config_entry.entry_id = "entry-a"
+    hub.attach(coordinator_a)
+
+    with (
+        patch.object(persistent_notification, "async_create"),
+        patch.object(persistent_notification, "async_dismiss") as mock_dismiss,
+    ):
+        hub.record_rename_failure("entry-a")
+
+        hub.detach(coordinator_a)
+
+        assert hub._rename_failing_entry_ids == set()
+        assert hub._rename_notification_active is False
+        mock_dismiss.assert_any_call(hass, notification_id=HUB_RENAME_FAILING_NOTIFICATION_ID)
+
+
+async def test_rename_notify_async_shutdown_dismisses_notification(hass):
+    """async_shutdown() dismisses HUB_RENAME_FAILING_NOTIFICATION_ID alongside
+    the Stage-2 id, unconditionally (mirrors the Stage-2 teardown-dismiss)."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_RENAME_FAILING_NOTIFICATION_ID,
+    )
+    from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
+
+    with patch("custom_components.shop2parcel.hub.Shop2ParcelStore") as mock_store_cls:
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+
+        hub = Shop2ParcelHub(hass)
+        await hub.async_setup()
+
+        with patch.object(persistent_notification, "async_dismiss") as mock_dismiss:
+            await hub.async_shutdown()
+
+            dismissed_ids = [call.kwargs["notification_id"] for call in mock_dismiss.call_args_list]
+            assert HUB_RENAME_FAILING_NOTIFICATION_ID in dismissed_ids
