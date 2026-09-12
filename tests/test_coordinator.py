@@ -27,6 +27,7 @@ from custom_components.shop2parcel.api.exceptions import (
     ParcelAppTransientError,
 )
 from custom_components.shop2parcel.const import (
+    CONF_DEBUG_MODE,
     CONF_GMAIL_QUERY,
     CONF_POLL_INTERVAL,
     CONF_RESCAN_WINDOW_DAYS,
@@ -940,6 +941,102 @@ async def test_cleanup_removes_delivered_from_data(hass, mock_config_entry):
 
     assert "msg_a" not in coordinator.data
     assert "msg_b" in coordinator.data
+
+
+async def test_cleanup_delivered_pops_sweep_seen_message_ids_for_removed_only(
+    hass, mock_config_entry
+):
+    """Phase 37 / T-37-07: async_cleanup_delivered must pop sweep_seen_message_ids
+    for every storage key it removes (GC), while a still-tracked shipment's entry
+    is retained — otherwise the map grows unboundedly for untracked shipments."""
+    mock_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(
+        return_value=[
+            {"tracking_number": "TRACK_A", "status_code": 0},  # delivered
+            {"tracking_number": "TRACK_B", "status_code": 2},  # in transit, keep
+        ]
+    )
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
+
+        coordinator.async_set_updated_data(
+            {
+                "msg_a": ShipmentData("TRACK_A", "UPS", "#1", "msg_a", 1),
+                "msg_b": ShipmentData("TRACK_B", "UPS", "#2", "msg_b", 2),
+            }
+        )
+        coordinator._sweep_seen_message_ids = {"msg_a": {"m1"}, "msg_b": {"m2"}}
+        await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+
+    assert "msg_a" not in coordinator._sweep_seen_message_ids, (
+        "sweep_seen_message_ids for a delivered/removed shipment must be garbage-collected"
+    )
+    assert coordinator._sweep_seen_message_ids.get("msg_b") == {"m2"}, (
+        "sweep_seen_message_ids for a still-tracked shipment must be retained"
+    )
+
+
+async def test_cleanup_delivered_sweep_seen_debug_mode_no_store_write(hass, mock_config_entry):
+    """DBG-03: async_cleanup_delivered's in-memory sweep_seen_message_ids GC pop
+    happens regardless of debug mode, but in debug mode no store write occurs."""
+    debug_config_entry = MockConfigEntry(
+        domain=mock_config_entry.domain,
+        data=dict(mock_config_entry.data),
+        options={CONF_DEBUG_MODE: True},
+        unique_id=mock_config_entry.unique_id,
+    )
+    debug_config_entry.add_to_hass(hass)
+    fake_client = MagicMock()
+    fake_client.async_get_deliveries = AsyncMock(
+        return_value=[{"tracking_number": "TRACK_A", "status_code": 0}]
+    )
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch(
+            "custom_components.shop2parcel.coordinator.ParcelAppClient", return_value=fake_client
+        ),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_store_cls.return_value.async_delay_save = MagicMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        await hass.config_entries.async_setup(debug_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][debug_config_entry.entry_id]["coordinator"]
+
+        coordinator.async_set_updated_data(
+            {"msg_a": ShipmentData("TRACK_A", "UPS", "#1", "msg_a", 1)}
+        )
+        coordinator._sweep_seen_message_ids = {"msg_a": {"m1"}}
+        await coordinator.async_cleanup_delivered(datetime.now(timezone.utc))
+
+    assert "msg_a" not in coordinator._sweep_seen_message_ids, (
+        "in-memory GC pop happens regardless of debug mode"
+    )
+    mock_store_cls.return_value.async_delay_save.assert_not_called()
 
 
 async def test_cleanup_entity_registry_noop_for_phase26(hass, mock_config_entry):

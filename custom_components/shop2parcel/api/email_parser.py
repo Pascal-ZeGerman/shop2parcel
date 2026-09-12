@@ -54,6 +54,11 @@ class ShipmentData:
     # constructors remain valid (non-breaking). Populated only by merge_llm_authoritative
     # (via the locked-field replace loop) or by the gmail Stage-2 fallback ShipmentData builder.
     order_summary: str | None = None
+    # Phase 37 (D-08): sweep-owned correlation key, populated after the fact from a
+    # correlated match email's (already MRG-05-grounded) order_name — never sent to
+    # parcelapp directly (mirrors order_summary's "never POSTed" precedent). Defaults
+    # None so all existing positional/keyword constructors remain valid (non-breaking).
+    order_number: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
