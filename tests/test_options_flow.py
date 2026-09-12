@@ -10,6 +10,7 @@ from homeassistant.helpers.selector import SelectSelector
 
 from custom_components.shop2parcel.api.exceptions import OllamaTransientError
 from custom_components.shop2parcel.const import (
+    CONF_ACCOUNT_TOKEN,
     CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
     CONF_FIELD_DESCRIPTION,
@@ -1771,3 +1772,228 @@ async def test_model_field_dropdown_includes_stored_model_not_in_tags(hass, mock
 # (a stored value keeps working) is covered by
 # test_options_flow_gmail_query_stored_value_survives_settings_save above.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Phase 37-06 Task 1 (D-03): account_token schema field renders in both
+# connection-type branches, defaulting from entry.data (never entry.options).
+# ---------------------------------------------------------------------------
+
+
+async def test_settings_account_token_in_gmail_schema(hass, mock_config_entry):
+    """Rendering the Settings step for a Gmail entry includes account_token."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=None)
+    schema_keys = [str(k) for k in result["data_schema"].schema]
+    assert CONF_ACCOUNT_TOKEN in schema_keys
+
+
+async def test_settings_account_token_in_imap_schema(hass, mock_config_entry):
+    """Rendering the Settings step for an IMAP entry includes account_token."""
+    handler, fake_entry = _make_imap_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=None)
+    schema_keys = [str(k) for k in result["data_schema"].schema]
+    assert CONF_ACCOUNT_TOKEN in schema_keys
+
+
+async def test_settings_account_token_default_reads_from_entry_data(hass, mock_config_entry):
+    """The rendered default equals the value stored in config_entry.data (not options)."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    fake_entry.data = {"connection_type": "gmail", CONF_ACCOUNT_TOKEN: "stored-cookie-value"}
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=None)
+    schema_dict = {str(k): k for k in result["data_schema"].schema}
+    token_key = schema_dict[CONF_ACCOUNT_TOKEN]
+    assert token_key.default() == "stored-cookie-value"
+
+
+async def test_settings_account_token_default_empty_when_not_configured(hass, mock_config_entry):
+    """The rendered default is an empty string when no token is stored in entry.data."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    with patch.object(
+        type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+    ):
+        result = await handler.async_step_settings(user_input=None)
+    schema_dict = {str(k): k for k in result["data_schema"].schema}
+    token_key = schema_dict[CONF_ACCOUNT_TOKEN]
+    assert token_key.default() == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 37-06 Task 2 (T-37-05/T-37-19/T-37-03): submit path routes
+# account_token into entry.data, guards against a redundant reload, and
+# never leaks the value into a log record.
+# ---------------------------------------------------------------------------
+
+
+def _account_token_user_input(**overrides: object) -> dict:
+    """Build a minimal valid Gmail-branch Settings submission for account_token tests."""
+    user_input = {
+        CONF_POLL_INTERVAL: 30,
+        CONF_RESCAN_WINDOW_DAYS: 30,
+        CONF_DEBUG_MODE: False,
+        CONF_OLLAMA_URL: "",
+        CONF_ACCOUNT_TOKEN: "",
+        CONF_OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL,
+        CONF_OLLAMA_TIMEOUT: DEFAULT_OLLAMA_TIMEOUT,
+        CONF_QUEUE_MAXLEN: DEFAULT_QUEUE_MAXLEN,
+    }
+    user_input.update(overrides)
+    return user_input
+
+
+async def test_settings_account_token_new_writes_to_entry_data_not_options(hass, mock_config_entry):
+    """T-37-05: a new token lands in entry.data and never in entry.options."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    fake_entry.data = {"connection_type": "gmail"}
+    mock_update_entry = MagicMock()
+    user_input = _account_token_user_input(**{CONF_ACCOUNT_TOKEN: "s3cr3t-cookie-value"})
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(hass.config_entries, "async_update_entry", mock_update_entry),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "create_entry"
+    assert CONF_ACCOUNT_TOKEN not in result["data"], "token must never land in entry.options"
+    mock_update_entry.assert_called_once()
+    _, kwargs = mock_update_entry.call_args
+    assert kwargs["data"][CONF_ACCOUNT_TOKEN] == "s3cr3t-cookie-value"
+
+
+async def test_settings_account_token_unchanged_skips_async_update_entry(hass, mock_config_entry):
+    """T-37-19: submitting the same token value calls async_update_entry zero times.
+
+    OptionsFlowHandler subclasses OptionsFlowWithReload, so the standard
+    async_create_entry return already reloads the entry on every save — an
+    unconditional async_update_entry call would trigger a second reload.
+    """
+    handler, fake_entry = _make_handler_with_options(options={})
+    fake_entry.data = {"connection_type": "gmail", CONF_ACCOUNT_TOKEN: "unchanged-token"}
+    mock_update_entry = MagicMock()
+    user_input = _account_token_user_input(**{CONF_ACCOUNT_TOKEN: "unchanged-token"})
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(hass.config_entries, "async_update_entry", mock_update_entry),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "create_entry"
+    mock_update_entry.assert_not_called()
+
+
+async def test_settings_account_token_empty_removes_stored_key(hass, mock_config_entry):
+    """Submitting an empty value when a token was previously stored removes it."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    fake_entry.data = {"connection_type": "gmail", CONF_ACCOUNT_TOKEN: "old-token"}
+    mock_update_entry = MagicMock()
+    user_input = _account_token_user_input()
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(hass.config_entries, "async_update_entry", mock_update_entry),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "create_entry"
+    mock_update_entry.assert_called_once()
+    _, kwargs = mock_update_entry.call_args
+    assert CONF_ACCOUNT_TOKEN not in kwargs["data"]
+
+
+async def test_settings_account_token_whitespace_only_treated_as_empty(hass, mock_config_entry):
+    """A whitespace-only token normalizes to 'not configured' — never stored as whitespace."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    fake_entry.data = {"connection_type": "gmail"}
+    mock_update_entry = MagicMock()
+    user_input = _account_token_user_input(**{CONF_ACCOUNT_TOKEN: "   "})
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(hass.config_entries, "async_update_entry", mock_update_entry),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "create_entry"
+    mock_update_entry.assert_not_called()
+
+
+async def test_settings_account_token_stripped_before_storing(hass, mock_config_entry):
+    """Leading/trailing whitespace around a token is stripped before it is stored."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    fake_entry.data = {"connection_type": "gmail"}
+    mock_update_entry = MagicMock()
+    user_input = _account_token_user_input(**{CONF_ACCOUNT_TOKEN: "  padded-token-value  "})
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(hass.config_entries, "async_update_entry", mock_update_entry),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "create_entry"
+    mock_update_entry.assert_called_once()
+    _, kwargs = mock_update_entry.call_args
+    assert kwargs["data"][CONF_ACCOUNT_TOKEN] == "padded-token-value"
+
+
+async def test_settings_account_token_other_fields_still_land_in_options(hass, mock_config_entry):
+    """Regression: every other Settings field continues to land in entry.options."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    fake_entry.data = {"connection_type": "gmail"}
+    user_input = _account_token_user_input(
+        **{CONF_POLL_INTERVAL: 45, CONF_DEBUG_MODE: True, CONF_ACCOUNT_TOKEN: "some-token"}
+    )
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(hass.config_entries, "async_update_entry", MagicMock()),
+    ):
+        result = await handler.async_step_settings(user_input=user_input)
+
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_POLL_INTERVAL] == 45
+    assert result["data"][CONF_DEBUG_MODE] is True
+    assert CONF_ACCOUNT_TOKEN not in result["data"]
+
+
+async def test_settings_account_token_never_logged(hass, mock_config_entry, caplog):
+    """T-37-03: the submitted token value never appears in any captured log record."""
+    handler, fake_entry = _make_handler_with_options(options={})
+    fake_entry.data = {"connection_type": "gmail"}
+    secret_value = "super-secret-cookie-zzz999"
+    user_input = _account_token_user_input(**{CONF_ACCOUNT_TOKEN: secret_value})
+    with (
+        patch.object(
+            type(handler), "config_entry", new_callable=PropertyMock, return_value=fake_entry
+        ),
+        patch.object(type(handler), "hass", new_callable=PropertyMock, return_value=hass),
+        patch.object(hass.config_entries, "async_update_entry", MagicMock()),
+        caplog.at_level("DEBUG"),
+    ):
+        await handler.async_step_settings(user_input=user_input)
+
+    for record in caplog.records:
+        assert secret_value not in record.getMessage()

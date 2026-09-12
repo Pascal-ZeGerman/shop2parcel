@@ -42,11 +42,12 @@ def test_strings_settings_step(strings):
 
 
 def test_strings_settings_data_keys(strings):
-    """Test 3: settings.data has all nine field labels.
+    """Test 3: settings.data has all ten field labels.
 
     quick-260806-i5r (D-03): gmail_query is no longer a user-editable field —
     keyword narrowing is now applied locally (gmail_coordinator.py), not via a
     Gmail-search-query the user tunes here — so it drops from ten keys to nine.
+    Phase 37 (D-03): account_token adds the tenth key back.
     """
     data = strings["options"]["step"]["settings"]["data"]
     expected_keys = {
@@ -56,6 +57,7 @@ def test_strings_settings_data_keys(strings):
         "rescan_window_days",
         "debug_mode",
         "ollama_url",
+        "account_token",
         "ollama_model",
         "ollama_timeout",
         "queue_maxlen",
