@@ -27,6 +27,7 @@ from custom_components.shop2parcel.api.exceptions import (
     ParcelAppTransientError,
 )
 from custom_components.shop2parcel.const import (
+    CONF_ACCOUNT_TOKEN,
     CONF_DEBUG_MODE,
     CONF_GMAIL_QUERY,
     CONF_POLL_INTERVAL,
@@ -35,6 +36,7 @@ from custom_components.shop2parcel.const import (
     DEFAULT_POLL_INTERVAL,
     DEFAULT_RESCAN_WINDOW_DAYS,
     DOMAIN,
+    MAX_SWEEP_SHIPMENTS_PER_CYCLE,
 )
 from custom_components.shop2parcel.coordinator import (
     PollStats,
@@ -6680,3 +6682,193 @@ async def test_stage2_queue_depth_zero_when_unattached():
     coord._hub = None
     coord.config_entry = None
     assert coord.stage2_queue_depth == 0
+
+
+# -------- Phase 37 / 37-07 Task 1: _select_sweep_candidates ---------------
+
+
+def _stuck_shipment(message_id: str, email_date: int) -> ShipmentData:
+    """A shipment whose parcelapp description would still be the bare tracking number."""
+    return ShipmentData(
+        tracking_number=f"1Z{message_id}",
+        carrier_name="UPS",
+        order_name="",
+        message_id=message_id,
+        email_date=email_date,
+    )
+
+
+def _with_account_token(hass, entry, token: str = "tok123") -> None:
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_ACCOUNT_TOKEN: token})
+
+
+async def test_sweep_candidates_stuck_when_order_summary_none_and_order_name_empty(
+    hass, mock_config_entry
+):
+    """order_summary=None and order_name='' is exactly the stuck predicate."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_set_updated_data({"m1": _stuck_shipment("m1", 1)})
+    result = coord._select_sweep_candidates()
+    assert [pair[0] for pair in result] == ["m1"]
+
+
+async def test_sweep_candidates_excludes_nonempty_order_summary(hass, mock_config_entry):
+    """A non-empty order_summary means the shipment is not a candidate."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    named = ShipmentData(
+        tracking_number="1Znamed",
+        carrier_name="UPS",
+        order_name="",
+        message_id="m1",
+        email_date=1,
+        order_summary="Amazon - Shoes",
+    )
+    coord.async_set_updated_data({"m1": named})
+    assert coord._select_sweep_candidates() == []
+
+
+async def test_sweep_candidates_excludes_empty_summary_nonempty_order_name(hass, mock_config_entry):
+    """Empty order_summary but non-empty order_name is already not the bare tracking
+    number — the parcelapp description precedence falls through to order_name."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    named = ShipmentData(
+        tracking_number="1Znamed",
+        carrier_name="UPS",
+        order_name="#1234",
+        message_id="m1",
+        email_date=1,
+    )
+    coord.async_set_updated_data({"m1": named})
+    assert coord._select_sweep_candidates() == []
+
+
+async def test_sweep_candidates_empty_without_account_token(hass, mock_config_entry):
+    """No CONF_ACCOUNT_TOKEN configured -> empty result even with stuck shipments present."""
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_set_updated_data({"m1": _stuck_shipment("m1", 1)})
+    assert coord._select_sweep_candidates() == []
+
+
+async def test_sweep_candidates_empty_with_whitespace_account_token(hass, mock_config_entry):
+    """A whitespace-only account token is treated as not configured."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry, token="   ")
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_set_updated_data({"m1": _stuck_shipment("m1", 1)})
+    assert coord._select_sweep_candidates() == []
+
+
+async def test_sweep_candidates_empty_data_returns_empty_list(hass, mock_config_entry):
+    """coordinator.data empty -> empty list, no raise."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_set_updated_data({})
+    assert coord._select_sweep_candidates() == []
+
+
+async def test_sweep_candidates_deterministic_order_for_fixed_cursor(hass, mock_config_entry):
+    """Oldest stuck shipment (by email_date) sorts first; storage_key breaks ties."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_set_updated_data(
+        {
+            "m_b": _stuck_shipment("m_b", 100),
+            "m_a": _stuck_shipment("m_a", 50),
+            "m_c": _stuck_shipment("m_c", 50),
+        }
+    )
+    result = coord._select_sweep_candidates()
+    assert [pair[0] for pair in result] == ["m_a", "m_c", "m_b"]
+
+
+async def test_sweep_cap_returns_at_most_max_per_cycle(hass, mock_config_entry):
+    """More stuck shipments than the cap -> exactly MAX_SWEEP_SHIPMENTS_PER_CYCLE returned."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_set_updated_data({f"m{i}": _stuck_shipment(f"m{i}", i) for i in range(5)})
+    result = coord._select_sweep_candidates()
+    assert len(result) == MAX_SWEEP_SHIPMENTS_PER_CYCLE
+
+
+async def test_sweep_cap_rotation_covers_all_shipments_across_two_cycles(hass, mock_config_entry):
+    """Two successive calls with 5 stuck shipments and cap=3 must together cover all
+    5 storage keys — no shipment is starved across cycles (D-06 / T-37-21)."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord.async_set_updated_data({f"m{i}": _stuck_shipment(f"m{i}", i) for i in range(5)})
+    first = {pair[0] for pair in coord._select_sweep_candidates()}
+    second = {pair[0] for pair in coord._select_sweep_candidates()}
+    assert first | second == {f"m{i}" for i in range(5)}
+
+
+# -------- Phase 37 / 37-07 Task 2: correlated-search hook + seen diff -----
+
+
+async def test_sweep_seen_diff_base_search_returns_empty_and_logs_debug(
+    hass, mock_config_entry, caplog
+):
+    """Base-class async_search_correlated_emails has no mailbox — returns [] and
+    logs at DEBUG rather than raising."""
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    with caplog.at_level(logging.DEBUG):
+        result = await Shop2ParcelCoordinator.async_search_correlated_emails(coord, ["1Z999"])
+    assert result == []
+    assert any(record.levelno == logging.DEBUG for record in caplog.records), (
+        "base async_search_correlated_emails must log at DEBUG"
+    )
+
+
+async def test_sweep_seen_diff_returns_all_when_nothing_recorded(hass, mock_config_entry):
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    assert coord._new_correlated_message_ids("m1", ["a", "b"]) == ["a", "b"]
+
+
+async def test_sweep_seen_diff_excludes_marked_ids(hass, mock_config_entry):
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._mark_sweep_messages_seen("m1", ["a"])
+    assert coord._new_correlated_message_ids("m1", ["a", "b"]) == ["b"]
+
+
+async def test_sweep_seen_diff_isolated_per_storage_key(hass, mock_config_entry):
+    """Marking under one storage key does not affect the diff for another."""
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._mark_sweep_messages_seen("m1", ["a"])
+    assert coord._new_correlated_message_ids("m2", ["a", "b"]) == ["a", "b"]
+
+
+async def test_sweep_seen_diff_marking_is_additive(hass, mock_config_entry):
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._mark_sweep_messages_seen("m1", ["a"])
+    coord._mark_sweep_messages_seen("m1", ["b"])
+    assert coord._sweep_seen_message_ids["m1"] == {"a", "b"}
+
+
+async def test_sweep_seen_diff_preserves_input_order(hass, mock_config_entry):
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._mark_sweep_messages_seen("m1", ["z"])
+    assert coord._new_correlated_message_ids("m1", ["c", "z", "a"]) == ["c", "a"]
+
+
+async def test_sweep_seen_diff_marking_creates_entry_on_first_use(hass, mock_config_entry):
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    assert "m1" not in coord._sweep_seen_message_ids
+    coord._mark_sweep_messages_seen("m1", ["a"])
+    assert coord._sweep_seen_message_ids["m1"] == {"a"}

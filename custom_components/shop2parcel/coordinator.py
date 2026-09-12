@@ -24,6 +24,7 @@ import logging
 import re
 import time as _time
 from collections import OrderedDict, deque
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,7 @@ from .api.exceptions import (
 from .api.ollama_client import OllamaClient
 from .api.parcelapp import ParcelAppClient
 from .const import (
+    CONF_ACCOUNT_TOKEN,
     CONF_API_KEY,
     CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
@@ -65,6 +67,7 @@ from .const import (
     MAX_STAGE2_FALLBACK_EXTRACTIONS_PER_POLL,
     MAX_STAGE2_FALLBACK_INLINE_SECONDS,
     MAX_STAGE2_POSTS_PER_POLL,
+    MAX_SWEEP_SHIPMENTS_PER_CYCLE,
     SEEN_MESSAGE_IDS_MAXLEN,
     STAGE2_MSG_QUARANTINE_THRESHOLD,
     STAGE2_MSG_TRANSIENT_QUARANTINE_THRESHOLD,
@@ -546,6 +549,12 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # store key "sweep_seen_message_ids" — no STORAGE_VERSION bump. Garbage-collected in
         # async_cleanup_delivered when a shipment leaves tracking (see below).
         self._sweep_seen_message_ids: dict[str, set[str]] = {}
+        # Phase 37 (D-06 / T-37-21): rotation cursor for _select_sweep_candidates'
+        # wrapping window. Deliberately in-memory only, NOT persisted — this is a
+        # fairness hint, not state worth surviving a restart. Resetting it to 0 on
+        # HA restart merely restarts the rotation window from the beginning; it does
+        # not re-select or skip any shipment.
+        self._sweep_cursor: int = 0
         # Phase 26: operational-health persisted counters.
         # Persisted across HA restarts via additive store keys (no STORAGE_VERSION bump).
         # Incremented only on genuine 2xx POST-success via _record_forward().
@@ -2668,3 +2677,124 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         if not debug_mode:
             self._pending_shipments = new_data
             await self._async_save_store()
+
+    def _select_sweep_candidates(self) -> list[tuple[str, ShipmentData]]:
+        """Select which "stuck" shipments this sweep cycle will search and attempt
+        to rename (D-06, T-37-06, T-37-21).
+
+        A shipment is "stuck" exactly when its parcelapp.net description would
+        still be the bare tracking number — i.e. when neither order_summary nor
+        order_name is truthy. This predicate is derived directly from the
+        description precedence expression at every POST call site
+        (`merged_shipment.order_summary or merged_shipment.order_name or
+        merged_shipment.tracking_number` — see async_add_delivery call sites
+        above). Changing one without the other silently breaks the sweep's
+        targeting.
+
+        Delivered shipments need no explicit check here: RESEARCH.md Pitfall 5
+        confirms the existing daily async_cleanup_delivered() removal from
+        self.data is the sweep's termination condition — a shipment naturally
+        stops being swept once that cleanup drops it from coordinator.data. The
+        worst case is one or two extra searches in the ~24h window between
+        delivery and the next daily cleanup, which is acceptable because rename
+        POSTs are already lowest priority against the shared 20/day quota. Do
+        NOT add a redundant delivery-status call here.
+        """
+        if self.config_entry is None or not self.data:
+            return []
+
+        # Feature gate (CONTEXT.md "Claude's Discretion"): the presence of a
+        # non-blank CONF_ACCOUNT_TOKEN IS the sweep's on/off switch — there is
+        # no separate boolean toggle. Do not add one.
+        account_token = self.config_entry.data.get(CONF_ACCOUNT_TOKEN)
+        if not account_token or not account_token.strip():
+            return []
+
+        stuck = [
+            (storage_key, shipment)
+            for storage_key, shipment in self.data.items()
+            if not shipment.order_summary and not shipment.order_name
+        ]
+
+        # Deterministic ordering: oldest stuck shipment first (email_date
+        # ascending), storage_key as tie-break so ordering never depends on
+        # dict insertion order.
+        stuck.sort(key=lambda pair: (pair[1].email_date, pair[0]))
+
+        if len(stuck) <= MAX_SWEEP_SHIPMENTS_PER_CYCLE:
+            return stuck
+
+        # Cap plus rotation (D-06 / T-37-21): a wrapping window keyed off an
+        # in-memory cursor is what makes "shipments not reached in one cycle
+        # are picked up on a later sweep" literally true — a plain head slice
+        # would starve every shipment past the cap forever.
+        start = self._sweep_cursor % len(stuck)
+        window = [stuck[(start + i) % len(stuck)] for i in range(MAX_SWEEP_SHIPMENTS_PER_CYCLE)]
+        self._sweep_cursor += MAX_SWEEP_SHIPMENTS_PER_CYCLE
+        return window
+
+    async def async_search_correlated_emails(
+        self, search_terms: list[str]
+    ) -> list[tuple[str, str]]:
+        """Search THIS ACCOUNT's OWN mailbox for messages correlated to one stuck
+        shipment (D-05). This contract is depended on by plans 37-08 (Gmail/IMAP
+        overrides) and 37-09 (naming pipeline) — do not change its shape without
+        updating both.
+
+        Input: the list of identifier strings to correlate on for one shipment —
+        the tracking number always, plus the order number when the shipment
+        already has one. The caller never passes an empty list.
+
+        Output: a list of (message_id, html_body) pairs for messages in this
+        account's own mailbox that mention any of the terms. D-05 locks the
+        search scope to this account's mailbox only; the known self-forwarding
+        blind spot (a shipment's confirmation email arriving at a DIFFERENT
+        configured account than the one that received the carrier email) is
+        accepted as out of scope for this phase and must not be "helpfully"
+        closed by reaching into another coordinator's mailbox. A message with
+        no HTML body is omitted rather than returned with an empty string.
+
+        Implementations must not raise on transient mailbox failures — they log
+        and return an empty list, because the sweep runs outside
+        _async_update_data, where ConfigEntryAuthFailed and UpdateFailed are
+        meaningless (same warning as async_cleanup_delivered's docstring above).
+
+        This base implementation returns an empty list: a coordinator type with
+        no mailbox (i.e. this base class itself, before any subclass override)
+        simply never renames. This is a real behavior, not a deferral — only
+        the Gmail and IMAP subclasses have a mailbox to search. Plan 37-08 adds
+        those two overrides.
+        """
+        _LOGGER.debug(
+            "%s has no correlated-mailbox-search override; sweep correlation returns none",
+            type(self).__name__,
+        )
+        return []
+
+    def _new_correlated_message_ids(self, storage_key: str, found_ids: list[str]) -> list[str]:
+        """Diff freshly-found correlated message ids against the ones already
+        considered for this shipment (any outcome), per the persisted
+        _sweep_seen_message_ids map (plan 37-03).
+
+        An empty result means: skip this shipment entirely this cycle, spending
+        no LLM call and no quota slot on it. This is the mechanism behind
+        ROADMAP sub-scope 4's "only re-attempt when a genuinely new correlated
+        email has appeared." Input order is preserved in the returned list so a
+        caller processes results deterministically.
+        """
+        seen = self._sweep_seen_message_ids.get(storage_key, set())
+        return [message_id for message_id in found_ids if message_id not in seen]
+
+    def _mark_sweep_messages_seen(self, storage_key: str, message_ids: Iterable[str]) -> None:
+        """Record that every one of these correlated message ids has now been
+        CONSIDERED for this shipment, regardless of outcome — a contaminated
+        message, an ungrounded extraction and a successful rename all mark,
+        because none of them should be re-evaluated against the LLM/quota on
+        every future cycle forever (T-37-24).
+
+        Creates the per-shipment entry on first use rather than requiring
+        pre-seeding. Mutates in-memory state only — persisting
+        _sweep_seen_message_ids to the store is the caller's job and is subject
+        to the existing CONF_DEBUG_MODE store-write gate (DBG-03).
+        """
+        self._sweep_seen_message_ids.setdefault(storage_key, set()).update(message_ids)
