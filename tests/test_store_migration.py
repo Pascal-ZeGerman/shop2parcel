@@ -1491,6 +1491,141 @@ def test_shipment_data_order_number_defaults_none_and_replace_works() -> None:
     assert renamed.email_date == shipment.email_date
 
 
+# ---------------------------------------------------------------------------
+# Phase 37: sweep_seen_message_ids load guards + snapshot serialization
+# ---------------------------------------------------------------------------
+
+
+async def test_fresh_coordinator_has_empty_sweep_seen_message_ids(hass, mock_config_entry):
+    """Phase 37: a freshly constructed coordinator exposes _sweep_seen_message_ids
+    as an empty dict (in-memory cache initialised in __init__)."""
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    assert coord._sweep_seen_message_ids == {}
+
+
+async def test_load_store_restores_sweep_seen_message_ids_as_sets() -> None:
+    """Phase 37: a store containing sweep_seen_message_ids mapping a storage key to
+    a list of message ids must load into a dict of that key to a set of those ids.
+
+    RED: fails until _async_load_store hydrates self._sweep_seen_message_ids.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "sweep_seen_message_ids": {
+                "msg_a": ["m1", "m2"],
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert coordinator._sweep_seen_message_ids == {"msg_a": {"m1", "m2"}}, (
+        f"sweep_seen_message_ids must load as dict-of-sets; got {coordinator._sweep_seen_message_ids!r}"
+    )
+
+
+async def test_load_store_sweep_seen_message_ids_non_dict_resets_empty_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 37 / T-37-12: a top-level sweep_seen_message_ids value that is not a
+    dict (e.g. hand-edited into a list) must reset to an empty dict and log a
+    WARNING, mirroring the seen_message_ids / submitted_tracking_numbers guards.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "sweep_seen_message_ids": ["not", "a", "dict"],
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
+        await coordinator._async_load_store()
+
+    assert coordinator._sweep_seen_message_ids == {}, (
+        "Non-dict sweep_seen_message_ids must reset to an empty dict, not raise"
+    )
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("sweep_seen_message_ids" in r.message for r in warning_records), (
+        f"Expected a WARNING naming sweep_seen_message_ids; got {[r.message for r in warning_records]}"
+    )
+
+
+async def test_load_store_sweep_seen_message_ids_drops_malformed_entries() -> None:
+    """Phase 37 / T-37-12: within a loaded sweep_seen_message_ids dict, an entry
+    whose key is not a string or whose value is not a list is dropped rather than
+    raising — mirrors the per-entry defensive style used elsewhere in this loader.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "sweep_seen_message_ids": {
+                "good_key": ["m1"],
+                "bad_value": "not-a-list",
+                123: ["m2"],
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert coordinator._sweep_seen_message_ids == {"good_key": {"m1"}}, (
+        f"Malformed entries must be dropped; got {coordinator._sweep_seen_message_ids!r}"
+    )
+
+
+def test_store_snapshot_sweep_seen_message_ids_json_serializable() -> None:
+    """Phase 37: _store_snapshot() must emit sweep_seen_message_ids as a dict of
+    storage key to a JSON-serializable list — proving no raw set leaked into the
+    snapshot (Store serializes to JSON and cannot write a set)."""
+    import json
+
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    coordinator._pending_shipments = {}
+    coordinator._pending_posts = {}
+    coordinator._total_forwarded = 0
+    coordinator._last_forwarded_ts = None
+    coordinator._seen_message_ids = OrderedDict()
+    coordinator._sweep_seen_message_ids = {"msg_a": {"m1", "m2"}, "msg_b": {"m3"}}
+
+    snapshot = coordinator._store_snapshot()
+
+    assert json.dumps(snapshot), "snapshot must be JSON-serializable"
+    assert set(snapshot["sweep_seen_message_ids"]["msg_a"]) == {"m1", "m2"}
+    assert isinstance(snapshot["sweep_seen_message_ids"]["msg_a"], list)
+
+
 async def test_load_store_renormalizes_submitted_tracking_numbers(hass, mock_config_entry):
     """WR-01: entries persisted under the old strip().upper() scheme (internal
     separators retained) must be re-normalized to the canonical separator-free
