@@ -3157,6 +3157,8 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                     continue
 
                 html_by_id = dict(matches)
+                considered_ids: list[str] = []
+                sweep_posted = False
                 try:
                     # d. Evaluate new messages in order; stop at the first proposal —
                     # one rename per shipment per cycle.
@@ -3165,6 +3167,10 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                             shipment, message_id, html_by_id[message_id]
                         )
                         if proposal is None:
+                            # A definitive content-based rejection (contaminated
+                            # or ungrounded) — this id is fully resolved and
+                            # must never be re-evaluated.
+                            considered_ids.append(message_id)
                             continue
                         posted = await self._async_post_rename(shipment, proposal.description)
                         if posted:
@@ -3175,12 +3181,30 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
                             )
                             renamed_any = True
                             renames_applied += 1
+                            sweep_posted = True
+                            break
+                        # posted is False for a reason unrelated to this email's
+                        # own content (quota reserve, FCFS race, transient
+                        # network error, or an unexpected exception) — do NOT
+                        # mark this or any later, un-evaluated candidate seen;
+                        # a genuinely-new email always gets one fresh look, and
+                        # this one gets its look again next cycle (CR-01).
                         break
                 finally:
-                    # e. Every considered message id is marked seen regardless of
-                    # outcome — contaminated, ungrounded, or failed-to-POST included
-                    # (T-37-24).
-                    self._mark_sweep_messages_seen(storage_key, new_ids)
+                    # e. On a successful rename this cycle, every new id is
+                    # marked seen — including ones never evaluated — because
+                    # the shipment genuinely got a name this cycle and "one
+                    # rename per shipment per cycle" already exhausts this
+                    # cycle's opportunity for it (existing, tested contract:
+                    # test_sweep_cycle_two_proposals_only_one_post). On any
+                    # other outcome, only ids that received a definitive
+                    # content-based rejection are marked seen — an id whose
+                    # valid proposal failed to POST for a reason unrelated to
+                    # its own content, and any id after it, are excluded so
+                    # they remain eligible next cycle (T-37-24, CR-01).
+                    self._mark_sweep_messages_seen(
+                        storage_key, new_ids if sweep_posted else considered_ids
+                    )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.error(
                     "async_sweep_stuck_shipments: unexpected error processing candidate %s: %s",

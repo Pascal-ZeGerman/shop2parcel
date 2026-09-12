@@ -7687,6 +7687,39 @@ async def test_sweep_cycle_two_proposals_only_one_post(hass, mock_config_entry):
     assert coord._sweep_seen_message_ids["m1"] == {"msg-a", "msg-b"}
 
 
+async def test_sweep_cycle_post_failure_does_not_mark_unevaluated_ids_seen(hass, mock_config_entry):
+    """CR-01 regression: a proposal is found for the first correlated message, but
+    _async_post_rename returns False for a reason unrelated to that message's own
+    content (daily-quota reserve pre-check, an FCFS race, or a transient network
+    error all surface identically as posted=False here). Neither the
+    proposal-yielding message NOR the second, never-evaluated message may be
+    marked seen — both must remain eligible for a fresh look on the next sweep
+    cycle, per the feature's own guarantee that a genuinely-new email always gets
+    one fresh look and a shipment that isn't reached is picked up later."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = _mock_sweep_coord(hass, mock_config_entry, data={"m1": _stuck_shipment("m1", 1)})
+    coord.async_search_correlated_emails = AsyncMock(
+        return_value=[("msg-a", "<html>a</html>"), ("msg-b", "<html>b</html>")]
+    )
+    coord._async_attempt_rename = AsyncMock(
+        return_value=_RenameProposal(description="Shop - Widget", order_number=None)
+    )
+    # Simulates the quota-reserve pre-check / FCFS race / transient error — all
+    # of which surface identically here as posted=False.
+    coord._async_post_rename = AsyncMock(return_value=False)
+    await coord.async_sweep_stuck_shipments(datetime.now(timezone.utc))
+    # Only msg-a is ever dispatched to _async_attempt_rename — the loop stops
+    # once the one proposal it produced fails to POST; msg-b is never evaluated.
+    coord._async_attempt_rename.assert_awaited_once()
+    coord._async_post_rename.assert_awaited_once()
+    # Neither id is marked seen: msg-a's proposal was valid but never posted for
+    # a content-unrelated reason, and msg-b was never evaluated at all.
+    assert coord._sweep_seen_message_ids.get("m1", set()) == set()
+    coord._async_save_store.assert_not_awaited()
+    assert coord.data["m1"].order_summary is None
+
+
 async def test_sweep_cycle_renames_two_shipments_one_store_save(hass, mock_config_entry):
     """A cycle that renames two shipments performs exactly one store save, not one
     per shipment."""
