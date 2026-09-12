@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.shop2parcel.correlation import is_contaminated
+from custom_components.shop2parcel.correlation import is_contaminated, sanitize_search_terms
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "correlation"
 
@@ -152,3 +152,88 @@ def test_known_real_shapes(
     assert contaminated is expect_contaminated
     if expect_in_others is not None:
         assert expect_in_others in others
+
+
+# ---------------------------------------------------------------------------
+# Plan 37-08 Task 1: sanitize_search_terms (T-37-25/T-37-26 allowlist guard)
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_search_terms_plain_tracking_number_unchanged() -> None:
+    """A plain alphanumeric tracking number passes through unchanged."""
+    assert sanitize_search_terms(["1Z999AA10123456784"]) == ["1Z999AA10123456784"]
+
+
+def test_sanitize_search_terms_hyphenated_amazon_order_unchanged() -> None:
+    """A hyphenated order number such as the Amazon three-part form passes through
+    unchanged."""
+    assert sanitize_search_terms(["113-5838173-8241820"]) == ["113-5838173-8241820"]
+
+
+def test_sanitize_search_terms_carriage_return_dropped() -> None:
+    """A term containing a carriage return is dropped entirely, not escaped."""
+    assert sanitize_search_terms(["1Z999AA1012345\r6784"]) == []
+
+
+def test_sanitize_search_terms_line_feed_dropped() -> None:
+    """A term containing a line feed is dropped entirely, not escaped."""
+    assert sanitize_search_terms(["1Z999AA1012345\n6784"]) == []
+
+
+def test_sanitize_search_terms_newline_command_injection_dropped() -> None:
+    """A term whose newline is followed by text resembling an additional IMAP command is
+    dropped in its entirety -- the whole term, not just the injected suffix."""
+    malicious = "1Z999AA10123456784\r\nA1 STORE 1 +FLAGS (\\Deleted)"
+    assert sanitize_search_terms([malicious]) == []
+
+
+def test_sanitize_search_terms_double_quote_dropped() -> None:
+    """A term containing a double quote is dropped."""
+    assert sanitize_search_terms(['1Z999"AA10123456784']) == []
+
+
+def test_sanitize_search_terms_space_dropped() -> None:
+    """A term containing a space is dropped."""
+    assert sanitize_search_terms(["a b"]) == []
+
+
+def test_sanitize_search_terms_gmail_operator_colon_dropped() -> None:
+    """A term containing a Gmail search operator colon is dropped."""
+    assert sanitize_search_terms(["from:evil@example.com"]) == []
+
+
+def test_sanitize_search_terms_too_short_dropped() -> None:
+    """A term shorter than 4 characters is dropped."""
+    assert sanitize_search_terms(["abc"]) == []
+
+
+def test_sanitize_search_terms_too_long_dropped() -> None:
+    """A term longer than 64 characters is dropped."""
+    assert sanitize_search_terms(["A" * 65]) == []
+
+
+def test_sanitize_search_terms_max_length_boundary_kept() -> None:
+    """A term of exactly 64 characters is kept (inclusive upper bound)."""
+    term = "A" * 64
+    assert sanitize_search_terms([term]) == [term]
+
+
+def test_sanitize_search_terms_empty_input_yields_empty_output() -> None:
+    """Empty input yields empty output."""
+    assert sanitize_search_terms([]) == []
+
+
+def test_sanitize_search_terms_duplicates_collapsed_preserving_order() -> None:
+    """Duplicate terms are collapsed while preserving first-seen order."""
+    assert sanitize_search_terms(["1Z999AA10123456784", "1Z999AA10123456784"]) == [
+        "1Z999AA10123456784"
+    ]
+    assert sanitize_search_terms(["ORDER-1001", "TRACK-2002", "ORDER-1001"]) == [
+        "ORDER-1001",
+        "TRACK-2002",
+    ]
+
+
+def test_sanitize_search_terms_none_and_blank_entries_dropped() -> None:
+    """None and blank/whitespace-only entries are dropped silently."""
+    assert sanitize_search_terms([None, "", "   ", "1Z999AA10123456784"]) == ["1Z999AA10123456784"]
