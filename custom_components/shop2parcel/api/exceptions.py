@@ -92,6 +92,21 @@ class ParcelAppAlreadyAddedError(ParcelAppError):
     """
 
 
+class ParcelAppEditFailedError(ParcelAppError):
+    """The unofficial edit-ajax.php endpoint returned its plain-text failure marker.
+
+    Phase 37 (D-02/D-04): this endpoint has no structured error code — a body of
+    "ERROR" (case-insensitive, stripped) is the only failure signal it gives. That
+    makes a failure ambiguous between a stale `account_token` (D-03) and a genuine
+    edit rejection; D-04's consecutive-failure counter is the intended way to
+    disambiguate over time, not this exception alone.
+
+    Deliberately NOT a subclass of ParcelAppTransientError — a stale credential
+    does not self-heal on retry, so retrying immediately (as transient errors
+    imply) would just burn another attempt against the same stuck account_token.
+    """
+
+
 class ImapAuthError(ImapError):
     """IMAP login failure (bad credentials, account locked) — coordinator raises ConfigEntryAuthFailed."""
 
