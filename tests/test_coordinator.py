@@ -6731,9 +6731,7 @@ async def test_sweep_candidates_excludes_nonempty_order_summary(hass, mock_confi
     assert coord._select_sweep_candidates() == []
 
 
-async def test_sweep_candidates_excludes_empty_summary_nonempty_order_name(
-    hass, mock_config_entry
-):
+async def test_sweep_candidates_excludes_empty_summary_nonempty_order_name(hass, mock_config_entry):
     """Empty order_summary but non-empty order_name is already not the bare tracking
     number — the parcelapp description precedence falls through to order_name."""
     mock_config_entry.add_to_hass(hass)
@@ -6802,9 +6800,7 @@ async def test_sweep_cap_returns_at_most_max_per_cycle(hass, mock_config_entry):
     assert len(result) == MAX_SWEEP_SHIPMENTS_PER_CYCLE
 
 
-async def test_sweep_cap_rotation_covers_all_shipments_across_two_cycles(
-    hass, mock_config_entry
-):
+async def test_sweep_cap_rotation_covers_all_shipments_across_two_cycles(hass, mock_config_entry):
     """Two successive calls with 5 stuck shipments and cap=3 must together cover all
     5 storage keys — no shipment is starved across cycles (D-06 / T-37-21)."""
     mock_config_entry.add_to_hass(hass)

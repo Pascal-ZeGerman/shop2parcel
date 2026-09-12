@@ -24,6 +24,7 @@ import logging
 import re
 import time as _time
 from collections import OrderedDict, deque
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta
@@ -2731,3 +2732,69 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         window = [stuck[(start + i) % len(stuck)] for i in range(MAX_SWEEP_SHIPMENTS_PER_CYCLE)]
         self._sweep_cursor += MAX_SWEEP_SHIPMENTS_PER_CYCLE
         return window
+
+    async def async_search_correlated_emails(
+        self, search_terms: list[str]
+    ) -> list[tuple[str, str]]:
+        """Search THIS ACCOUNT's OWN mailbox for messages correlated to one stuck
+        shipment (D-05). This contract is depended on by plans 37-08 (Gmail/IMAP
+        overrides) and 37-09 (naming pipeline) — do not change its shape without
+        updating both.
+
+        Input: the list of identifier strings to correlate on for one shipment —
+        the tracking number always, plus the order number when the shipment
+        already has one. The caller never passes an empty list.
+
+        Output: a list of (message_id, html_body) pairs for messages in this
+        account's own mailbox that mention any of the terms. D-05 locks the
+        search scope to this account's mailbox only; the known self-forwarding
+        blind spot (a shipment's confirmation email arriving at a DIFFERENT
+        configured account than the one that received the carrier email) is
+        accepted as out of scope for this phase and must not be "helpfully"
+        closed by reaching into another coordinator's mailbox. A message with
+        no HTML body is omitted rather than returned with an empty string.
+
+        Implementations must not raise on transient mailbox failures — they log
+        and return an empty list, because the sweep runs outside
+        _async_update_data, where ConfigEntryAuthFailed and UpdateFailed are
+        meaningless (same warning as async_cleanup_delivered's docstring above).
+
+        This base implementation returns an empty list: a coordinator type with
+        no mailbox (i.e. this base class itself, before any subclass override)
+        simply never renames. This is a real behavior, not a deferral — only
+        the Gmail and IMAP subclasses have a mailbox to search. Plan 37-08 adds
+        those two overrides.
+        """
+        _LOGGER.debug(
+            "%s has no correlated-mailbox-search override; sweep correlation returns none",
+            type(self).__name__,
+        )
+        return []
+
+    def _new_correlated_message_ids(self, storage_key: str, found_ids: list[str]) -> list[str]:
+        """Diff freshly-found correlated message ids against the ones already
+        considered for this shipment (any outcome), per the persisted
+        _sweep_seen_message_ids map (plan 37-03).
+
+        An empty result means: skip this shipment entirely this cycle, spending
+        no LLM call and no quota slot on it. This is the mechanism behind
+        ROADMAP sub-scope 4's "only re-attempt when a genuinely new correlated
+        email has appeared." Input order is preserved in the returned list so a
+        caller processes results deterministically.
+        """
+        seen = self._sweep_seen_message_ids.get(storage_key, set())
+        return [message_id for message_id in found_ids if message_id not in seen]
+
+    def _mark_sweep_messages_seen(self, storage_key: str, message_ids: Iterable[str]) -> None:
+        """Record that every one of these correlated message ids has now been
+        CONSIDERED for this shipment, regardless of outcome — a contaminated
+        message, an ungrounded extraction and a successful rename all mark,
+        because none of them should be re-evaluated against the LLM/quota on
+        every future cycle forever (T-37-24).
+
+        Creates the per-shipment entry on first use rather than requiring
+        pre-seeding. Mutates in-memory state only — persisting
+        _sweep_seen_message_ids to the store is the caller's job and is subject
+        to the existing CONF_DEBUG_MODE store-write gate (DBG-03).
+        """
+        self._sweep_seen_message_ids.setdefault(storage_key, set()).update(message_ids)
