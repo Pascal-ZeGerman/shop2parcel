@@ -15,13 +15,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.shop2parcel.api.exceptions import GmailStaleTokenError
+from custom_components.shop2parcel.api.exceptions import (
+    GmailAuthError,
+    GmailStaleTokenError,
+    GmailTransientError,
+)
 from custom_components.shop2parcel.const import (
     CONF_CUSTOM_FIELDS,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_TIMEOUT,
     CONF_OLLAMA_URL,
     CONF_QUEUE_MAXLEN,
+    CONF_SENDER_EXCLUSIONS,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT,
     DEFAULT_QUEUE_MAXLEN,
@@ -1769,3 +1774,263 @@ async def test_fallback_multi_shipment_digest(hass, mock_stage2_entry):
     # Matched/found diagnostics reflect exactly one shipment found, not three.
     assert coord._diagnostics.tracking_numbers_found_total == 1
     assert len(coord._diagnostics.last_poll_found) == 1
+
+
+# ---------------------------------------------------------------------------
+# Plan 37-08 Task 2: async_search_correlated_emails (Gmail override)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_correlated_search_entry() -> MockConfigEntry:
+    """MockConfigEntry for the correlated-search override tests — Stage-2
+    irrelevant here (the override never touches _enqueue_stage2)."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "auth_implementation": DOMAIN,
+            "token": {
+                "access_token": "poll-cached-access-token",
+                "refresh_token": "fake-refresh-token",
+                "expires_at": 9999999999.0,
+                "token_type": "Bearer",
+                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+            },
+            "api_key": "test-parcelapp-key",
+        },
+        options={},
+        unique_id="gmail-correlated-search@test.com",
+    )
+
+
+def _correlated_msg(msg_id: str, from_addr: str = "shop@example.com") -> dict:
+    """Build a minimal Gmail message dict shaped for _extract_email_meta +
+    _extract_gmail_html (a single text/html payload part)."""
+    return {
+        "id": msg_id,
+        "payload": {
+            "headers": [{"name": "From", "value": from_addr}],
+            "mimeType": "text/html",
+            "body": {"data": "PGh0bWw+aGVsbG88L2h0bWw+"},  # base64 "<html>hello</html>"
+        },
+        "snippet": "",
+    }
+
+
+def _setup_mock_oauth_for_search(mock_oauth, access_token: str = "fresh-search-token") -> None:
+    """Configure the mocked config_entry_oauth2_flow for async_search_correlated_emails:
+    a fresh OAuth2Session whose async_ensure_token_valid is awaitable and whose .token
+    reports the given access_token AFTER the (mocked) refresh."""
+    mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+    mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+    mock_oauth.OAuth2Session.return_value.token = {
+        "access_token": access_token,
+        "refresh_token": "fake-refresh-token",
+        "expires_at": 9999999999.0,
+    }
+
+
+async def test_correlated_search_empty_sanitized_terms_short_circuits(
+    hass, mock_correlated_search_entry
+):
+    """An empty sanitized term list short-circuits to an empty list with no network call —
+    every input term here fails sanitize_search_terms (too short / has a space)."""
+    mock_correlated_search_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock()
+
+    with patch(
+        "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+    ) as mock_oauth:
+        coord = GmailCoordinator(hass, mock_correlated_search_entry)
+        coord._email_client = mock_gmail
+
+        result = await coord.async_search_correlated_emails(["ab", "has space"])
+
+    assert result == []
+    mock_gmail.async_list_messages.assert_not_awaited()
+    mock_oauth.async_get_config_entry_implementation.assert_not_called()
+
+
+async def test_correlated_search_uses_freshly_refreshed_token_not_cached_attribute(
+    hass, mock_correlated_search_entry
+):
+    """Pitfall 2 gate: pre-setting _gmail_access_token to a stale sentinel must NOT leak
+    into the correlated search. async_ensure_token_valid() must be awaited on a fresh
+    OAuth2Session, and the token passed to the Gmail client must be the refreshed one,
+    never the sentinel."""
+    mock_correlated_search_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(return_value=([], "irrelevant"))
+
+    with patch(
+        "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+    ) as mock_oauth:
+        _setup_mock_oauth_for_search(mock_oauth, access_token="freshly-refreshed-token")
+
+        coord = GmailCoordinator(hass, mock_correlated_search_entry)
+        coord._email_client = mock_gmail
+        coord._gmail_access_token = "STALE-SENTINEL-FROM-LAST-POLL"
+
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
+    mock_oauth.OAuth2Session.return_value.async_ensure_token_valid.assert_awaited_once()
+    used_token = mock_gmail.async_list_messages.await_args.args[0]
+    assert used_token == "freshly-refreshed-token"
+    assert used_token != "STALE-SENTINEL-FROM-LAST-POLL"
+
+
+async def test_correlated_search_two_terms_dedups_message_fetch(hass, mock_correlated_search_entry):
+    """With two terms, two separate async_list_messages calls are made — one per term —
+    and a message id returned by both is fetched exactly once."""
+    mock_correlated_search_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(
+        side_effect=[
+            ([{"id": "m1"}, {"id": "m2"}], "q1"),
+            ([{"id": "m2"}, {"id": "m3"}], "q2"),
+        ]
+    )
+    mock_gmail.async_get_message = AsyncMock(side_effect=lambda _tok, mid: _correlated_msg(mid))
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+    ):
+        _setup_mock_oauth_for_search(mock_oauth)
+        coord = GmailCoordinator(hass, mock_correlated_search_entry)
+        coord._email_client = mock_gmail
+
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784", "ORDER-1234"])
+
+    assert mock_gmail.async_list_messages.await_count == 2
+    assert mock_gmail.async_get_message.await_count == 3
+    result_ids = [mid for mid, _html in result]
+    assert result_ids == ["m1", "m2", "m3"]
+
+
+async def test_correlated_search_omits_message_with_no_html(hass, mock_correlated_search_entry):
+    """A message whose payload yields no HTML is omitted from the results."""
+    mock_correlated_search_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(return_value=([{"id": "m1"}], "q"))
+    mock_gmail.async_get_message = AsyncMock(return_value=_correlated_msg("m1"))
+
+    with (
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_html_body",
+            return_value=None,
+        ),
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.extract_text_body",
+            return_value=None,
+        ),
+    ):
+        _setup_mock_oauth_for_search(mock_oauth)
+        coord = GmailCoordinator(hass, mock_correlated_search_entry)
+        coord._email_client = mock_gmail
+
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
+
+
+async def test_correlated_search_excludes_sender_domain(hass, mock_correlated_search_entry, caplog):
+    """A message whose sender domain is in the account's configured exclusion list is
+    omitted, and a DEBUG record is emitted."""
+    mock_correlated_search_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_correlated_search_entry, options={CONF_SENDER_EXCLUSIONS: ["excluded.com"]}
+    )
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(return_value=([{"id": "m1"}], "q"))
+    mock_gmail.async_get_message = AsyncMock(
+        return_value=_correlated_msg("m1", from_addr="sender@excluded.com")
+    )
+
+    with patch(
+        "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+    ) as mock_oauth:
+        _setup_mock_oauth_for_search(mock_oauth)
+        coord = GmailCoordinator(hass, mock_correlated_search_entry)
+        coord._email_client = mock_gmail
+
+        with caplog.at_level(logging.DEBUG):
+            result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
+    assert any("sender-excluded" in record.message for record in caplog.records)
+
+
+async def test_correlated_search_gmail_auth_error_yields_empty_no_raise(
+    hass, mock_correlated_search_entry
+):
+    """A GmailAuthError raised by the client produces an empty list and does not raise."""
+    mock_correlated_search_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(side_effect=GmailAuthError("invalid_grant"))
+
+    with patch(
+        "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+    ) as mock_oauth:
+        _setup_mock_oauth_for_search(mock_oauth)
+        coord = GmailCoordinator(hass, mock_correlated_search_entry)
+        coord._email_client = mock_gmail
+
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
+
+
+async def test_correlated_search_gmail_transient_error_yields_empty(
+    hass, mock_correlated_search_entry
+):
+    """A GmailTransientError produces an empty list and does not raise."""
+    mock_correlated_search_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(side_effect=GmailTransientError("temporary failure"))
+
+    with patch(
+        "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+    ) as mock_oauth:
+        _setup_mock_oauth_for_search(mock_oauth)
+        coord = GmailCoordinator(hass, mock_correlated_search_entry)
+        coord._email_client = mock_gmail
+
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    assert result == []
+
+
+async def test_correlated_search_per_message_failure_does_not_abort_search(
+    hass, mock_correlated_search_entry
+):
+    """A crash fetching one message does not abort the whole search — the remaining
+    message is still fetched and returned."""
+    mock_correlated_search_entry.add_to_hass(hass)
+    mock_gmail = MagicMock()
+    mock_gmail.async_list_messages = AsyncMock(return_value=([{"id": "bad"}, {"id": "good"}], "q"))
+
+    async def _get_message(_tok, mid):
+        if mid == "bad":
+            raise RuntimeError("boom")
+        return _correlated_msg(mid)
+
+    mock_gmail.async_get_message = AsyncMock(side_effect=_get_message)
+
+    with patch(
+        "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+    ) as mock_oauth:
+        _setup_mock_oauth_for_search(mock_oauth)
+        coord = GmailCoordinator(hass, mock_correlated_search_entry)
+        coord._email_client = mock_gmail
+
+        result = await coord.async_search_correlated_emails(["1Z999AA10123456784"])
+
+    result_ids = [mid for mid, _html in result]
+    assert result_ids == ["good"]
