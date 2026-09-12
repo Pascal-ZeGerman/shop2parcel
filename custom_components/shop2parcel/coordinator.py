@@ -39,7 +39,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api.carrier_codes import normalize_carrier
-from .api.email_parser import ShipmentData, validate_carrier_format
+from .api.email_parser import EmailParser, ShipmentData, validate_carrier_format
 from .api.exceptions import (
     OllamaSchemaError,
     OllamaTransientError,
@@ -56,10 +56,12 @@ from .const import (
     CONF_API_KEY,
     CONF_CUSTOM_FIELDS,
     CONF_DEBUG_MODE,
+    CONF_ENABLE_BROAD_SCAN,
     CONF_OLLAMA_MODEL,
     CONF_OLLAMA_TIMEOUT,
     CONF_OLLAMA_URL,
     CONF_POLL_INTERVAL,
+    DEFAULT_ENABLE_BROAD_SCAN,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
@@ -75,6 +77,7 @@ from .const import (
     normalize_tracking_number,
     stage2_cap_notification_id,
 )
+from .correlation import is_contaminated
 from .extractors.ollama_extractor import OllamaExtractor, preprocess_html
 from .merge import merge_llm_authoritative_with_grounding, validate_grounding
 
@@ -245,6 +248,24 @@ class Stage2Job:
     entry_id: str
     prefetched_result: Any | None = None
     raw_msg_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class _RenameProposal:
+    """The outcome of evaluating one correlated-match email for one target shipment via
+    Shop2ParcelCoordinator._async_attempt_rename (T-37-01, D-08).
+
+    ``None`` — rather than an instance of this type — means "do not rename from this
+    email": one of the two composed safety gates (the contamination pre-gate, or the
+    MRG-05 grounding gate reused unchanged on the match email's own body-only prose)
+    rejected the match. The target shipment keeps its current name and is retried when a
+    genuinely new correlated email appears on a later sweep cycle. Plan 37-10's sweep
+    orchestration is the sole consumer — this method performs no persistence, no quota
+    interaction and no network POST.
+    """
+
+    description: str
+    order_number: str | None
 
 
 @dataclass(slots=True)
@@ -2798,3 +2819,76 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         to the existing CONF_DEBUG_MODE store-write gate (DBG-03).
         """
         self._sweep_seen_message_ids.setdefault(storage_key, set()).update(message_ids)
+
+    async def _async_attempt_rename(
+        self, target: ShipmentData, message_id: str, html: str
+    ) -> _RenameProposal | None:
+        """Evaluate ONE correlated-match email against ONE target shipment and decide
+        whether — and to what — it may be renamed (T-37-01, D-07, D-08).
+
+        Composes the phase's two safety gates in order: the contamination pre-gate
+        below runs first and cheaply, before any LLM call; Task 2 (37-09) completes
+        this method with the already-shipped MRG-05 grounding gate on the match
+        email's own body-only prose. Both failures are safe-by-default — the target
+        shipment keeps its current name and is retried when a genuinely new
+        correlated email appears on a later sweep cycle. This method performs no
+        persistence, no quota interaction and no network POST — plan 37-10's sweep
+        orchestration owns all three, keeping this a pure, cheap-to-test decision
+        function.
+        """
+        if self._extractor is None:
+            # Renaming requires the Stage-2 naming path; with no local AI configured
+            # there is nothing to propose. One DEBUG log per call (not per shipment
+            # loop iteration — the caller, not this method, owns the per-candidate loop).
+            _LOGGER.debug(
+                "_async_attempt_rename: no Stage-2 extractor configured for this "
+                "account — nothing to propose"
+            )
+            return None
+
+        # The sweep only calls this method after _select_sweep_candidates has already
+        # confirmed a config_entry is present (mirrors the assert pattern at the other
+        # self.config_entry.options call sites in this class).
+        assert self.config_entry is not None
+
+        # Stage-1 parse: mirrors the poll's own EmailParser construction (Tier-2
+        # broad-scan opt-in). This pass is not wasted work: the contamination gate
+        # below operates directly on the raw HTML, but this Stage-1 result is exactly
+        # what Task 2's grounding merge needs as its Stage-1 baseline, so it is
+        # computed once here rather than twice.
+        parser = EmailParser(
+            enable_broad_scan=self.config_entry.options.get(
+                CONF_ENABLE_BROAD_SCAN, DEFAULT_ENABLE_BROAD_SCAN
+            )
+        )
+        match_result = parser.parse(html=html, message_id=message_id, email_date=target.email_date)
+        if match_result.shipment is None:
+            # An email Stage-1 cannot parse at all is not a credible naming source.
+            return None
+        match_stage1 = match_result.shipment
+
+        # Contamination gate (D-07): MUST run before the extractor call, never after —
+        # that ordering is the whole point of a pre-gate and is what keeps a
+        # multi-shipment digest from ever reaching the LLM naming path. A false
+        # positive here costs one skipped rename and a retry next cycle, and never a
+        # wrong name — which is why the known USPS-boilerplate false-positive class
+        # (D-07) is accepted for v1 rather than blocking this phase.
+        contaminated, other_tokens = is_contaminated(
+            source_text=html,
+            target_tracking=target.tracking_number,
+            target_order=target.order_number or target.order_name or None,
+        )
+        if contaminated:
+            _LOGGER.debug(
+                "_async_attempt_rename: message %s rejected as contaminated for "
+                "target tracking %s (%d other token(s) found; values withheld "
+                "above DEBUG)",
+                message_id,
+                target.tracking_number,
+                len(other_tokens),
+            )
+            return None
+
+        # Task 2 (37-09) completes the naming pass below this line.
+        await self._extractor.async_extract(html, match_stage1)
+        return None
