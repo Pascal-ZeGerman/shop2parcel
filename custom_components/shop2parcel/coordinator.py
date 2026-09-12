@@ -2827,9 +2827,9 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         whether — and to what — it may be renamed (T-37-01, D-07, D-08).
 
         Composes the phase's two safety gates in order: the contamination pre-gate
-        below runs first and cheaply, before any LLM call; Task 2 (37-09) completes
-        this method with the already-shipped MRG-05 grounding gate on the match
-        email's own body-only prose. Both failures are safe-by-default — the target
+        below runs first and cheaply, before any LLM call; the already-shipped
+        MRG-05 grounding gate runs second on the match email's own body-only
+        prose. Both failures are safe-by-default — the target
         shipment keeps its current name and is retried when a genuinely new
         correlated email appears on a later sweep cycle. This method performs no
         persistence, no quota interaction and no network POST — plan 37-10's sweep
@@ -2889,6 +2889,66 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             )
             return None
 
-        # Task 2 (37-09) completes the naming pass below this line.
-        await self._extractor.async_extract(html, match_stage1)
-        return None
+        # Grounded Stage-2 naming pass: the correlated match's OWN order_name/
+        # order_summary flow through the exact same MRG-05 gate the normal per-poll
+        # pipeline already uses — merge.py requires zero changes.
+        try:
+            stage2_result = await self._extractor.async_extract(html, match_stage1)
+        except (OllamaTransientError, OllamaSchemaError) as err:
+            _LOGGER.debug(
+                "_async_attempt_rename: Stage-2 extraction failed for message %s: %s",
+                message_id,
+                err,
+            )
+            return None
+        except Exception as err:  # noqa: BLE001
+            # T-37-23: the sweep runs outside _async_update_data, where
+            # ConfigEntryAuthFailed/UpdateFailed are meaningless — every extractor
+            # failure must degrade this method to a no-op, never propagate.
+            _LOGGER.error(
+                "_async_attempt_rename: unexpected extractor error for message %s: %s",
+                message_id,
+                err,
+                exc_info=True,
+            )
+            return None
+
+        # Body-only prose is a hard requirement of the MRG-05 contract (SC-2): sender
+        # and subject header tokens must never count as grounding evidence — a
+        # confirmed, closed blind spot (T-37-29) that must not be reopened.
+        prose, _links = preprocess_html(html)
+        merged, _conflicts, _gate_rejections, grounding_rejections = (
+            merge_llm_authoritative_with_grounding(match_stage1, stage2_result, prose)
+        )
+
+        # T-37-31: route into the SAME grounding-rejection counter the poll path
+        # already feeds — sweep-path rejections must be visible in the existing
+        # diagnostic, not invisible in a new private one.
+        for rej in grounding_rejections:
+            self._diagnostics.record_grounding_rejection(rej["clean"], rej["reason"])
+            _LOGGER.debug(
+                "_async_attempt_rename: grounding gate rejected promotion of field "
+                "'%s' value '%s' (reason=%s) for message %s",
+                rej["field"],
+                rej["clean"],
+                rej["reason"],
+                message_id,
+            )
+
+        # Deliberate deviation from RESEARCH.md's sketch, which appends the tracking
+        # number to the order-name branch: that would reintroduce the bare tracking
+        # number into the description and defeat _select_sweep_candidates' own
+        # "stuck" predicate (order_summary/order_name both falsy), so the
+        # tracking-number fallback is dropped here.
+        description = merged.order_summary or merged.order_name or None
+        if not description:
+            return None
+
+        # A discovered value never overwrites a known one. Per RESEARCH.md's D-08
+        # resolution this is safe to adopt without re-gating: it is a copy of a field
+        # merge_llm_authoritative_with_grounding has already grounded above —
+        # order_number is deliberately NOT added to GROUNDED_FIELDS, which would
+        # double-gate it.
+        order_number = target.order_number or (merged.order_name or None)
+
+        return _RenameProposal(description=description, order_number=order_number)
