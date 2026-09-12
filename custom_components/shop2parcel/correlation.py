@@ -29,6 +29,7 @@ fast-follow, not part of this phase.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 from .api.email_parser import _TRACKING_PATTERNS
 
@@ -125,3 +126,45 @@ def is_contaminated(
     """
     others = find_other_shipment_tokens(source_text, target_tracking, target_order)
     return bool(others), others
+
+
+# Plan 37-08 (T-37-25/T-37-26): every search term this feature produces is interpolated
+# either into an IMAP SEARCH command string (imaplib performs NO CRLF sanitization -- an
+# embedded newline pipelines additional IMAP commands) or into a Gmail query string (a
+# colon introduces a search operator, a quote breaks out of a quoted phrase). This is an
+# ALLOWLIST, not an escape routine: escaping two different quoting dialects correctly is
+# more failure-prone than refusing anything that isn't shaped like a tracking or order
+# identifier, and every real identifier this project has ever seen (UPS/USPS/FedEx/DHL
+# tracking numbers, Amazon's hyphenated three-part order numbers, Shopify order numbers)
+# fits this shape. Dropping a term is always safe: it just means one fewer correlation
+# key for this sweep cycle, and the sweep retries on the next cycle. Length-bounded to
+# 4-64 chars inclusive -- shorter is too likely to false-positive-match everything in a
+# mailbox search, longer than any real identifier this project has observed.
+_SAFE_SEARCH_TERM_RE = re.compile(r"^[A-Za-z0-9_.#-]{4,64}$")
+
+
+def sanitize_search_terms(terms: Iterable[str | None]) -> list[str]:
+    """Allowlist-filter a list of candidate mailbox-search terms (T-37-25/T-37-26).
+
+    Every survivor is stripped, matches `_SAFE_SEARCH_TERM_RE` in full (ASCII letters,
+    digits, hyphen, underscore, period, hash; 4-64 chars), and is de-duplicated while
+    preserving first-seen order. `None`/empty/whitespace-only entries are dropped
+    silently. See the allowlist-vs-escape rationale in the comment above
+    `_SAFE_SEARCH_TERM_RE`: this is a security boundary for two different query
+    languages (IMAP SEARCH, Gmail search), not a data-quality filter.
+    """
+    seen: set[str] = set()
+    survivors: list[str] = []
+    for term in terms:
+        if term is None:
+            continue
+        stripped = term.strip()
+        if not stripped:
+            continue
+        if not _SAFE_SEARCH_TERM_RE.fullmatch(stripped):
+            continue
+        if stripped in seen:
+            continue
+        seen.add(stripped)
+        survivors.append(stripped)
+    return survivors
