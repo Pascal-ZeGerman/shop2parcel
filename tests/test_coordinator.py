@@ -7273,6 +7273,31 @@ async def test_attempt_rename_naming_extractor_exception_yields_none(hass, mock_
     assert result is None
 
 
+async def test_attempt_rename_naming_merge_exception_yields_none(hass, mock_config_entry):
+    """WR-02 regression: an unexpected exception raised by
+    merge_llm_authoritative_with_grounding (or preprocess_html) after a
+    successful extractor call is caught, logged, and yields None — the same
+    'never propagate' contract (T-37-23) already covers the extractor call, so
+    this second failure surface must not bypass it and let the outer sweep's
+    finally-block mark every candidate seen before the failure is even logged
+    with method-specific context (CR-01)."""
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    match_stage1 = _rename_target(tracking_number="TRACK1")
+    coord._extractor = _extractor_stub()
+    with (
+        _patch_email_parser(match_stage1),
+        patch(
+            "custom_components.shop2parcel.coordinator.merge_llm_authoritative_with_grounding",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        result = await coord._async_attempt_rename(
+            _rename_target(tracking_number="TRACK1"), "msg-1", _GENERIC_MATCH_HTML
+        )
+    assert result is None
+
+
 async def test_attempt_rename_naming_ollama_transient_error_yields_none(hass, mock_config_entry):
     """The Ollama-specific transient exception taxonomy is also caught, not just a
     broad fallback."""

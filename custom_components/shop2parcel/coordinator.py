@@ -3049,10 +3049,24 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # Body-only prose is a hard requirement of the MRG-05 contract (SC-2): sender
         # and subject header tokens must never count as grounding evidence — a
         # confirmed, closed blind spot (T-37-29) that must not be reopened.
-        prose, _links = preprocess_html(html)
-        merged, _conflicts, _gate_rejections, grounding_rejections = (
-            merge_llm_authoritative_with_grounding(match_stage1, stage2_result, prose)
-        )
+        try:
+            prose, _links = preprocess_html(html)
+            merged, _conflicts, _gate_rejections, grounding_rejections = (
+                merge_llm_authoritative_with_grounding(match_stage1, stage2_result, prose)
+            )
+        except Exception as err:  # noqa: BLE001
+            # T-37-23's "never propagate" contract applies here too: a bug in
+            # merge.py or preprocess_html on a malformed/adversarial HTML body
+            # must degrade this method to a no-op, not propagate out and let
+            # the outer sweep's finally-block mark every candidate seen before
+            # this failure is even logged with method-specific context.
+            _LOGGER.error(
+                "_async_attempt_rename: unexpected merge/preprocess error for message %s: %s",
+                message_id,
+                err,
+                exc_info=True,
+            )
+            return None
 
         # T-37-31: route into the SAME grounding-rejection counter the poll path
         # already feeds — sweep-path rejections must be visible in the existing
