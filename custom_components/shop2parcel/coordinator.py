@@ -2814,6 +2814,11 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             self._record_rename_failure()
             return False
         except Exception as err:  # noqa: BLE001
+            # The true outcome of the POST is undetermined (could have fired
+            # before or after the network call actually reached
+            # parcelapp.net) — err on the side of not permanently losing the
+            # slot, mirroring the transient-error refund contract above.
+            self._hub.refund_consume()
             _LOGGER.error(
                 "Rename sweep: unexpected error POSTing rename for tn=%s: %s",
                 shipment.tracking_number,

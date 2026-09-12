@@ -7413,6 +7413,21 @@ async def test_rename_reserve_edit_failed_does_not_refund(hass, mock_config_entr
     coord._hub.refund_consume.assert_not_called()
 
 
+async def test_rename_reserve_unexpected_exception_refunds(hass, mock_config_entry):
+    """WR-01 regression: an unexpected exception (not ParcelAppTransientError or
+    ParcelAppEditFailedError) also triggers refund_consume — its true outcome is
+    undetermined, so the reserved slot must not be silently and permanently lost
+    to a bug in this rarely-exercised path."""
+    mock_config_entry.add_to_hass(hass)
+    _with_account_token(hass, mock_config_entry)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    coord._hub.refund_consume = MagicMock(wraps=coord._hub.refund_consume)
+    with _patch_parcel_client(edit_side_effect=RuntimeError("boom")):
+        result = await coord._async_post_rename(_target_shipment(), "Shop - Widget")
+    assert result is False
+    coord._hub.refund_consume.assert_called_once()
+
+
 async def test_rename_notify_threshold_calls_hub_failure_once(hass, mock_config_entry):
     """RENAME_NOTIFY_THRESHOLD consecutive edit-failed rejections -> hub.record_rename_failure
     is called exactly once with this entry id (D-04)."""
