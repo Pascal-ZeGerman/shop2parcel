@@ -538,6 +538,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         # HA restarts (quota may clear between restart and next poll).
         # NOT reset on _reset_stage2_poll_counters — must survive across polls.
         self._pending_posts: dict[str, ShipmentData] = {}
+        # Phase 37 (D-08 / sweep_seen_message_ids): per-shipment set of correlated-email
+        # message IDs already considered by the sweep (any outcome: renamed, contaminated,
+        # or ungrounded), keyed by the same storage_key scheme as persisted_shipments. So
+        # a genuinely-new email always gets one fresh look, but an already-considered email
+        # is never re-spent against the LLM/quota on a later cycle. Persisted via additive
+        # store key "sweep_seen_message_ids" — no STORAGE_VERSION bump. Garbage-collected in
+        # async_cleanup_delivered when a shipment leaves tracking (see below).
+        self._sweep_seen_message_ids: dict[str, set[str]] = {}
         # Phase 26: operational-health persisted counters.
         # Persisted across HA restarts via additive store keys (no STORAGE_VERSION bump).
         # Incremented only on genuine 2xx POST-success via _record_forward().
@@ -2314,6 +2322,25 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         self._seen_message_ids = OrderedDict(
             (mid, None) for mid in raw_seen if isinstance(mid, str)
         )
+        # Phase 37 (D-08 / sweep_seen_message_ids): hydrate the per-shipment
+        # already-considered-message cache (additive store key — no STORAGE_VERSION
+        # bump; a store written before this phase has no such key and loads cleanly
+        # with an empty cache). T-37-12 / ASVS V5: a non-dict top-level value is
+        # dropped with a WARNING; per-entry non-string keys or non-list values are
+        # silently dropped, mirroring the seen_message_ids guard directly above.
+        raw_sweep_seen = stored.get("sweep_seen_message_ids", {})
+        if not isinstance(raw_sweep_seen, dict):
+            _LOGGER.warning(
+                "sweep_seen_message_ids in store is not a dict (type=%s); "
+                "treating as empty — sweep will re-consider all correlated emails.",
+                type(raw_sweep_seen).__name__,
+            )
+            raw_sweep_seen = {}
+        self._sweep_seen_message_ids = {
+            k: set(v)
+            for k, v in raw_sweep_seen.items()
+            if isinstance(k, str) and isinstance(v, list)
+        }
         # Phase 13.1 (R5): load persisted_shipments with per-entry type validation.
         # Each entry must be a dict with exactly the 5 fields in _SHIPMENT_FIELD_TYPES.
         # Invalid entries are skipped with a WARNING (T-13.1-04 / ASVS V5).
@@ -2498,6 +2525,13 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
             # Phase 27 Plan 02: seen-message-ID cache (additive key — no STORAGE_VERSION bump).
             # Stored as an ordered list of IDs (insertion order preserved by list(keys())).
             "seen_message_ids": list(self._seen_message_ids.keys()),
+            # Phase 37 (D-08 / sweep_seen_message_ids): additive key — no STORAGE_VERSION
+            # bump. Each set is converted to a list because Store serializes to JSON and
+            # cannot write a set directly.
+            "sweep_seen_message_ids": {
+                storage_key: list(seen_ids)
+                for storage_key, seen_ids in self._sweep_seen_message_ids.items()
+            },
         }
 
     def _persist_state(self) -> None:
@@ -2612,6 +2646,14 @@ class Shop2ParcelCoordinator(DataUpdateCoordinator[dict[str, ShipmentData]]):
         }
         if not removed_ids:
             return
+
+        # Phase 37 (D-08 / T-37-07): garbage-collect sweep_seen_message_ids for every
+        # storage key leaving tracking — mandatory, not optional: without this the map
+        # grows unboundedly for shipments no longer tracked. This in-memory pop happens
+        # regardless of debug mode (it mirrors the ungated async_set_updated_data call
+        # below); only the store PERSIST of the change is debug-mode-gated further down.
+        for storage_key in removed_ids:
+            self._sweep_seen_message_ids.pop(storage_key, None)
 
         new_data = {k: v for k, v in self.data.items() if k not in removed_ids}
         # async_set_updated_data (NOT async_request_refresh) — externally-triggered

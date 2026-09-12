@@ -996,7 +996,13 @@ async def test_cleanup_delivered_pops_sweep_seen_message_ids_for_removed_only(
 async def test_cleanup_delivered_sweep_seen_debug_mode_no_store_write(hass, mock_config_entry):
     """DBG-03: async_cleanup_delivered's in-memory sweep_seen_message_ids GC pop
     happens regardless of debug mode, but in debug mode no store write occurs."""
-    mock_config_entry.add_to_hass(hass)
+    debug_config_entry = MockConfigEntry(
+        domain=mock_config_entry.domain,
+        data=dict(mock_config_entry.data),
+        options={CONF_DEBUG_MODE: True},
+        unique_id=mock_config_entry.unique_id,
+    )
+    debug_config_entry.add_to_hass(hass)
     fake_client = MagicMock()
     fake_client.async_get_deliveries = AsyncMock(
         return_value=[{"tracking_number": "TRACK_A", "status_code": 0}]
@@ -1018,11 +1024,8 @@ async def test_cleanup_delivered_sweep_seen_debug_mode_no_store_write(hass, mock
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_store_cls.return_value.async_delay_save = MagicMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
-        await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]["coordinator"]
-        hass.config_entries.async_update_entry(
-            mock_config_entry, options={CONF_DEBUG_MODE: True}
-        )
+        await hass.config_entries.async_setup(debug_config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][debug_config_entry.entry_id]["coordinator"]
 
         coordinator.async_set_updated_data(
             {"msg_a": ShipmentData("TRACK_A", "UPS", "#1", "msg_a", 1)}
