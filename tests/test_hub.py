@@ -2385,9 +2385,17 @@ def test_record_stage2_worker_success_last_failing_dismisses(hass):
 
 def test_detach_discards_failing_account_from_set(hass):
     """detach(coordinator) discards that account's entry_id from the
-    failing set (D-07); other accounts still failing means no dismiss."""
+    failing set (D-07); other accounts still failing means no dismiss.
+
+    Phase 37 (D-04): detach() also unconditionally discards the SEPARATE,
+    always-empty rename failing set and dismisses its (also separate)
+    notification id — this test only asserts the Stage-2 id is untouched.
+    """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
+    from custom_components.shop2parcel.const import (  # noqa: PLC0415
+        HUB_STAGE2_FAILING_NOTIFICATION_ID,
+    )
     from custom_components.shop2parcel.hub import Shop2ParcelHub  # noqa: PLC0415
 
     hub = Shop2ParcelHub(hass)
@@ -2405,12 +2413,21 @@ def test_detach_discards_failing_account_from_set(hass):
         hub.detach(coordinator_a)
 
         assert "entry-a" not in hub._stage2_failing_entry_ids
-        mock_dismiss.assert_not_called()
+        assert not any(
+            call.kwargs.get("notification_id") == HUB_STAGE2_FAILING_NOTIFICATION_ID
+            for call in mock_dismiss.call_args_list
+        )
 
 
 def test_detach_of_last_failing_account_dismisses_notification(hass):
     """detach() of the LAST failing account empties the set and dismisses
-    the notification — removing a failing account counts as recovery (D-07)."""
+    the notification — removing a failing account counts as recovery (D-07).
+
+    Phase 37 (D-04): detach() also unconditionally dismisses the SEPARATE
+    rename notification id (its always-empty failing set) — asserted via
+    assert_any_call rather than assert_called_once_with since two distinct
+    ids are now dismissed.
+    """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
@@ -2432,14 +2449,17 @@ def test_detach_of_last_failing_account_dismisses_notification(hass):
         hub.detach(coordinator_a)
 
         assert hub._stage2_failing_entry_ids == set()
-        mock_dismiss.assert_called_once_with(
-            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
-        )
+        mock_dismiss.assert_any_call(hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID)
 
 
 async def test_async_shutdown_dismisses_hub_notification_unconditionally(hass):
     """async_shutdown() calls async_dismiss for the hub notification
-    unconditionally, even with no active failing streak (D-07 teardown-dismiss)."""
+    unconditionally, even with no active failing streak (D-07 teardown-dismiss).
+
+    Phase 37 (D-04): async_shutdown() also unconditionally dismisses the
+    SEPARATE rename notification id — asserted via assert_any_call since two
+    distinct ids are now dismissed.
+    """
     from homeassistant.components import persistent_notification  # noqa: PLC0415
 
     from custom_components.shop2parcel.const import (  # noqa: PLC0415
@@ -2457,9 +2477,7 @@ async def test_async_shutdown_dismisses_hub_notification_unconditionally(hass):
         with patch.object(persistent_notification, "async_dismiss") as mock_dismiss:
             await hub.async_shutdown()
 
-            mock_dismiss.assert_called_once_with(
-                hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
-            )
+            mock_dismiss.assert_any_call(hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID)
 
 
 def test_hub_notification_body_is_pii_free(hass):
@@ -2814,9 +2832,11 @@ async def test_remove_to_zero_then_readd_recreates_hub(
         # both global entities removed from the registry (no orphaned rows),
         # hass.data[DOMAIN]["__shared__"] deleted.
         assert worker_task.done(), "worker must be cancelled/done at last-account teardown"
-        mock_dismiss_last.assert_called_once_with(
-            hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
-        )
+        # Phase 37 (D-04): detach()/async_shutdown() also unconditionally
+        # dismiss the SEPARATE rename notification id (always-empty rename
+        # failing set here) — assert_any_call since more than one distinct
+        # id is now dismissed during this teardown.
+        mock_dismiss_last.assert_any_call(hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID)
         assert registry.async_get(quota_entity_id) is None, "quota sensor must be de-registered"
         assert registry.async_get(queue_entity_id) is None, "queue sensor must be de-registered"
         assert "__shared__" not in hass.data.get(DOMAIN, {})

@@ -34,6 +34,8 @@ from homeassistant.helpers.event import async_track_point_in_time, async_track_t
 
 from .const import (
     DOMAIN,
+    HUB_RENAME_FAILING_NOTIFICATION_ID,
+    HUB_RENAME_NOTIFY_THRESHOLD,
     HUB_STAGE2_FAILING_NOTIFICATION_ID,
     HUB_STAGE2_NOTIFY_THRESHOLD,
     HUB_STAGE2_POLL_WINDOW,
@@ -112,6 +114,15 @@ class Shop2ParcelHub:
         # re-creates the single consolidated notification (D-06).
         self._stage2_failing_entry_ids: set[str] = set()
         self._hub_notification_active: bool = False
+        # Phase 37 (D-04): rename failure domain — deliberately SEPARATE from
+        # the Stage-2 domain immediately above. Ollama outages (Stage-2) and
+        # parcelapp.net edit-ajax.php rejections (rename) are different
+        # subsystems; the endpoint returns no structured error code, so a
+        # consecutive-failure count is the only available signal. Recovery in
+        # one domain must never dismiss the other's notification, and a
+        # failure in one domain must never be misattributed as the other.
+        self._rename_failing_entry_ids: set[str] = set()
+        self._rename_notification_active: bool = False
         # Phase 34 (R-01/DIAG-01/DIAG-02): per-entry stored AddEntitiesCallback
         # so the hub can re-add the two global sensors under a SURVIVING
         # entry's platform when their current owner unloads (the only
@@ -244,6 +255,10 @@ class Shop2ParcelHub:
         that empties the set, the notification is dismissed unconditionally
         (mirrors record_stage2_worker_success's dismiss trigger; HA's
         async_dismiss is a safe no-op on an unknown/already-dismissed ID).
+
+        Phase 37 (D-04): identically discards this entry_id from the SEPARATE
+        rename failure-streak set, dismissing the rename notification if that
+        also empties — the two domains never share state.
         """
         if self._refcount > 0:
             self._refcount -= 1
@@ -269,6 +284,15 @@ class Shop2ParcelHub:
                     self._hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
                 )
                 self._hub_notification_active = False
+            # Phase 37 (D-04): a departing account also counts as recovery
+            # for the SEPARATE rename failure domain — mirrors the Stage-2
+            # discard-and-maybe-dismiss above, using its own set/flag/id.
+            self._rename_failing_entry_ids.discard(entry_id)
+            if not self._rename_failing_entry_ids:
+                persistent_notification.async_dismiss(
+                    self._hass, notification_id=HUB_RENAME_FAILING_NOTIFICATION_ID
+                )
+                self._rename_notification_active = False
 
     # ------------------------------------------------------------------
     # Phase 34 (R-01/DIAG-01/DIAG-02): global-sensor cross-entry ownership
@@ -599,6 +623,71 @@ class Shop2ParcelHub:
             )
             self._hub_notification_active = False
 
+    def record_rename_failure(self, entry_id: str) -> None:
+        """Record one parcelapp rename failure for entry_id; maybe notify (D-04).
+
+        Called by the coordinator's sweep after an ``async_edit_delivery``
+        call raises ``ParcelAppEditFailedError`` (plan 37-09 wires the
+        coordinator-side half). This is a CLONE of
+        ``record_stage2_worker_failure`` with its own failing set, active
+        flag, threshold constant and notification id — deliberately NOT a
+        reuse of the Stage-2 counter, because the two failure domains are
+        different subsystems (Ollama outage vs. a stale parcelapp
+        ``account_token``/genuine edit rejection). Never touches
+        ``_stage2_failing_entry_ids`` (T-37-17).
+
+        Mirrors CR-02's CAP-not-floor semantics: ``HUB_RENAME_NOTIFY_THRESHOLD``
+        scales DOWN to the number of currently-attached accounts
+        (``min(HUB_RENAME_NOTIFY_THRESHOLD, max(1, len(self._coordinators)))``)
+        so a single-account install still gets notified.
+
+        The notification message is a heuristic, not a certain diagnosis
+        (T-37-04): the edit-ajax.php endpoint returns no structured error
+        code, so a stale token is indistinguishable from a genuine edit
+        rejection. The message carries only the affected-account count and
+        remediation guidance — no token value, tracking number or other
+        per-shipment detail (T-37-03/PROH-1).
+        """
+        self._rename_failing_entry_ids.add(entry_id)
+        effective_threshold = min(HUB_RENAME_NOTIFY_THRESHOLD, max(1, len(self._coordinators)))
+        if (
+            len(self._rename_failing_entry_ids) >= effective_threshold
+            and not self._rename_notification_active
+        ):
+            persistent_notification.async_create(
+                self._hass,
+                message=(
+                    f"Shop2Parcel: shipment renames have failed repeatedly across "
+                    f"{len(self._rename_failing_entry_ids)} account(s). The most "
+                    f"likely cause is an expired parcelapp.net account_token that "
+                    f"needs re-copying from your browser — see the README's "
+                    f"'Setup: Parcel account token' section. This is a heuristic: "
+                    f"the rename endpoint returns no structured error code, so a "
+                    f"genuine edit rejection would produce the same signal."
+                ),
+                title="Shop2Parcel Rename Failing",
+                notification_id=HUB_RENAME_FAILING_NOTIFICATION_ID,
+            )
+            self._rename_notification_active = True
+
+    def record_rename_success(self, entry_id: str) -> None:
+        """Record one parcelapp rename success for entry_id; maybe dismiss (D-04).
+
+        Clones ``record_stage2_worker_success``'s recovery half: discards
+        entry_id from the rename failing set; once the set is empty,
+        unconditionally dismisses the rename notification via
+        ``HUB_RENAME_FAILING_NOTIFICATION_ID`` (HA's ``async_dismiss`` is a
+        safe no-op on an unknown/already-dismissed id, per the Phase 34-02
+        precedent) and clears the active flag. Never dismisses
+        ``HUB_STAGE2_FAILING_NOTIFICATION_ID`` (T-37-17).
+        """
+        self._rename_failing_entry_ids.discard(entry_id)
+        if not self._rename_failing_entry_ids:
+            persistent_notification.async_dismiss(
+                self._hass, notification_id=HUB_RENAME_FAILING_NOTIFICATION_ID
+            )
+            self._rename_notification_active = False
+
     # ------------------------------------------------------------------
     # Phase 31 (QUOTA-01/02/04): shared daily-budget + per-poll-cap mutators.
     #
@@ -908,6 +997,12 @@ class Shop2ParcelHub:
         # no-op on an unknown/already-dismissed ID (Assumption A1).
         persistent_notification.async_dismiss(
             self._hass, notification_id=HUB_STAGE2_FAILING_NOTIFICATION_ID
+        )
+        # Phase 37 (D-04): identically dismiss the SEPARATE rename
+        # notification on every teardown, regardless of whether a rename
+        # failing streak was active.
+        persistent_notification.async_dismiss(
+            self._hass, notification_id=HUB_RENAME_FAILING_NOTIFICATION_ID
         )
         # Phase 34 (R-01/DIAG-01/DIAG-02, Pitfall 2/A2): explicitly remove
         # both global sensors from the entity registry at last-account
