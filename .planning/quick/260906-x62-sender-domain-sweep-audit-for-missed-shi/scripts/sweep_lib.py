@@ -180,11 +180,6 @@ def resolve_google_client(
     )
 
 
-# Mirrors coordinator.py:_SHIPMENT_FIELD_TYPES — kept minimal here since this
-# module only needs to read fields back out, not validate the full shape.
-_REQUIRED_SHIPMENT_KEYS = ("tracking_number", "carrier_name", "order_name", "message_id")
-
-
 def load_store(
     storage_dir: str | Path, entry_id: str
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
