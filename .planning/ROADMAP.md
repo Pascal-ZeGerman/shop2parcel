@@ -226,6 +226,46 @@ v1.5 requirement coverage (24/24 mapped) archived at [.planning/milestones/v1.5-
 | _first_refresh_done never set in IMAP | 29 | One-line fix added to ImapCoordinator success path in Phase 29, before any parity or fallback work |
 | Store migration quota double-counting | 30, 31 | used_today=0 on migration day; max() across all quota_exhausted_until values; union-merge TNs capped at 1000 |
 
+### Phase 37: Shipment Name Enrichment via Correlated-Email Sweep
+
+**Goal**: Shipments whose parcelapp name is still the raw tracking number get renamed to a descriptive "Shop - Product" name (e.g. "Amazon - Shoes") via a periodic (12h) sweep that actively searches the mailbox for other emails correlated by tracking number or order number and runs them through the LLM naming path
+**Depends on**: None — independent, like Phases 35/36
+**Requirements**: No REQUIREMENTS.md IDs exist — this phase originates from `/gsd-explore` (2026-09-11), independent of any milestone. The requirement set the plans decompose is: the eight locked decisions D-01–D-08 in `37-CONTEXT.md`, the seven sub-scope items below (SUB-1–SUB-7), and the five research pitfalls PIT-1–PIT-5 in `37-RESEARCH.md`. Every one of those 20 IDs appears in at least one plan's `requirements` field.
+**Sub-scope, from exploration** (see `.planning/notes/2026-09-11-shipment-naming-correlated-email-sweep.md`):
+
+  1. `order_number` does not exist anywhere in the data model today (only `tracking_number`, `carrier_name`, `order_name`, `order_summary`) — must be added as a stored field
+  2. `order_number` extraction is LLM-based (no fixed format across retailers), a new extraction step alongside the existing Stage-2 naming path
+  3. Mailbox search by `tracking_number` OR `order_number`, reusing existing query support (`GmailClient.async_list_messages`, `ImapClient.fetch_shipping_emails`) — no new search infrastructure needed
+  4. Per-shipment "already-seen email" state so a sweep only re-attempts naming when a genuinely new correlated email has appeared since the last attempt
+  5. Sweep targets only shipments still named with the raw tracking number; stops attempting once the shipment is delivered
+  6. Rename POSTs to parcelapp.net are lowest priority against the existing 20/day quota — consume only leftover budget after normal shipment create/update traffic
+  7. Open risk to resolve during planning: MRG-05 verifies textual presence, not per-shipment attribution — aggregating multiple separately-fetched correlated emails is a new variant of the known multi-package-digest misattribution gap (research question Q-001, `.planning/research/questions.md`; spike spawned to investigate)
+
+**Plans:** 10/10 plans complete
+
+Plans:
+**Wave 1**
+
+- [x] 37-01-PLAN.md — Promote + patch the contamination check into `correlation.py` (D-07, Pitfall 1) [wave 1]
+- [x] 37-02-PLAN.md — Phase constants, `ParcelAppEditFailedError`, and `async_edit_delivery` (D-02/D-03/D-06, Pitfall 4) [wave 1]
+- [x] 37-03-PLAN.md — `ShipmentData.order_number` and the `sweep_seen_message_ids` store key with GC (D-08, sub-scope 1/4) [wave 1]
+- [x] 37-04-PLAN.md — Document the rename endpoint, the scoped policy reversal, and the account-token setup (D-01/D-02/D-03) [wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 37-05-PLAN.md — Hub rename consecutive-failure counter and persistent notification (D-04) [wave 2]
+- [x] 37-06-PLAN.md — `account_token` options field routed into `entry.data` (D-03, Pitfall 3) [wave 2]
+- [x] 37-07-PLAN.md — Sweep candidate selection, correlated-search hook, seen-message bookkeeping (D-05/D-06, Pitfall 5) [wave 2]
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 37-08-PLAN.md — Gmail and IMAP correlated-search overrides with search-term allowlist (D-05, Pitfall 2) [wave 3]
+- [x] 37-09-PLAN.md — Contamination-gated, MRG-05-grounded naming pipeline (D-07/D-08, Pitfall 1) [wave 3]
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 37-10-PLAN.md — Sweep orchestration, quota reserve, rename POST, 12h timer, end-to-end proof (D-04/D-06, sub-scope 5/6) [wave 4]
+
 ---
-*Roadmap last updated: 2026-07-28 — v1.5 Shared Pools & IMAP Parity archived (shipped 2026-07-20); Phases 35 and 36 shipped as independent, milestone-agnostic phases.*
+*Roadmap last updated: 2026-09-11 — Phase 37 added from `/gsd-explore` (shipment name enrichment via correlated-email sweep).*
 *Phase numbering is continuous across all milestones; last v1.3/v1.4 phase: 28*

@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: none
 milestone_name: none — v1.5 closed, v1.6 not yet defined
-current_phase: 36
-current_phase_name: DHL Carrier Support + USPS Digest Sender Extraction
-status: idle
-stopped_at: "Completed 36-02-PLAN.md; milestone v1.5 archived; manifest bumped to 1.6.0-rc1 (tag pushed, PR #45 merged)"
-last_updated: "2026-08-27T14:29:16.087Z"
-last_activity: 2026-08-27
-last_activity_desc: quick task 260827-e6t widened DEFAULT_IMAP_SEARCH from 4 to 7 SUBJECT terms (added delivered/order/confirmed) with a correct RFC 3501 6-OR prefix tree, fixing a confirmed production miss on a real 17TRACK/COLAMY delivery-notification email
+current_phase: 37
+status: executing
+stopped_at: Phase 37 context gathered
+last_updated: "2026-09-12T14:07:23.482Z"
+last_activity: 2026-09-12
+last_activity_desc: Phase 37 complete
 progress:
-  total_phases: 13
-  completed_phases: 13
-  total_plans: 51
-  completed_plans: 51
+  total_phases: 6
+  completed_phases: 6
+  total_plans: 29
+  completed_plans: 29
   percent: 100
+current_phase_name: Shipment Name Enrichment via Correlated-Email Sweep
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-28)
 
 **Core value:** Shipment data from Shopify orders automatically appears in Home Assistant — without manual entry.
-**Current focus:** None active. v1.5 shipped and archived; Phases 35/36 (independent, spike-driven) also shipped; v1.6.0-rc1 tagged and merged to main. Next: `/gsd-new-milestone` to define v1.6 scope.
+**Current focus:** Phase 37 — Shipment Name Enrichment via Correlated-Email Sweep
 
 ## Current Position
 
-Phase: 36 — DHL Carrier Support + USPS Digest Sender Extraction (complete, verified passed 8/8)
-Plan: All plans complete
-Status: No active phase — awaiting next milestone definition
-Last activity: 2026-08-08 — quick task 260808-074 refreshed the spike-findings-shop2parcel skill docs (DHL/USPS-digest/sender-exclusion now shipped, not pending; 260807-tpu production-bug history recorded)
+Phase: 37
+Plan: Not started
+Status: Executing Phase 37
+Last activity: 2026-09-12 — Phase 37 complete
 
 ```
 [████████████████████] 68/68 plans (100%)
@@ -48,6 +48,7 @@ Last activity: 2026-08-08 — quick task 260808-074 refreshed the spike-findings
 - v1.5 Phases 29–34 added (2026-07-03): Hub skeleton + foundational safety, shared dedup, shared budget, shared queue+worker, IMAP parity, lifecycle tests + global sensors.
 - Phase numbering is continuous: last v1.3/v1.4 phase was 28; v1.5 starts at 29.
 - Phase 35 added (2026-07-17): MRG-05 Grounding Gate + Stage-1 Scoping Fix — from spike findings (spikes 006-013), independent of the v1.5 hub work. Adds the validated Stage-2 order_name/order_summary grounding gate (merge.py) plus conservative Stage-1 tracking-number scoping broadening (email_parser.py). Not part of the original v1.5 requirement set.
+- Phase 37 added (2026-09-11): Shipment Name Enrichment via Correlated-Email Sweep — from `/gsd-explore`, independent of any milestone. A 12h sweep renames shipments still named with the raw tracking number by searching the mailbox for correlated emails (by tracking number or order_number, a new field) and running them through the LLM naming path; rename POSTs are lowest priority against the 20/day quota. Open risk (MRG-05 attribution gap) routed to research question Q-001 and a spike.
 
 ### Decisions
 
@@ -198,12 +199,14 @@ None — Phase 33 (IMAP Parity) complete and verified (4/4 must-haves). Ready to
 | 260807-tpu | Made the shared carrier-format gate carrier-aware (`validate_carrier_format(value, carrier_name=None)`, additive OR-widening, DHL bare-digit shape reuses `_dhl_looks_like_tracking`, never a switch) and wired it into MRG-04 (`stage1.carrier_name`, option a — never the LLM's own carrier claim, anti-circularity proven by test) plus all four production pre-POST gates (worker: `job.shipment.carrier_name`; drain: pending shipment's own carrier, bounded-residual-risk documented inline; Gmail/IMAP inline: pure Stage-1 `shipment.carrier_name`). Investigation found DHL was dead-ended at every production POST path since Phase 36 shipped — this un-blocks DHL end-to-end. `_TRACKING_PATTERNS` unchanged (R5 hole stays closed). TDD RED→GREEN ×3 tasks; full suite 1238 passed, 2 pre-existing live-service skips; ruff/mypy clean. --validate: plan-checked + independently verified, 9/9 must-haves. | 2026-08-07 | eab0c9a, 1117867, 93fd9cc | Verified | [260807-tpu-make-mrg-04-s-carrier-format-gate-carrie](./quick/260807-tpu-make-mrg-04-s-carrier-format-gate-carrie/) |
 | 260808-074 | Refreshed the `spike-findings-shop2parcel` skill (docs-only, 3 tasks): `references/us-carrier-coverage.md` now states DHL shipped in Phase 36 (2026-07-24), replaces the open local-vs-shared-validator choice with the resolved 260807-tpu reversal history, and adds a What-to-Avoid entry recording the two-week production dead-end incident; `references/usps-digest-multi-shipment.md` and `references/sender-filtering.md` reframe `_extract_usps_shippers` (Phase 36) and the sender-exclusion matcher/UI/wiring (260807-qw1) as live production code; `SKILL.md` frontmatter description, a new sixth `<context>` paragraph ("Implementation round, NOT a spike round"), 4 `<requirements>` bullets, and 3 `<findings_index>` cells updated to shipped status — Processed Spikes list (26 entries) left byte-identical, no spike number invented for quick-task work. All plan verification gates passed; zero changes under `custom_components/`/`tests/`. | 2026-08-08 | 38cded0, e9f7879, e793ccb | Verified | [260808-074-refresh-spike-findings-shop2parcel-skill](./quick/260808-074-refresh-spike-findings-shop2parcel-skill/) |
 | 260827-e6t | Fixed a confirmed production gap: `DEFAULT_IMAP_SEARCH` widened from 4 to 7 SUBJECT terms (added `delivered`, `order`, `confirmed` to the existing `shipped`/`tracking`/`delivery`/`shipment`), closing the real 17TRACK/COLAMY delivery-notification miss where a subject ending "...has been delivered." was silently skipped because `delivered` (past participle) was not covered by `delivery`. Rebuilt as a correct RFC 3501 6-OR left-nested prefix tree (N-1 rule for 7 keys); hand-wrapped the 148-char literal as two 74-char implicitly concatenated single-quoted fragments to stay under ruff's 100-column limit. 3 new regression tests pin term coverage, exact OR/SUBJECT/total token counts, and a recursive-descent prefix-OR-tree parse-validity check. README.md and docs/CONFIGURATION.md synced to the same byte-identical string. TDD RED→GREEN; full suite 1242 passed, 2 pre-existing live-service skips; ruff clean (scoped to project files). | 2026-08-27 | 1e63ab7, c864d8a, 7dddcd8 | [260827-e6t-fix-imap-subject-search-query-gap-in-sho](./quick/260827-e6t-fix-imap-subject-search-query-gap-in-sho/) |
+| 260827-hjh | Unblocked CI on PR #49 (release/v1.6.0-rc3): replaced deprecated `device_reg.devices` mapping-style iteration with `dr.async_entries_for_config_entry()` at the two repo-wide call sites (`test_diagnostic_sensor.py::test_diagnostic_sensors_share_device`, `test_sensor.py::test_device_grouping`) — CI's pinned HA version raised a hard `RuntimeError` on the old access pattern. Plan's pre-verified assumption that the helper alone was semantically equivalent to the old identifier-filtered comprehension proved false: the v1.5 shared Hub registers a second device (`identifiers={(DOMAIN, "__shared__")}`) against the same config entry that owns its global sensors, so the helper alone returned 2 devices. Fixed (Rule 1) by retaining a residual `identifiers` filter after the new helper call at both sites, preserving original `len(devices) == 1` assertion semantics. Test-only; zero production files touched. Full suite 1242 passed, 2 pre-existing live-service skips (unchanged baseline); ruff clean. | 2026-08-27 | 0aa917b | [260827-hjh-fix-deprecated-device-registry-devices-m](./quick/260827-hjh-fix-deprecated-device-registry-devices-m/) |
+| 260906-x62 | Built and ran the read-only sender-domain sweep audit across all 3 connected mailboxes (Gmail + 2 IMAP): `sweep_lib.py`/`test_sweep_lib.py`/`sweep_run.py`/`README.md` under `.planning/quick/260906-x62-.../scripts/`. Purpose: `DEFAULT_GMAIL_QUERY`/`DEFAULT_IMAP_SEARCH` are pure keyword searches extendable only reactively (as 260827-e6t was); sweeping known-good sender domains from `persisted_shipments` over 12 months bypasses that blind spot. Two real bugs found and fixed during live runs (offline tests missed both): (1) `gmail_seed_message_ids`/`imap_seed_uids` filtered on a `startswith("imap:")` prefix that never appears in real persisted data, silently returning zero UIDs for both IMAP accounts (`c8b2a5b`); (2) `imap_fetch_headers` labeled every result with the sequence number instead of the true UID (`"<seqnum> (UID <uid> ..."` marker parsing bug), corrupting the candidate-diff dedup key, not just cosmetic (`1e3ccc4`, new regression test `test_parse_uid_from_fetch_marker`). Also hardened `sweep_run.py` against a malformed IMAP config entry (`65357e2`), and added running `#` numbers to the report per user request. Discovered limitation (not fixed, informational): several Gmail "shipments" are self-forwards from the user's own web.de address, so the original merchant's domain never appears in the envelope From header — Target/TAGG Logistics/Lovevery/ShipBob are structurally invisible to this sweep method for those specific messages. User reviewed the false-positive seeds: excluded `parkslopeparents.com` (mailing list, 1904/2407 of an early run) and `talkiatry.com` (telehealth, unrelated), kept `appleid.com` (their Hide My Email privacy relay — genuine masked shipping senders) via `--extra-domain`. Final: 442 candidates across 6 real seed domains in `candidates-report.md` (not committed — regenerable output). Full suite 1242 passed throughout; ruff clean. | 2026-09-08 | 3ac57ba, b8607a6, 8a9f69a, 65357e2, c8b2a5b, 1e3ccc4 | [260906-x62-sender-domain-sweep-audit-for-missed-shi](./quick/260906-x62-sender-domain-sweep-audit-for-missed-shi/) |
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 84
+- Total plans completed: 94
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -236,6 +239,7 @@ None — Phase 33 (IMAP Parity) complete and verified (4/4 must-haves). Ready to
 | 31 | 5 | - | - |
 | 33 | 5 | - | - |
 | 34 | 6 | - | - |
+| 37 | 10 | - | - |
 
 **Recent Trend:**
 
@@ -347,11 +351,11 @@ Note: UAT/verification gaps continue the hardware-dependent live HA testing defe
 
 ## Session Continuity
 
-**Resume file:** None
+**Resume file:** .planning/phases/37-shipment-name-enrichment-via-correlated-email-sweep/37-CONTEXT.md
 
-Last session: 2026-08-27T14:27:59.679Z
-Stopped at: Completed quick task 260827-e6t — widened `DEFAULT_IMAP_SEARCH` from 4 to 7 SUBJECT terms (added `delivered`, `order`, `confirmed`), rebuilt as a correct RFC 3501 6-OR left-nested prefix tree, closing a confirmed production gap where a real 17TRACK/COLAMY delivery-notification email ("...has been delivered.") was silently skipped because `delivered` wasn't covered by `delivery`. README.md and docs/CONFIGURATION.md synced. TDD RED→GREEN; full suite 1242 passed; ruff clean.
-Next action: `/gsd-new-milestone` to define v1.6 scope, or continue with ad-hoc spike-driven phases (Phase 37+) if no new milestone is started yet. Outstanding: redeploy 260806-i5r, 260807-qw1, and 260807-tpu to the live HA instance; close .planning/debug/gmail-query-drops-emails.md once verified live. Optional follow-up: symmetric subject/sender enrichment for the sibling rejection log sites in gmail_coordinator.py:807 and imap_coordinator.py:532.
+Last session: 2026-09-11T20:43:58.492Z
+Stopped at: Phase 37 context gathered
+Next action: `/gsd-new-milestone` to define v1.6 scope, or continue with ad-hoc spike-driven phases (Phase 37+) if no new milestone is started yet. Optional dormant seeds if ever revisited: SEED-003 (sender-domain-aware default search) and the self-forwarded-email blind spot noted during 260906-x62 (self-forwards hide the original merchant's domain behind the user's own forwarding address). Optional follow-up: symmetric subject/sender enrichment for the sibling rejection log sites in gmail_coordinator.py:807 and imap_coordinator.py:532.
 
 ## Operator Next Steps
 

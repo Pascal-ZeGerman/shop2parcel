@@ -66,6 +66,7 @@ from .coordinator import (
     _extract_email_meta,
     _sanitise_parser_error,
 )
+from .correlation import sanitize_search_terms
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1076,3 +1077,115 @@ class GmailCoordinator(Shop2ParcelCoordinator):
             await self._async_save_store()
 
         return current_data
+
+    async def async_search_correlated_emails(
+        self, search_terms: list[str]
+    ) -> list[tuple[str, str]]:
+        """Search this Gmail account's OWN mailbox for messages correlated to one
+        stuck shipment. Overrides the base contract documented on
+        Shop2ParcelCoordinator.async_search_correlated_emails (plan 37-07) — see
+        that docstring for the full input/output shape this method must honor.
+
+        RESEARCH.md Pitfall 2: the sweep fires on a 12h timer fully decoupled from
+        the poll's 30-minute cycle, so self._gmail_access_token may be arbitrarily
+        old — or already rejected — by the time this runs. This method deliberately
+        never reads that attribute: it constructs a fresh OAuth2Session and forces
+        a real async_ensure_token_valid() check on every call, then reads the
+        access token back from the session afterwards.
+        """
+        sanitized = sanitize_search_terms(search_terms)
+        if not sanitized:
+            return []
+
+        assert self.config_entry is not None  # sweep only runs on an attached coordinator
+
+        # This method must never raise the two HA coordinator-lifecycle exceptions
+        # used elsewhere in this file — the sweep runs outside _async_update_data,
+        # where those are the only meaningful signals (same rule
+        # async_cleanup_delivered's docstring documents). Every failure branch
+        # below logs and returns an empty list instead.
+        try:
+            implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
+                self.hass, self.config_entry
+            )
+            oauth_session = config_entry_oauth2_flow.OAuth2Session(
+                self.hass, self.config_entry, implementation
+            )
+            token_data = self.config_entry.data.get("token")
+            if not isinstance(token_data, dict) or not token_data.get("refresh_token"):
+                _LOGGER.error(
+                    "Gmail correlated-email search: OAuth token missing or has no "
+                    "refresh_token — skipping this sweep cycle"
+                )
+                return []
+            await oauth_session.async_ensure_token_valid()
+        except Exception as err:  # noqa: BLE001 — sweep-path failures never raise
+            _LOGGER.error("Gmail correlated-email search: token refresh failed: %s", err)
+            return []
+
+        access_token = oauth_session.token.get("access_token")
+        if not access_token:
+            _LOGGER.error("Gmail correlated-email search: refreshed token has no access_token")
+            return []
+
+        gmail = cast(GmailClient, self._email_client)
+        # An order confirmation older than the configured rescan window is out of
+        # reach here — a known bound of this feature, not a defect.
+        rescan_window_days = self.config_entry.options.get(
+            CONF_RESCAN_WINDOW_DAYS, DEFAULT_RESCAN_WINDOW_DAYS
+        )
+        # D-06/T-37-28: keep the sweep consistent with the poll path — a sender the
+        # user has declared never shipment-relevant must not be able to drive a
+        # rename either. Exact-domain-match only, so USPS Informed Delivery
+        # remains structurally non-excludable.
+        sender_is_excluded = build_sender_exclusion_matcher(
+            self.config_entry.options.get(CONF_SENDER_EXCLUSIONS, [])
+        )
+
+        # gmail-query-drops-emails: this codebase has documented evidence that
+        # Gmail's server-side search does not reliably return the full union for
+        # an OR-chain (exactly why the normal poll now passes an empty base
+        # query) — issue one call per sanitized term instead of a single
+        # OR-joined query. With at most two terms (tracking number + order
+        # number) the extra call is cheap and the result is trustworthy.
+        message_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for term in sanitized:
+            try:
+                messages, _effective_query = await gmail.async_list_messages(
+                    access_token, f'"{term}"', rescan_window_days=rescan_window_days
+                )
+            except GmailAuthError as err:
+                _LOGGER.error("Gmail correlated-email search auth error: %s", err)
+                return []
+            except GmailTransientError as err:
+                _LOGGER.warning("Gmail correlated-email search transient error: %s", err)
+                return []
+            for msg_meta in messages:
+                mid = msg_meta["id"]
+                if mid not in seen_ids:
+                    seen_ids.add(mid)
+                    message_ids.append(mid)
+
+        results: list[tuple[str, str]] = []
+        for mid in message_ids:
+            # One bad message must not abort the whole search — wrap the
+            # per-message fetch in its own try/except, log, and continue.
+            try:
+                msg = await gmail.async_get_message(access_token, mid)
+                email_meta = _extract_email_meta(msg)
+                if sender_is_excluded(email_meta.get("from", "")):
+                    _LOGGER.debug("Gmail correlated-email search: message %s sender-excluded", mid)
+                    continue
+                payload = msg.get("payload", {})
+                html = await self.hass.async_add_executor_job(_extract_gmail_html, payload)
+                if not html:
+                    continue
+                results.append((mid, html))
+            except Exception as err:  # noqa: BLE001 — one bad message must not abort the search
+                _LOGGER.warning(
+                    "Gmail correlated-email search: failed to fetch message %s: %s", mid, err
+                )
+                continue
+
+        return results

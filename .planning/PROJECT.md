@@ -10,7 +10,7 @@ Shipment data from Shopify orders automatically appears in Home Assistant — wi
 
 ## Current Milestone: none active — v1.6.0-rc1 cut, next milestone not yet defined
 
-v1.5 shipped 2026-07-20 and closed 2026-07-28. Two independent, milestone-agnostic phases (35: MRG-05 grounding gate, 36: DHL/USPS carrier work) landed afterward from spike findings, and `manifest.json` was bumped to `1.6.0-rc1` (tag pushed, PR #45 merged). Run `/gsd-new-milestone` to define v1.6 scope, or continue ad-hoc spike-driven phases.
+v1.5 shipped 2026-07-20 and closed 2026-07-28. Three independent, milestone-agnostic phases (35: MRG-05 grounding gate, 36: DHL/USPS carrier work, 37: shipment name enrichment via correlated-email sweep) landed afterward from spike/explore findings, and `manifest.json` was bumped to `1.6.0-rc1` (tag pushed, PR #45 merged). Run `/gsd-new-milestone` to define v1.6 scope, or continue ad-hoc spike-driven phases.
 
 ## Current State: v1.5 Shared Pools & IMAP Parity — SHIPPED 2026-07-20
 
@@ -117,6 +117,7 @@ Single `Shop2ParcelHub` singleton shared across all Gmail/IMAP config entries: o
 - ✓ Global shared submitted-tracking-number dedup set across all accounts, union-merge migration — v1.5 (Phase 30, DEDUP-01..03)
 - ✓ Multi-account lifecycle: mixed Gmail/IMAP accounts; clean per-account add/remove; last account tears down shared singletons; global sensor re-home on owner-account removal — v1.5 (Phases 29, 34, LIFE-01..05/DIAG-01..03)
 - ✓ DHL carrier support (`_detect_dhl`/`_parse_dhl`) + USPS digest structural per-package sender extraction — v1.6-in-progress (Phase 36, spike-driven, not tied to a milestone requirement set)
+- ✓ Shipment name enrichment via correlated-email sweep: a 12h per-account sweep renames shipments still named with the raw tracking number by actively searching that shipment's mailbox for correlated emails (tracking number or new `order_number` field) and running matches through the existing Stage-2/MRG-05 naming path behind a patched contamination check; renames POST via the unofficial `edit-ajax.php` endpoint (scoped policy exception, `account_token` credential confined to `entry.data`) at lowest priority against the shared 20/day quota — v1.6-in-progress (Phase 37, explore-driven, not tied to a milestone requirement set)
 
 ### Active (v1.4+ backlog)
 
@@ -205,4 +206,4 @@ Single `Shop2ParcelHub` singleton shared across all Gmail/IMAP config entries: o
 5. Update Context with current state
 
 ---
-*Last updated: 2026-07-28 — v1.5 milestone closed and archived (shipped 2026-07-20, 24/24 requirements, audit passed). Phases 35 (MRG-05 grounding gate) and 36 (DHL/USPS carrier work) shipped independently afterward; manifest bumped to 1.6.0-rc1. No milestone currently active — run `/gsd-new-milestone` to define v1.6.*
+*Last updated: 2026-09-12 — Phase 37 (shipment name enrichment via correlated-email sweep) shipped independently, following phases 35 (MRG-05 grounding gate) and 36 (DHL/USPS carrier work); manifest bumped to 1.6.0-rc1. No milestone currently active — run `/gsd-new-milestone` to define v1.6.*

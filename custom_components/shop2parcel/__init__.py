@@ -28,7 +28,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 
 from .binary_sensor import OPERATIONAL_BINARY_SENSOR_UID_SUFFIXES
-from .const import DOMAIN
+from .const import DOMAIN, SWEEP_INTERVAL_HOURS
 from .diagnostic_sensor import DIAGNOSTIC_SENSOR_UID_SUFFIXES
 from .sensor import OPERATIONAL_SENSOR_UID_SUFFIXES
 
@@ -302,6 +302,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # (clean unload, exception from async_forward_entry_setups, or HA shutdown).
     # This prevents the orphaned-timer leak from async_track_time_interval.
     entry.async_on_unload(cancel_cleanup)
+
+    # Phase 37: schedule the twelve-hour rename sweep. Carries forward the same
+    # rationale as the cleanup-timer block above — registering through
+    # async_on_unload is what prevents the orphaned-timer leak on every teardown
+    # path, including an exception from async_forward_entry_setups and an HA
+    # shutdown. The sweep self-guards (an unconfigured account_token makes
+    # async_sweep_stuck_shipments a no-op), so this timer arms unconditionally
+    # rather than being gated here.
+    cancel_sweep = async_track_time_interval(
+        hass,
+        coordinator.async_sweep_stuck_shipments,
+        timedelta(hours=SWEEP_INTERVAL_HOURS),
+        name="shop2parcel_sweep",
+    )
+    entry.async_on_unload(cancel_sweep)
 
     # Phase 5 D-10: dict-shaped value — sensor.py / binary_sensor.py read ["coordinator"].
     # (hass.data[DOMAIN] itself was already initialized at the top of this

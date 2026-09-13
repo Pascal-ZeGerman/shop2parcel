@@ -338,7 +338,8 @@ async def test_shipments_saved_to_store_after_poll(
         "persisted_shipments must contain the shipment keyed by message_id"
     )
     entry = materialized["persisted_shipments"]["MSG_NEW"]
-    # custom_attributes is included since Phase 21 Plan 01; order_summary since LOH-SUMMARY.
+    # custom_attributes is included since Phase 21 Plan 01; order_summary since LOH-SUMMARY;
+    # order_number since Phase 37 (D-08) — asdict(shipment) serializes it automatically.
     assert entry == {
         "tracking_number": "TN_NEW",
         "carrier_name": "UPS",
@@ -347,6 +348,7 @@ async def test_shipments_saved_to_store_after_poll(
         "email_date": 1700000000,
         "custom_attributes": {},
         "order_summary": None,
+        "order_number": None,
     }, f"persisted_shipments entry has wrong fields: {entry!r}"
 
 
@@ -1278,6 +1280,350 @@ async def test_load_store_seeds_pending_shipments_from_restored(hass, mock_confi
 # coordinator's persisted_shipments. The scenario these two tests guarded against is
 # now structurally impossible on the coordinator — no coordinator-level timer exists
 # that could persist before the first poll.
+
+
+# ---------------------------------------------------------------------------
+# Phase 37 (D-08): order_number round-trip through _async_load_store
+# ---------------------------------------------------------------------------
+
+
+async def test_load_store_restores_order_number_in_persisted_shipments() -> None:
+    """Phase 37 (D-08): order_number serialised by asdict() must survive a store
+    round-trip through _async_load_store into _restored_shipments.
+
+    RED: fails until both ShipmentData reconstruction calls in _async_load_store
+    include ``order_number=entry.get("order_number") or None``.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {
+                "msg_with_order_number": {
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1001",
+                    "message_id": "msg_with_order_number",
+                    "email_date": 1700000000,
+                    "custom_attributes": {},
+                    "order_summary": "Amazon — Running shoes",
+                    "order_number": "113-5838173-8241820",
+                },
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert "msg_with_order_number" in coordinator._restored_shipments, (
+        "persisted_shipments entry with order_number must be loaded"
+    )
+    restored = coordinator._restored_shipments["msg_with_order_number"]
+    assert restored.order_number == "113-5838173-8241820", (
+        f"order_number must survive store round-trip; got {restored.order_number!r}"
+    )
+
+
+async def test_load_store_restores_order_number_in_pending_posts() -> None:
+    """Phase 37 (D-08): order_number must survive a store round-trip through
+    _async_load_store into _pending_posts (the drain path).
+
+    RED: fails until the pending_posts reconstruction block also includes
+    ``order_number=entry.get("order_number") or None``.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "pending_posts": {
+                "drain_key_order_number": {
+                    "tracking_number": "9400111899223397614437",
+                    "carrier_name": "USPS",
+                    "order_name": "#2002",
+                    "message_id": "drain_msg_order_number",
+                    "email_date": 1700000001,
+                    "custom_attributes": {},
+                    "order_summary": "Amazon — Running shoes",
+                    "order_number": "113-5838173-8241820",
+                },
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert "drain_key_order_number" in coordinator._pending_posts, (
+        "pending_posts entry with order_number must be loaded into _pending_posts"
+    )
+    pending = coordinator._pending_posts["drain_key_order_number"]
+    assert pending.order_number == "113-5838173-8241820", (
+        f"order_number must survive pending_posts round-trip; got {pending.order_number!r}"
+    )
+
+
+async def test_load_store_order_number_absent_defaults_to_none_persisted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 37 (D-08) backward-compat: a persisted_shipments entry written before
+    this phase has no order_number key and must load with order_number=None, with
+    no warning logged for that entry.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {
+                "pre_phase_37_entry": {
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1001",
+                    "message_id": "pre_phase_37_entry",
+                    "email_date": 1700000000,
+                    # no order_number key — pre-Phase-37 record
+                },
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
+        await coordinator._async_load_store()
+
+    assert "pre_phase_37_entry" in coordinator._restored_shipments, (
+        "Pre-Phase-37 entry without order_number must still be loaded (backward-compat)"
+    )
+    assert coordinator._restored_shipments["pre_phase_37_entry"].order_number is None, (
+        "Missing order_number key must default to None, not raise or skip the entry"
+    )
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert not warning_records, (
+        f"No warning should be logged for an entry merely missing order_number; got {warning_records}"
+    )
+
+
+async def test_load_store_order_number_empty_string_coerces_to_none() -> None:
+    """Phase 37 (D-08): an order_number value of "" loads as None, matching
+    order_summary's existing empty-string coercion (`entry.get(...) or None`).
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "persisted_shipments": {
+                "empty_order_number_entry": {
+                    "tracking_number": "1Z999AA10123456784",
+                    "carrier_name": "UPS",
+                    "order_name": "#1001",
+                    "message_id": "empty_order_number_entry",
+                    "email_date": 1700000000,
+                    "order_number": "",
+                },
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert coordinator._restored_shipments["empty_order_number_entry"].order_number is None, (
+        "Empty-string order_number must coerce to None, matching order_summary's precedent"
+    )
+
+
+def test_shipment_data_order_number_defaults_none_and_replace_works() -> None:
+    """Phase 37 (D-08): ShipmentData(...) without order_number still constructs
+    (non-breaking default), and dataclasses.replace() can set it without disturbing
+    other fields.
+    """
+    from dataclasses import replace
+
+    shipment = ShipmentData(
+        tracking_number="X",
+        carrier_name="UPS",
+        order_name="",
+        message_id="m",
+        email_date=0,
+    )
+    assert shipment.order_number is None, (
+        "order_number must default to None so all existing constructors remain valid"
+    )
+
+    renamed = replace(shipment, order_number="113-5838173-8241820")
+    assert renamed.order_number == "113-5838173-8241820"
+    assert renamed.tracking_number == shipment.tracking_number
+    assert renamed.carrier_name == shipment.carrier_name
+    assert renamed.order_name == shipment.order_name
+    assert renamed.message_id == shipment.message_id
+    assert renamed.email_date == shipment.email_date
+
+
+# ---------------------------------------------------------------------------
+# Phase 37: sweep_seen_message_ids load guards + snapshot serialization
+# ---------------------------------------------------------------------------
+
+
+async def test_fresh_coordinator_has_empty_sweep_seen_message_ids(hass, mock_config_entry):
+    """Phase 37: a freshly constructed coordinator exposes _sweep_seen_message_ids
+    as an empty dict (in-memory cache initialised in __init__)."""
+    mock_config_entry.add_to_hass(hass)
+    coord = GmailCoordinator(hass, mock_config_entry)
+    assert coord._sweep_seen_message_ids == {}
+
+
+async def test_load_store_restores_sweep_seen_message_ids_as_sets() -> None:
+    """Phase 37: a store containing sweep_seen_message_ids mapping a storage key to
+    a list of message ids must load into a dict of that key to a set of those ids.
+
+    RED: fails until _async_load_store hydrates self._sweep_seen_message_ids.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "sweep_seen_message_ids": {
+                "msg_a": ["m1", "m2"],
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert coordinator._sweep_seen_message_ids == {"msg_a": {"m1", "m2"}}, (
+        f"sweep_seen_message_ids must load as dict-of-sets; got {coordinator._sweep_seen_message_ids!r}"
+    )
+
+
+async def test_load_store_sweep_seen_message_ids_non_dict_resets_empty_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 37 / T-37-12: a top-level sweep_seen_message_ids value that is not a
+    dict (e.g. hand-edited into a list) must reset to an empty dict and log a
+    WARNING, mirroring the seen_message_ids / submitted_tracking_numbers guards.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "sweep_seen_message_ids": ["not", "a", "dict"],
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.shop2parcel.coordinator"):
+        await coordinator._async_load_store()
+
+    assert coordinator._sweep_seen_message_ids == {}, (
+        "Non-dict sweep_seen_message_ids must reset to an empty dict, not raise"
+    )
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("sweep_seen_message_ids" in r.message for r in warning_records), (
+        f"Expected a WARNING naming sweep_seen_message_ids; got {[r.message for r in warning_records]}"
+    )
+
+
+async def test_load_store_sweep_seen_message_ids_drops_malformed_entries() -> None:
+    """Phase 37 / T-37-12: within a loaded sweep_seen_message_ids dict, an entry
+    whose key is not a string or whose value is not a list is dropped rather than
+    raising — mirrors the per-entry defensive style used elsewhere in this loader.
+    """
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    mock_store = MagicMock()
+    mock_store.async_load = AsyncMock(
+        return_value={
+            "submitted_tracking_numbers": [],
+            "quota_exhausted_until": None,
+            "sweep_seen_message_ids": {
+                "good_key": ["m1"],
+                "bad_value": "not-a-list",
+                123: ["m2"],
+            },
+        }
+    )
+    mock_store.key = "shop2parcel.test_entry"
+    coordinator._store = mock_store
+    coordinator._hub = _make_bare_hub()
+    coordinator._quota_exhausted_until = None
+    coordinator._pending_shipments = {}
+    coordinator._restored_shipments = {}
+    coordinator._store_loaded = False
+
+    await coordinator._async_load_store()
+
+    assert coordinator._sweep_seen_message_ids == {"good_key": {"m1"}}, (
+        f"Malformed entries must be dropped; got {coordinator._sweep_seen_message_ids!r}"
+    )
+
+
+def test_store_snapshot_sweep_seen_message_ids_json_serializable() -> None:
+    """Phase 37: _store_snapshot() must emit sweep_seen_message_ids as a dict of
+    storage key to a JSON-serializable list — proving no raw set leaked into the
+    snapshot (Store serializes to JSON and cannot write a set)."""
+    import json
+
+    coordinator = Shop2ParcelCoordinator.__new__(Shop2ParcelCoordinator)
+    coordinator._pending_shipments = {}
+    coordinator._pending_posts = {}
+    coordinator._total_forwarded = 0
+    coordinator._last_forwarded_ts = None
+    coordinator._seen_message_ids = OrderedDict()
+    coordinator._sweep_seen_message_ids = {"msg_a": {"m1", "m2"}, "msg_b": {"m3"}}
+
+    snapshot = coordinator._store_snapshot()
+
+    assert json.dumps(snapshot), "snapshot must be JSON-serializable"
+    assert set(snapshot["sweep_seen_message_ids"]["msg_a"]) == {"m1", "m2"}
+    assert isinstance(snapshot["sweep_seen_message_ids"]["msg_a"], list)
 
 
 async def test_load_store_renormalizes_submitted_tracking_numbers(hass, mock_config_entry):

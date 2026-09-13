@@ -265,7 +265,12 @@ async def test_setup_entry_forwards_to_sensor_platforms(hass, mock_config_entry)
 
 
 async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_config_entry):
-    """D-08: async_track_time_interval is registered with timedelta(hours=24)."""
+    """D-08: async_track_time_interval is registered with timedelta(hours=24).
+
+    Phase 37 (T-37-33): async_track_time_interval is now called TWICE per setup
+    (cleanup, then sweep) — this test asserts on the FIRST call (cleanup); the
+    sweep timer's own interval/name is asserted by the sweep_timer tests below.
+    """
     from datetime import timedelta
 
     mock_config_entry.add_to_hass(hass)
@@ -284,12 +289,11 @@ async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_c
         mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
-        cancel_cb = MagicMock()
-        mock_track.return_value = cancel_cb
+        mock_track.side_effect = [MagicMock(), MagicMock()]
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    # Assert async_track_time_interval was called with the 24h timedelta
-    assert mock_track.called
-    call_args = mock_track.call_args
+    # Assert async_track_time_interval's FIRST call (cleanup) used the 24h timedelta
+    assert mock_track.call_count == 2
+    call_args = mock_track.call_args_list[0]
     # Positional args: (hass, callback, interval) — interval is positional in HA's signature
     interval_arg = (
         call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("interval")
@@ -300,7 +304,8 @@ async def test_setup_entry_registers_cleanup_task_with_24h_interval(hass, mock_c
 async def test_unload_entry_cancels_cleanup_task(hass, mock_config_entry):
     """D-10: async_unload_entry must invoke the cancel callback returned by async_track_time_interval."""
     mock_config_entry.add_to_hass(hass)
-    cancel_cb = MagicMock()
+    cancel_cleanup_cb = MagicMock()
+    cancel_sweep_cb = MagicMock()
     with (
         patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
         patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
@@ -309,7 +314,10 @@ async def test_unload_entry_cancels_cleanup_task(hass, mock_config_entry):
         patch(
             "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
         ) as mock_oauth,
-        patch("custom_components.shop2parcel.async_track_time_interval", return_value=cancel_cb),
+        patch(
+            "custom_components.shop2parcel.async_track_time_interval",
+            side_effect=[cancel_cleanup_cb, cancel_sweep_cb],
+        ),
     ):
         mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
         mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
@@ -317,9 +325,76 @@ async def test_unload_entry_cancels_cleanup_task(hass, mock_config_entry):
         mock_store_cls.return_value.async_save = AsyncMock()
         mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        cancel_cb.assert_not_called()  # Setup does NOT call cancel
+        cancel_cleanup_cb.assert_not_called()  # Setup does NOT call cancel
         await hass.config_entries.async_unload(mock_config_entry.entry_id)
-    cancel_cb.assert_called_once()
+    cancel_cleanup_cb.assert_called_once()
+
+
+async def test_setup_entry_registers_sweep_timer_with_12h_interval(hass, mock_config_entry):
+    """T-37-33 / D-06: a SECOND async_track_time_interval call registers the sweep
+    with SWEEP_INTERVAL_HOURS and a distinct timer name from the cleanup timer."""
+    from datetime import timedelta
+
+    from custom_components.shop2parcel.const import SWEEP_INTERVAL_HOURS
+
+    mock_config_entry.add_to_hass(hass)
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch("custom_components.shop2parcel.async_track_time_interval") as mock_track,
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        mock_track.side_effect = [MagicMock(), MagicMock()]
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    assert mock_track.call_count == 2
+    cleanup_call, sweep_call = mock_track.call_args_list
+    interval_arg = (
+        sweep_call.args[2] if len(sweep_call.args) >= 3 else sweep_call.kwargs.get("interval")
+    )
+    assert interval_arg == timedelta(hours=SWEEP_INTERVAL_HOURS)
+    sweep_name = sweep_call.kwargs.get("name")
+    assert sweep_name == "shop2parcel_sweep"
+    assert cleanup_call.kwargs.get("name") != sweep_name
+
+
+async def test_unload_entry_cancels_sweep_timer_and_cleanup_timer(hass, mock_config_entry):
+    """Unloading the entry cancels BOTH the cleanup and the sweep timer (T-37-33)."""
+    mock_config_entry.add_to_hass(hass)
+    cancel_cleanup_cb = MagicMock()
+    cancel_sweep_cb = MagicMock()
+    with (
+        patch("custom_components.shop2parcel.gmail_coordinator.GmailClient") as mock_gmail_cls,
+        patch("custom_components.shop2parcel.gmail_coordinator.ParcelAppClient"),
+        patch("custom_components.shop2parcel.gmail_coordinator.EmailParser"),
+        patch("custom_components.shop2parcel.coordinator.Shop2ParcelStore") as mock_store_cls,
+        patch(
+            "custom_components.shop2parcel.gmail_coordinator.config_entry_oauth2_flow"
+        ) as mock_oauth,
+        patch(
+            "custom_components.shop2parcel.async_track_time_interval",
+            side_effect=[cancel_cleanup_cb, cancel_sweep_cb],
+        ),
+    ):
+        mock_oauth.OAuth2Session.return_value.async_ensure_token_valid = AsyncMock()
+        mock_oauth.async_get_config_entry_implementation = AsyncMock(return_value=MagicMock())
+        mock_store_cls.return_value.async_load = AsyncMock(return_value=None)
+        mock_store_cls.return_value.async_save = AsyncMock()
+        mock_gmail_cls.return_value.async_list_messages = AsyncMock(return_value=([], "q after:0"))
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        cancel_cleanup_cb.assert_not_called()
+        cancel_sweep_cb.assert_not_called()
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
+    cancel_cleanup_cb.assert_called_once()
+    cancel_sweep_cb.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
