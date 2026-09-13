@@ -50,9 +50,11 @@ def test_derive_seed_domains() -> None:
     )
     assert domains == sorted(domains)
     assert "gmail.com" not in domains
-    assert "colamyhome.com" in domains
-    assert "17track.net" in domains
-    assert "usps.com" in domains
+    # codeql[py/incomplete-url-substring-sanitization]: list-membership assertion
+    # against `derive_seed_domains`' own output, not a URL/security boundary check.
+    assert "colamyhome.com" in domains  # lgtm[py/incomplete-url-substring-sanitization]
+    assert "17track.net" in domains  # lgtm[py/incomplete-url-substring-sanitization]
+    assert "usps.com" in domains  # lgtm[py/incomplete-url-substring-sanitization]
     assert "extra-carrier.example" in domains
     assert provenance["colamyhome.com"] == ["orders.colamyhome.com"]
     # deduped: two headers mapping to the same base domain collapse to one entry
@@ -163,7 +165,9 @@ def test_render_report_secret_leak_regression() -> None:
     report = sl.render_report(sections, meta)
     assert fake_password not in report
     assert fake_token not in report
-    assert "example.com" in report
+    # codeql[py/incomplete-url-substring-sanitization]: presence-in-rendered-report
+    # assertion, not a URL/security boundary check.
+    assert "example.com" in report  # lgtm[py/incomplete-url-substring-sanitization]
     assert "Your order has shipped" in report
 
 
@@ -186,7 +190,9 @@ def test_render_report_grouping_and_header() -> None:
     assert "No candidates." in report
     assert "Sender" in report and "Subject" in report and "Date" in report
     assert "last 12 months" in report
-    assert "x.com" in report
+    # codeql[py/incomplete-url-substring-sanitization]: presence-in-rendered-report
+    # assertion, not a URL/security boundary check.
+    assert "x.com" in report  # lgtm[py/incomplete-url-substring-sanitization]
     assert "Total candidates: 2" in report
     # Newest-first ordering within a section.
     idx1 = report.index("Subj 1")
