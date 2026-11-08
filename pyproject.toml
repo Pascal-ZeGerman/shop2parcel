@@ -19,7 +19,7 @@ dev = [
     "pytest-cov",
     "aioresponses",
     "pytest-homeassistant-custom-component",
-    "ruff==0.15.14",
+    "ruff==0.17.4",
     "mypy==2.1.0",
 ]
 
