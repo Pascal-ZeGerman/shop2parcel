@@ -38,7 +38,7 @@ jobs:
           fi
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2.3.2  # pinned to specific release tag (supply-chain safety)
+        uses: softprops/action-gh-release@v3.0.4  # pinned to specific release tag (supply-chain safety)
         with:
           generate_release_notes: true
           draft: false
